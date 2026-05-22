@@ -14,7 +14,7 @@
 注意:
     - 当前已有进程（如 PID 40453）不用停
     - 新 worker 会自动跳过已处理的股票
-    - 环境变量 SKIP_AKSHARE=1 自动生效
+    - 环境变量 FORCE_AKSHARE=1, DISABLE_YFINANCE_FALLBACK=1 自动生效
 """
 from __future__ import annotations
 
@@ -83,7 +83,8 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
 
     env = os.environ.copy()
     env["QUANT_DB_PATH"] = str(worker_db)
-    env["SKIP_AKSHARE"] = "1"
+    env["FORCE_AKSHARE"] = "1"
+    env["DISABLE_YFINANCE_FALLBACK"] = "1"
 
     cmd = [
         str(PYTHON),
@@ -126,8 +127,9 @@ def merge_worker_dbs(worker_ids: list[int]):
 
         worker_conn = sqlite3.connect(str(worker_db))
         worker_cursor = worker_conn.cursor()
+        # 查询时加入 data_source, updated_at
         worker_cursor.execute(
-            "SELECT ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude FROM daily_bars"
+            "SELECT ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at FROM daily_bars"
         )
         rows = worker_cursor.fetchall()
         worker_conn.close()
@@ -135,8 +137,8 @@ def merge_worker_dbs(worker_ids: list[int]):
         if rows:
             master_cursor.executemany(
                 """INSERT OR REPLACE INTO daily_bars
-                (ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             total_rows += len(rows)
@@ -176,7 +178,8 @@ def get_remaining_stocks() -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(description="并行全量数据回填")
-    parser.add_argument("--workers", type=int, default=4, help="并行进程数（默认 4）")
+    default_workers = min(os.cpu_count() or 2, 3)
+    parser.add_argument("--workers", type=int, default=default_workers, help=f"并行进程数（默认 {default_workers}，最大建议 3）")
     parser.add_argument("--merge-only", action="store_true", help="仅合并已有 worker 库，不启动新任务")
     parser.add_argument("--no-cleanup", action="store_true", help="合并后不删除临时库")
     args = parser.parse_args()
@@ -233,6 +236,21 @@ def main():
 
     if not args.no_cleanup:
         cleanup(worker_ids)
+
+    # 合并完成后，自动为所有新回填的股票计算技术指标
+    # 由于我们在 daily_pipeline.py 中实现了智能增量检测，这个任务会极快，只计算没有指标的股票！
+    print("\n📊 自动为新回填股票计算技术指标...")
+    try:
+        cmd_ind = [
+            str(PYTHON),
+            str(PIPELINE_DIR / "daily_pipeline.py"),
+            "--task", "update_indicators",
+            "--force",
+        ]
+        subprocess.run(cmd_ind, cwd=str(PIPELINE_DIR), check=True)
+        print("✅ 技术指标计算完成！")
+    except Exception as e:
+        print(f"⚠️ 技术指标计算失败: {e}")
 
     # 最终统计
     remaining_after = get_remaining_stocks()

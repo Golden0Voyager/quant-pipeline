@@ -25,9 +25,13 @@ import os
 import random
 import sqlite3
 import sys
+import socket
 import tempfile
 import time
 from datetime import datetime, timedelta
+
+# 设置全局套接字超时，防止网络悬挂/DNS阻塞导致 API 请求无限期挂起
+socket.setdefaulttimeout(15)
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -83,6 +87,16 @@ PER_STOCK_MIN_SLEEP = 0.3  # 单只股票最小间隔（秒）
 PER_STOCK_MAX_SLEEP = 0.8  # 单只股票最大间隔（秒）
 MAX_RETRY = 3             # 单只股票失败重试次数
 RETRY_DELAY = 5.0         # 重试间隔（秒）
+
+# 极致稳定模式支持（通过环境变量 ULTRA_SAFE=1 触发）
+if os.getenv("ULTRA_SAFE") == "1":
+    BATCH_SIZE = 30             # 批次规模降为 30（显著分摊单次爆破压力）
+    BATCH_SLEEP = 12.0          # 批次休息翻倍以上，进一步分摊流量压力
+    PER_STOCK_MIN_SLEEP = 0.8   # 单只股票间隔下限增加，拉长频次
+    PER_STOCK_MAX_SLEEP = 2.0   # 单只股票间隔上限增加，提升随机指纹隐蔽性
+    MAX_RETRY = 2               # 在极致稳定模式下，将单只股票重试次数限制为 2 次，防多层重试叠加
+    RETRY_DELAY = 3.0           # 重试等待时间缩短为 3s，提高降级流转速率
+
 PROGRESS_FLUSH_INTERVAL = 10  # 每处理 N 只股票刷新一次进度文件
 
 # ---------------------------------------------------------------------------
@@ -96,6 +110,8 @@ class AkShareMonitor:
 
     def __init__(self):
         self.records = self._load()
+        self.current_run_attempts = 0
+        self.current_run_consecutive_failures = 0
 
     def _load(self) -> List[Dict]:
         if not self.FILE.exists():
@@ -107,10 +123,21 @@ class AkShareMonitor:
             return []
 
     def _save(self):
-        with open(self.FILE, "w", encoding="utf-8") as f:
-            json.dump(self.records[-self.WINDOW_SIZE * 2 :], f, ensure_ascii=False)
+        try:
+            tmp = self.FILE.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.records[-self.WINDOW_SIZE * 2 :], f, ensure_ascii=False)
+            tmp.replace(self.FILE)
+        except Exception as e:
+            logger.warning(f"⚠️ 无法写入 AkShare 监控文件: {e}")
 
     def record(self, success: bool, symbol: str):
+        self.current_run_attempts += 1
+        if success:
+            self.current_run_consecutive_failures = 0
+        else:
+            self.current_run_consecutive_failures += 1
+
         self.records.append(
             {
                 "timestamp": datetime.now().isoformat(),
@@ -142,13 +169,26 @@ class AkShareMonitor:
             return 3.0
 
     def should_abort(self) -> Tuple[bool, str]:
-        rate = self.get_success_rate(window=20)
-        if rate < 0.2 and len(self.records) >= 20:
+        # 1. 刚启动还没有进行过真实请求，决不中断
+        if self.current_run_attempts == 0:
+            return False, ""
+
+        # 2. 连续失败快速中止（仅针对当前运行累计，避免历史数据导致启动即中止）
+        if self.current_run_consecutive_failures >= 3:
             return (
                 True,
-                f"AkShare 最近 20 次请求成功率仅 {rate*100:.0f}%，"
-                f"建议推迟到晚上 20:00+ 再跑",
+                f"AkShare 在本次运行中连续 {self.current_run_consecutive_failures} 次请求失败，网络可能彻底不可用或受到强力限流阻断，已自动中止。",
             )
+
+        # 3. 整体成功率低中止（需要当前运行至少尝试过 5 次，给网络恢复或新运行一个机会）
+        if self.current_run_attempts >= 5:
+            rate = self.get_success_rate(window=20)
+            if rate < 0.2 and len(self.records) >= 20:
+                return (
+                    True,
+                    f"AkShare 最近 20 次请求成功率仅 {rate*100:.0f}%，"
+                    f"建议推迟到晚上 20:00+ 再跑",
+                )
         return False, ""
 
     def log_status(self):
@@ -378,14 +418,23 @@ def update_bars(
                 if symbol not in failed_symbols:
                     failed_symbols.append(symbol)
 
-            # 记录 AkShare 稳定性
-            monitor.record(result == "success", symbol)
+            # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
+            if result != "skipped":
+                monitor.record(result == "success", symbol)
 
             last_symbol = symbol
+
+            # 如果触发了网络抓取（非 skipped），增加 0.1s 到 0.4s 的随机抖动延迟，平滑并发请求，避免被封锁
+            if result != "skipped":
+                time.sleep(random.uniform(0.1, 0.4))
 
             # 每 N 只股票刷新一次进度文件
             current_processed = success_count + skipped_count + failed_count
             if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
+                logger.info(
+                    f"  📥 进度: {current_processed}/{total} "
+                    f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
+                )
                 ProgressTracker.save(
                     task="update_bars",
                     last_symbol=last_symbol,
@@ -394,10 +443,11 @@ def update_bars(
                     failed_queue=failed_symbols,
                 )
 
-            # 动态调整限流：成功率低时增加休息时间
-            multiplier = monitor.get_recommended_sleep_multiplier()
-            sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP) * multiplier
-            time.sleep(sleep_time)
+            # 动态调整限流：成功率低时增加休息时间（只有真的抓取了新数据或失败时才休息，skipped不休息）
+            if result != "skipped":
+                multiplier = monitor.get_recommended_sleep_multiplier()
+                sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP) * multiplier
+                time.sleep(sleep_time)
 
             # 检查是否需要中止（AkShare 极度不稳定时）
             should_abort, abort_msg = monitor.should_abort()
@@ -487,6 +537,9 @@ def _update_single_bar(
             existing = db.get_daily_bars(symbol)
             if not existing.empty:
                 df_bars = loader.incremental_update(symbol, existing)
+                # 优化点：如果行数没变，说明已经是最新，无需重复保存，直接返回 skipped
+                if len(df_bars) == len(existing):
+                    return "skipped"
             else:
                 df_bars = loader.get_daily_bars(symbol)
 
@@ -525,28 +578,53 @@ def _update_single_bar(
 # ===========================================================================
 
 def update_indicators(
-    db: DatabaseInterface, engine: IndicatorEngineInterface
+    db: DatabaseInterface, engine: IndicatorEngineInterface, symbols_to_update: List[str] = None
 ) -> dict:
-    """为所有有日线数据的股票重新计算技术指标。"""
+    """为指定或所有需要更新的技术指标重新计算。"""
     logger.info("\n" + "=" * 60)
-    logger.info("📊 任务: 重新计算技术指标")
+    logger.info("📊 任务: 计算技术指标")
     logger.info("=" * 60)
 
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code")
-    symbols = [row[0] for row in cursor.fetchall()]
+    
+    if symbols_to_update is not None:
+        symbols = symbols_to_update
+        logger.info(f"🎯 指定模式：计算 {len(symbols)} 只股票的指标")
+    else:
+        # 智能探测模式：只计算未计算过，或者有新行情数据的股票
+        logger.info("🔍 智能探测需要更新指标的股票...")
+        cursor.execute("""
+            SELECT d.ts_code
+            FROM (
+                SELECT ts_code, MAX(trade_date) as max_bar_date
+                FROM daily_bars
+                GROUP BY ts_code
+            ) d
+            LEFT JOIN (
+                SELECT ts_code, MAX(trade_date) as max_ind_date
+                FROM indicators
+                GROUP BY ts_code
+            ) i ON d.ts_code = i.ts_code
+            WHERE i.max_ind_date IS NULL OR d.max_bar_date > i.max_ind_date
+            ORDER BY d.ts_code
+        """)
+        symbols = [row[0] for row in cursor.fetchall()]
+        logger.info(f"💡 探测完成：共有 {len(symbols)} 只股票需要更新/计算指标")
+
     conn.close()
 
     total = len(symbols)
-    logger.info(f"📊 共 {total} 只股票需计算指标")
+    if total == 0:
+        logger.info("✅ 所有股票的指标均已是最新，无需计算")
+        return {"success": 0, "failed": 0, "insufficient": 0, "total": 0}
 
     success_count = 0
     failed_count = 0
     insufficient_count = 0
 
     for i, symbol in enumerate(symbols, 1):
-        if i % 50 == 0 or i == total:
+        if i % 100 == 0 or i == total:
             logger.info(f"  进度: {i}/{total} ({100 * i // total}%)")
 
         try:
@@ -805,6 +883,26 @@ def health_check(db: DatabaseInterface) -> dict:
         report_lines.append(f"\n  技术指标完整率: {valid_ind}/{total_ind} ({100-null_pct:.1f}%)")
         if null_pct > 20:
             issues.append(f"技术指标空值率过高: {null_pct:.1f}%")
+    # ── 碎片空间检查 ──
+    try:
+        cursor.execute("PRAGMA page_count")
+        page_count = cursor.fetchone()[0]
+        cursor.execute("PRAGMA page_size")
+        page_size = cursor.fetchone()[0]
+        cursor.execute("PRAGMA freelist_count")
+        freelist_count = cursor.fetchone()[0]
+
+        total_size = page_count * page_size
+        free_size = freelist_count * page_size
+        free_pct = 100 * freelist_count / page_count if page_count else 0
+        
+        if free_size > 10 * 1024 * 1024 and free_pct > 20:
+            issues.append(
+                f"数据库存在较多碎片空间 (约 {free_size / (1024*1024):.2f} MB, "
+                f"占比 {free_pct:.1f}%)，建议运行 `python validate_and_vacuum.py --vacuum` 进行压缩整理"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️  无法读取数据库 Page 状态: {e}")
 
     conn.close()
 
@@ -853,8 +951,9 @@ def run_all(
     results = {}
     results["bars"] = update_bars(db, loader, resume=resume)
 
-    if results["bars"]["success"] > 0:
-        results["indicators"] = update_indicators(db, engine)
+    # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
+    # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
+    results["indicators"] = update_indicators(db, engine)
 
     results["fundamentals"] = update_fundamentals(db, loader)
     results["fund_flow"] = update_fund_flow(db, loader)

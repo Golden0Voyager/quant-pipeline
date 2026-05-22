@@ -15,7 +15,7 @@ A股量化数据自动化抓取管道，支持 AkShare / yfinance 双源，具�
 | `pipe-daemon` | 启动守护进程（崩溃自动重启 + 自动 resume） |
 | `pipe-stop` | 停止守护进程 |
 | `pipe-logs` | 查看最近日志 |
-| `pipe-mon` | 实时监控运行中的进程和日志 |
+| `pipe-status` | 实时监控运行中的进程和日志 |
 
 ---
 
@@ -66,7 +66,7 @@ pipe-stop
 
 ```bash
 pipe-logs    # 查看最近日志
-pipe-mon     # 实时监控（按 Ctrl+C 退出）
+pipe-status     # 实时监控（按 Ctrl+C 退出）
 ```
 
 ---

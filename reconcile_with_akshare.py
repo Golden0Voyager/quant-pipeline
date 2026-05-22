@@ -251,11 +251,22 @@ def compare_and_repair(
             recent_diff = (recent["close_db"] - recent["close_ak"]).abs()
             if recent_diff.max() <= CLOSE_DIFF_THRESHOLD:
                 elapsed = time.time() - t0
+                backfilled = 0
+                if backfill_source and has_null_source and not dry_run:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE daily_bars SET data_source = 'akshare', updated_at = ? WHERE ts_code = ? AND data_source IS NULL",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol)
+                    )
+                    backfilled = cursor.rowcount
+                    conn.commit()
+                    logger.info(f"  {symbol}: 已成功回填 {backfilled} 行 data_source 为 'akshare'")
+
                 return {
                     "total": len(db_df),
                     "matched": len(merged),
                     "diff": 0,
-                    "fixed": backfilled if (backfill_source and has_null_source and not dry_run) else 0,
+                    "fixed": backfilled,
                     "skipped": 0,
                     "failed": 0,
                     "elapsed": elapsed,
