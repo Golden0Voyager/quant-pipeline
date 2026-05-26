@@ -4,3 +4,6 @@ __pycache__/
 # Skill-generated analysis artifacts
 .understand-anything/
 .codegraph/
+
+# Vite dependency pre-bundling cache
+.vite/
