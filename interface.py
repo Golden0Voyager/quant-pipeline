@@ -51,6 +51,38 @@ class DatabaseInterface(Protocol):
         """保存资金流向数据。"""
         ...
 
+    def save_margin_trading(self, symbol: str, data: Dict[str, Any]) -> None:
+        """保存融资融券数据。"""
+        ...
+
+    def get_margin_trading(self, symbol: str, date: str = None) -> Optional[Dict]:
+        """获取融资融券数据。"""
+        ...
+
+    def save_dragon_tiger(self, symbol: str, data: Dict[str, Any]) -> None:
+        """保存龙虎榜数据。"""
+        ...
+
+    def get_dragon_tiger(self, symbol: str, date: str = None) -> Optional[Dict]:
+        """获取龙虎榜数据。"""
+        ...
+
+    def save_block_trade(self, symbol: str, data: Dict[str, Any]) -> None:
+        """保存大宗交易数据。"""
+        ...
+
+    def get_block_trade(self, symbol: str, date: str = None) -> Optional[Dict]:
+        """获取大宗交易数据。"""
+        ...
+
+    def save_sector_fund_flow(self, sector_name: str, data: Dict[str, Any]) -> None:
+        """保存板块资金流向数据。"""
+        ...
+
+    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> Optional[Dict]:
+        """获取板块资金流向数据。"""
+        ...
+
 
 # ===========================================================================
 # 数据加载器接口
