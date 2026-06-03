@@ -127,6 +127,7 @@ monitor_pipeline() {
 daemon_run() {
     local task_args="$1"
     local pidfile="/tmp/smartmoney_daemon.pid"
+    local LOG_DIR="$HOME/Code/data/quant_data/logs"
     local logfile="$LOG_DIR/daemon.log"
 
     if [ -f "$pidfile" ]; then
