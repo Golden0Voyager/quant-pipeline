@@ -48,6 +48,30 @@ class SmartMoneyDBProvider:
     def save_fund_flow(self, symbol: str, data: Dict[str, Any]) -> None:
         self._db.save_fund_flow(symbol, data)
 
+    def save_margin_trading(self, symbol: str, data: Dict[str, Any]) -> None:
+        self._db.save_margin_trading(symbol, data)
+
+    def get_margin_trading(self, symbol: str, date: str = None) -> Optional[Dict]:
+        return self._db.get_margin_trading(symbol, date)
+
+    def save_dragon_tiger(self, symbol: str, data: Dict[str, Any]) -> None:
+        self._db.save_dragon_tiger(symbol, data)
+
+    def get_dragon_tiger(self, symbol: str, date: str = None) -> Optional[Dict]:
+        return self._db.get_dragon_tiger(symbol, date)
+
+    def save_block_trade(self, symbol: str, data: Dict[str, Any]) -> None:
+        self._db.save_block_trade(symbol, data)
+
+    def get_block_trade(self, symbol: str, date: str = None) -> Optional[Dict]:
+        return self._db.get_block_trade(symbol, date)
+
+    def save_sector_fund_flow(self, sector_name: str, data: Dict[str, Any]) -> None:
+        self._db.save_sector_fund_flow(sector_name, data)
+
+    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> Optional[Dict]:
+        return self._db.get_sector_fund_flow(sector_name, date)
+
 
 # ===========================================================================
 # DataLoader Provider
