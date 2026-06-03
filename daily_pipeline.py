@@ -47,6 +47,12 @@ from interface import (
     IndicatorEngineInterface,
 )
 
+# 新数据维度直接调用 akshare（中台批量抓取）
+try:
+    import akshare as ak
+except ImportError:
+    ak = None  # type: ignore[assignment]
+
 # ---------------------------------------------------------------------------
 # 配置：数据库路径（环境变量优先）
 # ---------------------------------------------------------------------------
@@ -767,7 +773,267 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
 
 
 # ===========================================================================
-# 任务 5: 重试失败队列
+# 任务 5: 批量获取融资融券数据
+# ===========================================================================
+
+def update_margin_trading(db: DatabaseInterface) -> dict:
+    """批量获取昨日全市场融资融券数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📈 任务: 批量获取融资融券")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    saved = 0
+    total = 0
+
+    for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
+        try:
+            df = fetcher(date=yesterday)
+            if df is None or df.empty:
+                logger.warning(f"⚠️  {exchange.upper()} 融资融券无数据")
+                continue
+            total += len(df)
+            for _, row in df.iterrows():
+                try:
+                    code = str(row.get("标的证券代码" if exchange == "sh" else "证券代码", "")).strip()
+                    if not code:
+                        continue
+                    data = {
+                        "trade_date": yesterday,
+                        "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
+                        "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
+                        "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
+                        "short_balance": row.get("融券余量" if exchange == "sh" else "融券余量"),
+                        "short_sell": row.get("融券卖出量" if exchange == "sh" else "融券卖出量"),
+                        "short_repay": row.get("融券偿还量" if exchange == "sh" else None),
+                        "total_balance": row.get("融资融券余额"),
+                        "data_source": "akshare",
+                    }
+                    db.save_margin_trading(code, data)
+                    saved += 1
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"❌ {exchange.upper()} 融资融券获取失败: {e}")
+
+    logger.info(f"✅ 融资融券保存完成: {saved}/{total}")
+    return {"saved": saved, "total": total}
+
+
+# ===========================================================================
+# 任务 6: 批量获取龙虎榜数据
+# ===========================================================================
+
+def update_dragon_tiger(db: DatabaseInterface) -> dict:
+    """批量获取昨日龙虎榜数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🐉 任务: 批量获取龙虎榜")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    try:
+        df = ak.stock_lhb_detail_em(start_date=yesterday, end_date=yesterday)
+        if df is None or df.empty:
+            logger.warning("⚠️  龙虎榜无数据")
+            return {"saved": 0, "total": 0}
+
+        saved = 0
+        for _, row in df.iterrows():
+            try:
+                code = str(row.get("代码", "")).strip()
+                if not code:
+                    continue
+                data = {
+                    "trade_date": yesterday,
+                    "close_price": row.get("收盘价"),
+                    "pct_change": row.get("涨跌幅"),
+                    "net_buy_amount": row.get("龙虎榜净买额"),
+                    "buy_amount": row.get("龙虎榜买入额"),
+                    "sell_amount": row.get("龙虎榜卖出额"),
+                    "turnover_rate": row.get("换手率"),
+                    "market_cap": row.get("流通市值"),
+                    "reason": row.get("上榜原因", ""),
+                    "data_source": "akshare",
+                }
+                db.save_dragon_tiger(code, data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 龙虎榜保存完成: {saved}/{len(df)}")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 龙虎榜获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 7: 批量获取大宗交易数据
+# ===========================================================================
+
+def update_block_trade(db: DatabaseInterface) -> dict:
+    """批量获取昨日大宗交易数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📦 任务: 批量获取大宗交易")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=yesterday, end_date=yesterday)
+        if df is None or df.empty:
+            logger.warning("⚠️  大宗交易无数据")
+            return {"saved": 0, "total": 0}
+
+        saved = 0
+        for _, row in df.iterrows():
+            try:
+                code = str(row.get("证券代码", "")).strip()
+                if not code:
+                    continue
+                data = {
+                    "trade_date": yesterday,
+                    "deal_price": row.get("成交价"),
+                    "close_price": row.get("收盘价"),
+                    "discount_rate": row.get("折溢率"),
+                    "volume": row.get("成交量"),
+                    "amount": row.get("成交额"),
+                    "buyer_branch": row.get("买方营业部", ""),
+                    "seller_branch": row.get("卖方营业部", ""),
+                    "data_source": "akshare",
+                }
+                db.save_block_trade(code, data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 大宗交易保存完成: {saved}/{len(df)}")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 大宗交易获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 8: 批量获取板块资金流向
+# ===========================================================================
+
+def update_sector_fund_flow(db: DatabaseInterface) -> dict:
+    """批量获取板块资金流向并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🏭 任务: 批量获取板块资金流向")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        df = ak.stock_sector_fund_flow_hist(symbol="行业资金流")
+        if df is None or df.empty:
+            logger.warning("⚠️  板块资金流向无数据")
+            return {"saved": 0, "total": 0}
+
+        saved = 0
+        for _, row in df.iterrows():
+            try:
+                sector = str(row.get("行业", "")).strip()
+                if not sector:
+                    continue
+                data = {
+                    "trade_date": yesterday,
+                    "main_net_inflow": row.get("主力净流入-净额"),
+                    "main_net_inflow_pct": row.get("主力净流入-净占比"),
+                    "super_large_net_inflow": row.get("超大单净流入-净额"),
+                    "large_net_inflow": row.get("大单净流入-净额"),
+                    "medium_net_inflow": row.get("中单净流入-净额"),
+                    "small_net_inflow": row.get("小单净流入-净额"),
+                    "data_source": "akshare",
+                }
+                db.save_sector_fund_flow(sector, data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 板块资金流向保存完成: {saved}/{len(df)}")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 板块资金流向获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 9: 批量获取股东户数（季度）
+# ===========================================================================
+
+def update_shareholder_count(db: DatabaseInterface) -> dict:
+    """批量获取最新季度股东户数并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("👥 任务: 批量获取股东户数")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    # 计算最近的报告期（0331, 0630, 0930, 1231）
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    if month >= 11:
+        period = f"{year}0930"
+    elif month >= 8:
+        period = f"{year}0630"
+    elif month >= 5:
+        period = f"{year}0331"
+    else:
+        period = f"{year - 1}0930"
+
+    try:
+        df = ak.stock_hold_num_cninfo(date=period)
+        if df is None or df.empty:
+            logger.warning(f"⚠️  股东户数无数据 ({period})")
+            return {"saved": 0, "total": 0}
+
+        saved = 0
+        for _, row in df.iterrows():
+            try:
+                code = str(row.get("证券代码", "")).strip()
+                if not code:
+                    continue
+                data = {
+                    "report_date": period,
+                    "holder_count": row.get("本期股东人数"),
+                    "holder_count_change_pct": row.get("股东人数增幅"),
+                    "avg_shares_per_holder": row.get("本期人均持股数量"),
+                    "data_source": "akshare",
+                }
+                db.save_shareholder_count(code, data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 股东户数保存完成: {saved}/{len(df)} ({period})")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 股东户数获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 10: 重试失败队列
 # ===========================================================================
 
 def retry_failed(
@@ -836,6 +1102,11 @@ def health_check(db: DatabaseInterface) -> dict:
         ("fundamentals", "基本面数据"),
         ("chip_distribution", "筹码分布"),
         ("historical_valuation", "历史估值"),
+        ("margin_trading", "融资融券"),
+        ("dragon_tiger", "龙虎榜"),
+        ("block_trade", "大宗交易"),
+        ("sector_fund_flow", "板块资金流"),
+        ("shareholder_count", "股东户数"),
     ]
 
     for table, label in tables:
@@ -860,11 +1131,26 @@ def health_check(db: DatabaseInterface) -> dict:
     latest_flow = cursor.fetchone()[0]
     cursor.execute("SELECT MAX(trade_date) FROM fundamentals")
     latest_fund = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(trade_date) FROM margin_trading")
+    latest_margin = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(trade_date) FROM dragon_tiger")
+    latest_lhb = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(trade_date) FROM block_trade")
+    latest_block = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(trade_date) FROM sector_fund_flow")
+    latest_sector = cursor.fetchone()[0]
+    cursor.execute("SELECT MAX(report_date) FROM shareholder_count")
+    latest_holder = cursor.fetchone()[0]
 
     report_lines.append(f"\n  最新日线日期: {latest_bar}")
     report_lines.append(f"  最新指标日期: {latest_ind}")
     report_lines.append(f"  最新资金流日期: {latest_flow}")
     report_lines.append(f"  最新估值日期: {latest_fund}")
+    report_lines.append(f"  最新融资融券日期: {latest_margin}")
+    report_lines.append(f"  最新龙虎榜日期: {latest_lhb}")
+    report_lines.append(f"  最新大宗交易日期: {latest_block}")
+    report_lines.append(f"  最新板块资金流日期: {latest_sector}")
+    report_lines.append(f"  最新股东户数报告期: {latest_holder}")
 
     if latest_bar != today:
         issues.append(f"日线数据未更新到最新: {latest_bar} (今天是 {today})")
@@ -957,6 +1243,11 @@ def run_all(
 
     results["fundamentals"] = update_fundamentals(db, loader)
     results["fund_flow"] = update_fund_flow(db, loader)
+    results["margin_trading"] = update_margin_trading(db)
+    results["dragon_tiger"] = update_dragon_tiger(db)
+    results["block_trade"] = update_block_trade(db)
+    results["sector_fund_flow"] = update_sector_fund_flow(db)
+    results["shareholder_count"] = update_shareholder_count(db)
     results["retry"] = retry_failed(db, loader)
     results["health"] = health_check(db)
 
@@ -983,6 +1274,11 @@ def main():
             "update_indicators",
             "update_fundamentals",
             "update_fund_flow",
+            "update_margin_trading",
+            "update_dragon_tiger",
+            "update_block_trade",
+            "update_sector_fund_flow",
+            "update_shareholder_count",
             "retry",
             "health_check",
         ],
@@ -1025,6 +1321,16 @@ def main():
         update_fundamentals(db, loader)
     elif args.task == "update_fund_flow":
         update_fund_flow(db, loader)
+    elif args.task == "update_margin_trading":
+        update_margin_trading(db)
+    elif args.task == "update_dragon_tiger":
+        update_dragon_tiger(db)
+    elif args.task == "update_block_trade":
+        update_block_trade(db)
+    elif args.task == "update_sector_fund_flow":
+        update_sector_fund_flow(db)
+    elif args.task == "update_shareholder_count":
+        update_shareholder_count(db)
     elif args.task == "retry":
         retry_failed(db, loader)
     elif args.task == "health_check":
