@@ -401,6 +401,20 @@ def update_bars(
     # 初始化 AkShare 稳定性监控
     monitor = AkShareMonitor()
 
+    # ── 自选股全量拉取初始化 ──
+    watchlist_symbols = set()
+    backfilled_symbols = set()
+    backfill_file = SHARED_DATA_DIR / "watchlist_backfilled.txt"
+    try:
+        watchlist_df = db.watchlist_get_all()
+        if not watchlist_df.empty:
+            watchlist_symbols = set(watchlist_df["ts_code"].tolist())
+        if backfill_file.exists():
+            with open(backfill_file, "r", encoding="utf-8") as f:
+                backfilled_symbols = set([line.strip() for line in f if line.strip()])
+    except Exception as e:
+        logger.warning(f"⚠️ 初始化自选股拉取逻辑失败: {e}")
+
     for batch_idx in range(0, remaining_total, BATCH_SIZE):
         batch = remaining_codes[batch_idx : batch_idx + BATCH_SIZE]
         batch_num = batch_idx // BATCH_SIZE + 1
@@ -414,7 +428,14 @@ def update_bars(
         )
 
         for symbol in batch:
-            result = _update_single_bar(db, loader, symbol)
+            result = _update_single_bar(
+                db,
+                loader,
+                symbol,
+                watchlist_symbols=watchlist_symbols,
+                backfilled_symbols=backfilled_symbols,
+                backfill_file=backfill_file,
+            )
             if result == "success":
                 success_count += 1
             elif result == "skipped":
@@ -529,17 +550,76 @@ def update_bars(
 
 
 def _update_single_bar(
-    db: DatabaseInterface, loader: DataLoaderInterface, symbol: str
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    symbol: str,
+    watchlist_symbols: set[str] | None = None,
+    backfilled_symbols: set[str] | None = None,
+    backfill_file: Path | None = None,
 ) -> str:
     """更新单只股票的日线数据，带重试。
 
     数据质量规则：
     - 优先使用 AkShare 数据
+    - 如果是自选股，且尚未进行全量拉取，则拉取全量历史数据
     - 如果新增/全部数据来自 yfinance，跳过保存（yfinance 仅作为运行时临时 fallback，
       不应写入 quant_core.db 这个黄金数据源）
     """
+    # ── 自选股及全量拉取逻辑初始化 ──
+    if watchlist_symbols is None:
+        try:
+            watchlist_df = db.watchlist_get_all()
+            watchlist_symbols = set(watchlist_df["ts_code"].tolist()) if not watchlist_df.empty else set()
+        except Exception:
+            watchlist_symbols = set()
+
+    if backfill_file is None:
+        backfill_file = SHARED_DATA_DIR / "watchlist_backfilled.txt"
+
+    if backfilled_symbols is None:
+        try:
+            if backfill_file.exists():
+                with open(backfill_file, "r", encoding="utf-8") as f:
+                    backfilled_symbols = set([line.strip() for line in f if line.strip()])
+            else:
+                backfilled_symbols = set()
+        except Exception:
+            backfilled_symbols = set()
+
+    is_watchlist = watchlist_symbols and symbol in watchlist_symbols
+    is_backfilled = backfilled_symbols and symbol in backfilled_symbols
+
     for attempt in range(MAX_RETRY):
         try:
+            # 1. 自选股且尚未全量拉取：执行从 19900101 开始的全量抓取
+            if is_watchlist and not is_backfilled:
+                logger.info(f"🚀 {symbol} 属于自选股且尚未进行全量拉取，准备下载 1990 年起的完整历史K线...")
+                df_bars = loader.get_daily_bars(symbol, start_date="19900101")
+                if not df_bars.empty:
+                    # 检查是否全部是 yfinance，如果是则不保存以防污染
+                    if 'data_source' in df_bars.columns:
+                        src_values = df_bars['data_source'].dropna().unique()
+                        if len(src_values) == 1 and src_values[0] == 'yfinance':
+                            logger.warning(f"  ⚠️ {symbol} 自选股全量拉取全部来自 yfinance，跳过保存")
+                            return "failed"
+                    
+                    db.save_daily_bars(symbol, df_bars)
+                    logger.info(f"✅ {symbol} 自选股全量历史K线拉取并保存成功，共 {len(df_bars)} 条")
+                    
+                    # 记录已完成全量回填
+                    backfilled_symbols.add(symbol)
+                    try:
+                        with open(backfill_file, "a", encoding="utf-8") as f:
+                            f.write(f"{symbol}\n")
+                    except Exception as fe:
+                        logger.warning(f"⚠️ 无法更新自选股全量标记文件 {backfill_file}: {fe}")
+                    
+                    return "success"
+                else:
+                    logger.warning(f"⚠️ {symbol} 自选股全量拉取返回空数据")
+                    return "failed"
+
+            # 2. 正常增量/全量拉取路径
             existing = db.get_daily_bars(symbol)
             if not existing.empty:
                 df_bars = loader.incremental_update(symbol, existing)
@@ -547,6 +627,7 @@ def _update_single_bar(
                 if len(df_bars) == len(existing):
                     return "skipped"
             else:
+                # 正常非自选股的全量拉取走默认的 3 年配置
                 df_bars = loader.get_daily_bars(symbol)
 
             if df_bars.empty:
