@@ -72,6 +72,10 @@ class SmartMoneyDBProvider:
     def get_sector_fund_flow(self, sector_name: str, date: str = None) -> Optional[Dict]:
         return self._db.get_sector_fund_flow(sector_name, date)
 
+    def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
+        return self._db.watchlist_get_all(status)
+
+
 
 # ===========================================================================
 # DataLoader Provider
