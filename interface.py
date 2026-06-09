@@ -83,6 +83,11 @@ class DatabaseInterface(Protocol):
         """获取板块资金流向数据。"""
         ...
 
+    def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
+        """获取所有自选股列表。"""
+        ...
+
+
 
 # ===========================================================================
 # 数据加载器接口
