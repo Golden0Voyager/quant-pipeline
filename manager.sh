@@ -56,8 +56,8 @@ start_agents() {
     launchctl load "$HOME/Library/LaunchAgents/com.smartmoney.update.plist" 2>/dev/null || true
     launchctl load "$HOME/Library/LaunchAgents/com.smartmoney.healthcheck.plist" 2>/dev/null || true
     echo -e "${GREEN}✅ 定时任务已启动${NC}"
-    echo "   • 每天 15:35 自动更新数据"
-    echo "   • 每天 16:30 自动健康检查"
+    echo "   • 每天 15:30 自动更新数据"
+    echo "   • 每天 18:00 自动健康检查"
 }
 
 stop_agents() {
