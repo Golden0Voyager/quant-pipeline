@@ -27,8 +27,8 @@ build-backend = "hatchling.build"
 packages = ["quant_pipeline"]
 
 [tool.ruff]
-line-length = 100
-target-version = "py311"
+line-length = 120
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
