@@ -7,3 +7,10 @@ __pycache__/
 
 # Vite dependency pre-bundling cache
 .vite/
+
+# Test coverage cache
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
