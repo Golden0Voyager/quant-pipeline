@@ -23,17 +23,16 @@ import json
 import logging
 import os
 import random
+import socket
 import sqlite3
 import sys
-import socket
-import tempfile
 import time
 from datetime import datetime, timedelta
 
 # 设置全局套接字超时，防止网络悬挂/DNS阻塞导致 API 请求无限期挂起
 socket.setdefaulttimeout(15)
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any
 
 # 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
 _CODE_DIR = os.path.expanduser("~/Code")
@@ -41,10 +40,10 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from interface import (
-    ProviderFactory,
     DatabaseInterface,
     DataLoaderInterface,
     IndicatorEngineInterface,
+    ProviderFactory,
 )
 
 # 新数据维度直接调用 akshare（中台批量抓取）
@@ -119,11 +118,11 @@ class AkShareMonitor:
         self.current_run_attempts = 0
         self.current_run_consecutive_failures = 0
 
-    def _load(self) -> List[Dict]:
+    def _load(self) -> list[dict]:
         if not self.FILE.exists():
             return []
         try:
-            with open(self.FILE, "r", encoding="utf-8") as f:
+            with open(self.FILE, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             return []
@@ -174,7 +173,7 @@ class AkShareMonitor:
         else:
             return 3.0
 
-    def should_abort(self) -> Tuple[bool, str]:
+    def should_abort(self) -> tuple[bool, str]:
         # 1. 刚启动还没有进行过真实请求，决不中断
         if self.current_run_attempts == 0:
             return False, ""
@@ -228,7 +227,7 @@ class ProgressTracker:
         last_symbol: str,
         processed: int,
         total: int,
-        failed_queue: List[str],
+        failed_queue: list[str],
     ) -> None:
         """原子写入进度文件。"""
         data = {
@@ -249,12 +248,12 @@ class ProgressTracker:
         tmp.replace(cls.FILE)
 
     @classmethod
-    def load(cls) -> Optional[Dict[str, Any]]:
+    def load(cls) -> dict[str, Any] | None:
         """读取进度文件。"""
         if not cls.FILE.exists():
             return None
         try:
-            with open(cls.FILE, "r", encoding="utf-8") as f:
+            with open(cls.FILE, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             logger.warning("⚠️  进度文件损坏，将从头开始")
@@ -269,14 +268,14 @@ class ProgressTracker:
         # 同时清理 retry_queue.txt（如果存在且为空则删除）
         retry_file = SHARED_DATA_DIR / "retry_queue.txt"
         if retry_file.exists():
-            with open(retry_file, "r", encoding="utf-8") as f:
+            with open(retry_file, encoding="utf-8") as f:
                 content = f.read().strip()
             if not content:
                 retry_file.unlink()
                 logger.info("🗑️  retry_queue.txt 已清理")
 
     @classmethod
-    def find_resume_index(cls, stock_codes: List[str], last_symbol: str) -> int:
+    def find_resume_index(cls, stock_codes: list[str], last_symbol: str) -> int:
         """
         找到断点位置。返回应该从哪个索引开始处理。
         如果 last_symbol 不在列表中，返回 0（从头开始）。
@@ -377,13 +376,13 @@ def update_bars(
     success_count = progress.get("processed", 0) if progress else 0
     failed_count = 0
     skipped_count = 0
-    failed_symbols: List[str] = progress.get("failed_queue", []) if progress else []
+    failed_symbols: list[str] = progress.get("failed_queue", []) if progress else []
     last_symbol = ""
 
     # ── 加载 retry_queue.txt 中之前失败的股票 ──
     retry_file = SHARED_DATA_DIR / "retry_queue.txt"
     if retry_file.exists():
-        with open(retry_file, "r", encoding="utf-8") as f:
+        with open(retry_file, encoding="utf-8") as f:
             retry_symbols = [line.strip() for line in f if line.strip()]
         if retry_symbols:
             # 去重合并到 failed_symbols
@@ -410,8 +409,8 @@ def update_bars(
         if not watchlist_df.empty:
             watchlist_symbols = set(watchlist_df["ts_code"].tolist())
         if backfill_file.exists():
-            with open(backfill_file, "r", encoding="utf-8") as f:
-                backfilled_symbols = set([line.strip() for line in f if line.strip()])
+            with open(backfill_file, encoding="utf-8") as f:
+                backfilled_symbols = {line.strip() for line in f if line.strip()}
     except Exception as e:
         logger.warning(f"⚠️ 初始化自选股拉取逻辑失败: {e}")
 
@@ -579,8 +578,8 @@ def _update_single_bar(
     if backfilled_symbols is None:
         try:
             if backfill_file.exists():
-                with open(backfill_file, "r", encoding="utf-8") as f:
-                    backfilled_symbols = set([line.strip() for line in f if line.strip()])
+                with open(backfill_file, encoding="utf-8") as f:
+                    backfilled_symbols = {line.strip() for line in f if line.strip()}
             else:
                 backfilled_symbols = set()
         except Exception:
@@ -602,10 +601,10 @@ def _update_single_bar(
                         if len(src_values) == 1 and src_values[0] == 'yfinance':
                             logger.warning(f"  ⚠️ {symbol} 自选股全量拉取全部来自 yfinance，跳过保存")
                             return "failed"
-                    
+
                     db.save_daily_bars(symbol, df_bars)
                     logger.info(f"✅ {symbol} 自选股全量历史K线拉取并保存成功，共 {len(df_bars)} 条")
-                    
+
                     # 记录已完成全量回填
                     backfilled_symbols.add(symbol)
                     try:
@@ -613,7 +612,7 @@ def _update_single_bar(
                             f.write(f"{symbol}\n")
                     except Exception as fe:
                         logger.warning(f"⚠️ 无法更新自选股全量标记文件 {backfill_file}: {fe}")
-                    
+
                     return "success"
                 else:
                     logger.warning(f"⚠️ {symbol} 自选股全量拉取返回空数据")
@@ -665,7 +664,7 @@ def _update_single_bar(
 # ===========================================================================
 
 def update_indicators(
-    db: DatabaseInterface, engine: IndicatorEngineInterface, symbols_to_update: List[str] = None
+    db: DatabaseInterface, engine: IndicatorEngineInterface, symbols_to_update: list[str] = None
 ) -> dict:
     """为指定或所有需要更新的技术指标重新计算。"""
     logger.info("\n" + "=" * 60)
@@ -674,7 +673,7 @@ def update_indicators(
 
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
-    
+
     if symbols_to_update is not None:
         symbols = symbols_to_update
         logger.info(f"🎯 指定模式：计算 {len(symbols)} 只股票的指标")
@@ -1126,8 +1125,8 @@ def retry_failed(
         logger.info("ℹ️  retry 队列为空")
         return {"success": 0, "failed": 0, "total": 0}
 
-    with open(retry_file, "r", encoding="utf-8") as f:
-        symbols = list(set(line.strip() for line in f if line.strip()))
+    with open(retry_file, encoding="utf-8") as f:
+        symbols = list({line.strip() for line in f if line.strip()})
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
@@ -1169,7 +1168,7 @@ def health_check(db: DatabaseInterface) -> dict:
     logger.info("=" * 60)
 
     today = datetime.now().strftime("%Y-%m-%d")
-    issues: List[str] = []
+    issues: list[str] = []
     report_lines = [f"\n📋 SmartMoney 数据健康报告 ({today})\n" + "=" * 50]
 
     conn = sqlite3.connect(str(db.db_path))
@@ -1259,10 +1258,10 @@ def health_check(db: DatabaseInterface) -> dict:
         cursor.execute("PRAGMA freelist_count")
         freelist_count = cursor.fetchone()[0]
 
-        total_size = page_count * page_size
+        page_count * page_size
         free_size = freelist_count * page_size
         free_pct = 100 * freelist_count / page_count if page_count else 0
-        
+
         if free_size > 10 * 1024 * 1024 and free_pct > 20:
             issues.append(
                 f"数据库存在较多碎片空间 (约 {free_size / (1024*1024):.2f} MB, "
@@ -1390,7 +1389,8 @@ def main():
 
     if args.force:
         global _should_update
-        _should_update = lambda: True
+        def _should_update():
+            return True
 
     if args.task == "all":
         run_all(db, loader, engine, resume=args.resume)

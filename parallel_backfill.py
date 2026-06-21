@@ -19,14 +19,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
-from pathlib import Path
 from multiprocessing import Process
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # 路径配置
@@ -49,10 +50,8 @@ def copy_schema(src_db: Path, dst_db: Path):
     tables = [r[0] for r in cursor.fetchall()]
     for t in tables:
         if t not in ("sqlite_sequence",):
-            try:
-                cursor.execute(f"DELETE FROM {t}")
-            except sqlite3.OperationalError:
-                pass  # VIEW 等跳过
+            with contextlib.suppress(sqlite3.OperationalError):
+                cursor.execute(f"DELETE FROM {t}")  # VIEW 等跳过
     conn.commit()
     conn.close()
 
