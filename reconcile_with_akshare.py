@@ -41,13 +41,11 @@ import socket
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
 
 sys.path.insert(0, os.path.expanduser("~/Code"))
 
-import numpy as np
 import pandas as pd
 
 try:
@@ -173,12 +171,12 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
 def compare_and_repair(
     conn: sqlite3.Connection,
     symbol: str,
-    since: Optional[str] = None,
+    since: str | None = None,
     dry_run: bool = False,
     smart_repair: bool = False,
     full_check: bool = False,
     backfill_source: bool = False,
-) -> Dict[str, any]:
+) -> dict[str, any]:
     """
     对比数据库与 AkShare 数据，修复差异。
 
@@ -191,7 +189,7 @@ def compare_and_repair(
     t0 = time.time()
 
     # 1. 拉取数据库数据
-    params: List[str] = [symbol]
+    params: list[str] = [symbol]
     where_clause = "WHERE ts_code = ?"
     if since:
         where_clause += " AND trade_date >= ?"
@@ -334,7 +332,7 @@ def compare_and_repair(
                 data_source = ?, updated_at = ?
             WHERE ts_code = ? AND trade_date = ?
         """
-        update_rows: List[Tuple] = []
+        update_rows: list[tuple] = []
         for _, row in diff_rows.iterrows():
             update_rows.append(
                 (
@@ -364,7 +362,7 @@ def compare_and_repair(
         cursor.execute("DELETE FROM daily_bars WHERE ts_code = ?", (symbol,))
         deleted = cursor.rowcount
 
-        insert_rows: List[Tuple] = []
+        insert_rows: list[tuple] = []
         for _, row in ak_df.iterrows():
             insert_rows.append(
                 (
@@ -407,7 +405,7 @@ def compare_and_repair(
 # ---------------------------------------------------------------------------
 # 局部指标重算
 # ---------------------------------------------------------------------------
-def update_indicators_for_symbols(db_path: str, symbols: List[str]) -> Dict[str, int]:
+def update_indicators_for_symbols(db_path: str, symbols: list[str]) -> dict[str, int]:
     """只为指定的股票重新计算技术指标。"""
     try:
         from smartmoney_hunter.database import DatabaseManager
@@ -452,11 +450,11 @@ class ReconcileProgress:
     FILE = PROGRESS_FILE
 
     @classmethod
-    def load(cls) -> Tuple[int, str]:
+    def load(cls) -> tuple[int, str]:
         if not cls.FILE.exists():
             return 0, ""
         try:
-            with open(cls.FILE, "r", encoding="utf-8") as f:
+            with open(cls.FILE, encoding="utf-8") as f:
                 data = json.load(f)
             return data.get("idx", 0), data.get("last_symbol", "")
         except (json.JSONDecodeError, OSError):
@@ -476,10 +474,10 @@ class ReconcileProgress:
 # ---------------------------------------------------------------------------
 # 失败队列
 # ---------------------------------------------------------------------------
-def load_retry_symbols() -> List[str]:
+def load_retry_symbols() -> list[str]:
     if not RETRY_FILE.exists():
         return []
-    with open(RETRY_FILE, "r", encoding="utf-8") as f:
+    with open(RETRY_FILE, encoding="utf-8") as f:
         return list(dict.fromkeys(line.strip() for line in f if line.strip()))
 
 
@@ -654,14 +652,14 @@ def main():
             logger.info(f"🔄 断点续传：从第 {start_idx + 1} 只继续")
 
     stats = {"total": 0, "matched": 0, "diff": 0, "fixed": 0, "skipped": 0, "failed": 0}
-    repaired_symbols: Set[str] = set()
-    per_symbol_times: List[float] = []
-    report_rows: List[Dict] = []
+    repaired_symbols: set[str] = set()
+    per_symbol_times: list[float] = []
+    report_rows: list[dict] = []
 
     start_time = time.time()
 
     for i, symbol in enumerate(symbols[start_idx:], start=start_idx + 1):
-        loop_t0 = time.time()
+        time.time()
         result = compare_and_repair(
             conn,
             symbol,
@@ -698,7 +696,7 @@ def main():
 
         # 进度刷新 + ETA
         if i % 50 == 0 or i == total:
-            elapsed_total = time.time() - start_time
+            time.time() - start_time
             avg_time = sum(per_symbol_times) / len(per_symbol_times)
             remaining = total - i
             eta_sec = avg_time * remaining + (remaining / args.batch_rest) * 10 + remaining * args.sleep

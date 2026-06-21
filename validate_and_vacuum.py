@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -122,7 +121,10 @@ def run_checks(db_path: Path) -> dict:
     """)
     row = cursor.fetchone()
     avg_cnt, min_cnt, max_cnt = row
-    log("PASS", f"每只股票平均 {avg_cnt:.0f} 条, 最少 {min_cnt}, 最多 {max_cnt}")
+    if avg_cnt is not None:
+        log("PASS", f"每只股票平均 {avg_cnt:.0f} 条, 最少 {min_cnt}, 最多 {max_cnt}")
+    else:
+        log("WARN", "daily_bars 为空表，无数据量统计")
 
     # 检查数据量异常少的股票（可能刚上市或长期停牌）
     cursor.execute("""
@@ -142,7 +144,7 @@ def run_checks(db_path: Path) -> dict:
     for col in null_cols:
         cursor.execute(f"SELECT COUNT(*) FROM daily_bars WHERE {col} IS NULL")
         null_count = cursor.fetchone()[0]
-        cursor.execute(f"SELECT COUNT(*) FROM daily_bars")
+        cursor.execute("SELECT COUNT(*) FROM daily_bars")
         total_rows = cursor.fetchone()[0]
         null_pct = null_count / total_rows * 100 if total_rows else 0
 
@@ -179,7 +181,7 @@ def run_checks(db_path: Path) -> dict:
 def do_vacuum(db_path: Path):
     """执行 VACUUM"""
     size_before = db_path.stat().st_size
-    print(f"\n🔧 开始 VACUUM...")
+    print("\n🔧 开始 VACUUM...")
     print(f"   前: {size_before / (1024*1024):.1f} MB")
 
     conn = sqlite3.connect(str(db_path))

@@ -8,13 +8,12 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Any
+
 import pandas as pd
-
-from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.data_loader import DataLoader
+from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.indicators import IndicatorCalculator
-
 
 # ===========================================================================
 # Database Provider
@@ -23,7 +22,7 @@ from smartmoney_hunter.indicators import IndicatorCalculator
 class SmartMoneyDBProvider:
     """基于 DatabaseManager 的数据库 provider。"""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self._db = DatabaseManager(db_path=db_path)
 
     @property
@@ -42,34 +41,34 @@ class SmartMoneyDBProvider:
     def save_indicators(self, symbol: str, df: pd.DataFrame) -> None:
         self._db.save_indicators(symbol, df)
 
-    def save_fundamentals(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_fundamentals(symbol, data)
 
-    def save_fund_flow(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_fund_flow(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_fund_flow(symbol, data)
 
-    def save_margin_trading(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_margin_trading(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_margin_trading(symbol, data)
 
-    def get_margin_trading(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_margin_trading(symbol, date)
 
-    def save_dragon_tiger(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_dragon_tiger(symbol, data)
 
-    def get_dragon_tiger(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
 
-    def save_block_trade(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_block_trade(symbol, data)
 
-    def get_block_trade(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
 
-    def save_sector_fund_flow(self, sector_name: str, data: Dict[str, Any]) -> None:
+    def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
         self._db.save_sector_fund_flow(sector_name, data)
 
-    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> Optional[Dict]:
+    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
         return self._db.get_sector_fund_flow(sector_name, date)
 
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
@@ -90,8 +89,8 @@ class SmartMoneyLoaderProvider:
     def get_daily_bars(
         self,
         symbol: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> pd.DataFrame:
         return self._loader.get_daily_bars(symbol, start_date, end_date)
 

@@ -11,9 +11,9 @@
 """
 from __future__ import annotations
 
-from typing import Protocol, Dict, Any, Optional
-import pandas as pd
+from typing import Any, Protocol
 
+import pandas as pd
 
 # ===========================================================================
 # 数据库接口
@@ -43,43 +43,43 @@ class DatabaseInterface(Protocol):
         """保存技术指标数据。"""
         ...
 
-    def save_fundamentals(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
         """保存基本面/估值数据。"""
         ...
 
-    def save_fund_flow(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_fund_flow(self, symbol: str, data: dict[str, Any]) -> None:
         """保存资金流向数据。"""
         ...
 
-    def save_margin_trading(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_margin_trading(self, symbol: str, data: dict[str, Any]) -> None:
         """保存融资融券数据。"""
         ...
 
-    def get_margin_trading(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
         """获取融资融券数据。"""
         ...
 
-    def save_dragon_tiger(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> None:
         """保存龙虎榜数据。"""
         ...
 
-    def get_dragon_tiger(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         """获取龙虎榜数据。"""
         ...
 
-    def save_block_trade(self, symbol: str, data: Dict[str, Any]) -> None:
+    def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         """保存大宗交易数据。"""
         ...
 
-    def get_block_trade(self, symbol: str, date: str = None) -> Optional[Dict]:
+    def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
         """获取大宗交易数据。"""
         ...
 
-    def save_sector_fund_flow(self, sector_name: str, data: Dict[str, Any]) -> None:
+    def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
         """保存板块资金流向数据。"""
         ...
 
-    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> Optional[Dict]:
+    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
         """获取板块资金流向数据。"""
         ...
 
@@ -99,8 +99,8 @@ class DataLoaderInterface(Protocol):
     def get_daily_bars(
         self,
         symbol: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> pd.DataFrame:
         """获取日线 OHLCV 数据。"""
         ...
@@ -155,15 +155,15 @@ class ProviderFactory:
     @classmethod
     def configure(
         cls,
-        db_path: Optional[str] = None,
+        db_path: str | None = None,
         provider: str = "smartmoney",
     ) -> None:
         """配置全局 provider。"""
         if provider == "smartmoney":
             from providers import (
                 SmartMoneyDBProvider,
-                SmartMoneyLoaderProvider,
                 SmartMoneyIndicatorProvider,
+                SmartMoneyLoaderProvider,
             )
             cls._db_provider = SmartMoneyDBProvider(db_path=db_path)
             cls._loader_provider = SmartMoneyLoaderProvider()
