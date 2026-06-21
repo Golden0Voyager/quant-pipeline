@@ -37,6 +37,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "daily_pipeline.py" = ["E402"]
 "reconcile_with_akshare.py" = ["E402"]
+"__init__.py" = ["N999"]
 
 [tool.coverage.report]
 fail_under = 85
