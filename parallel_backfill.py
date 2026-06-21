@@ -83,7 +83,6 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
 
     env = os.environ.copy()
     env["QUANT_DB_PATH"] = str(worker_db)
-    env["FORCE_AKSHARE"] = "1"
     env["DISABLE_YFINANCE_FALLBACK"] = "1"
 
     cmd = [
