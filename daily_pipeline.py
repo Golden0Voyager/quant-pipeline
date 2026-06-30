@@ -25,6 +25,7 @@ import os
 import random
 import socket
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -51,6 +52,34 @@ try:
     import akshare as ak
 except ImportError:
     ak = None  # type: ignore[assignment]
+
+# ── macOS 系统代理注入 ──
+# 检测系统代理设置并注入环境变量，让 requests/urllib3 能通过 Clash 等代理访问 eastmoney
+# 同时添加 NO_PROXY 绕过不需要走代理的域名
+if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
+    try:
+        _proxy_out = subprocess.run(
+            ["scutil", "--proxy"], capture_output=True, text=True, timeout=5
+        )
+        if "HTTPEnable : 1" in _proxy_out.stdout and "HTTPProxy" in _proxy_out.stdout:
+            _host = _port = None
+            for _line in _proxy_out.stdout.split("\n"):
+                _line = _line.strip()
+                if _line.startswith("HTTPProxy"):
+                    _host = _line.split(":")[1].strip()
+                elif _line.startswith("HTTPPort"):
+                    _port = _line.split(":")[1].strip()
+            if _host and _port:
+                _proxy_url = f"http://{_host}:{_port}"
+                os.environ["HTTP_PROXY"] = _proxy_url
+                os.environ["HTTPS_PROXY"] = _proxy_url
+                os.environ["http_proxy"] = _proxy_url
+                os.environ["https_proxy"] = _proxy_url
+                # 绕过代理直接访问的域名
+                os.environ["NO_PROXY"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,*.eastmoney.com"
+                os.environ["no_proxy"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,*.eastmoney.com"
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # 配置：数据库路径（环境变量优先）
@@ -758,49 +787,229 @@ def update_fundamentals(
     logger.info("=" * 60)
 
     today = datetime.now().strftime("%Y-%m-%d")
+    # 尝试今天，如果没数据回退到最近交易日
+    trade_dates = [today]
+    for offset in range(1, 5):
+        d = datetime.now() - timedelta(days=offset)
+        if d.weekday() < 5:
+            trade_dates.append(d.strftime("%Y-%m-%d"))
 
-    try:
-        df = loader.get_market_valuation()
-        if df.empty:
-            logger.warning("⚠️  未获取到估值数据")
-            return {"saved": 0, "total": 0}
+    import requests as _req
 
-        saved = 0
-        for _, row in df.iterrows():
+    session = _req.Session()
+    session.proxies = {"http": None, "https": None}
+    session.trust_env = False
+
+    all_records = []
+    for td in trade_dates:
+        if all_records:
+            break
+        page = 1
+        page_size = 500
+        while True:
             try:
-                code = str(row.get("code", "")).strip()
-                if not code:
-                    continue
-
-                data = {
-                    "trade_date": today,
-                    "pe_ttm": row.get("pe_ttm"),
-                    "pb": row.get("pb"),
-                    "ps_ttm": row.get("ps_ttm"),
-                    "dividend_yield": None,
-                    "roe": None,
-                    "roa": None,
-                    "gross_margin": None,
-                    "net_margin": None,
-                    "debt_ratio": None,
-                    "revenue_growth": None,
-                    "profit_growth": None,
-                    "eps_growth": None,
-                    "peg": row.get("peg"),
-                    "market_cap": row.get("market_cap"),
+                url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+                params = {
+                    "sortColumns": "TRADE_DATE,SECURITY_CODE",
+                    "sortTypes": "-1,1",
+                    "pageSize": str(page_size),
+                    "pageNumber": str(page),
+                    "reportName": "RPT_VALUEANALYSIS_DET",
+                    "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CLOSE_PRICE,TOTAL_MARKET_CAP,PE_TTM,PB_MRQ,PE_LAR,PEG_CAR,PS_TTM",
+                    "source": "WEB",
+                    "client": "WEB",
+                    "filter": f"(TRADE_DATE='{td}')",
                 }
-                db.save_fundamentals(code, data)
-                saved += 1
+                resp = session.get(url, params=params, timeout=15)
+                data = resp.json()
+                if data.get("success") and data.get("result") and data["result"].get("data"):
+                    records = data["result"]["data"]
+                    all_records.extend(records)
+                    total_count = data["result"].get("count", 0)
+                    if page * page_size >= total_count:
+                        break
+                    page += 1
+                else:
+                    break
             except Exception as e:
-                logger.debug(f"  保存估值失败: {e}")
+                logger.warning(f"⚠️  获取估值数据失败 (日期={td}): {e}")
+                break
+
+    if not all_records:
+        logger.warning("⚠️  未获取到估值数据")
+        return {"saved": 0, "total": 0}
+
+    saved = 0
+    for rec in all_records:
+        try:
+            code = str(rec.get("SECURITY_CODE", "")).strip()
+            if not code:
                 continue
+            trade_date = str(rec.get("TRADE_DATE", today))[:10]
+            data = {
+                "trade_date": trade_date,
+                "pe_ttm": rec.get("PE_TTM"),
+                "pb": rec.get("PB_MRQ"),
+                "ps_ttm": rec.get("PS_TTM"),
+                "dividend_yield": None,
+                "roe": None,
+                "roa": None,
+                "gross_margin": None,
+                "net_margin": None,
+                "debt_ratio": None,
+                "revenue_growth": None,
+                "profit_growth": None,
+                "eps_growth": None,
+                "peg": rec.get("PEG_CAR"),
+                "market_cap": rec.get("TOTAL_MARKET_CAP"),
+            }
+            db.save_fundamentals(code, data)
+            saved += 1
+        except Exception as e:
+            logger.debug(f"  保存估值失败: {e}")
+            continue
 
-        logger.info(f"✅ 估值数据保存完成: {saved}/{len(df)} 只")
-        return {"saved": saved, "total": len(df)}
+    date_used = str(all_records[0].get("TRADE_DATE", ""))[:10] if all_records else today
+    logger.info(f"✅ 估值数据保存完成: {saved}/{len(all_records)} 只 (日期: {date_used})")
+    return {"saved": saved, "total": len(all_records)}
 
-    except Exception as e:
-        logger.error(f"❌ 估值数据获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+
+# ===========================================================================
+# 任务 3.5: 雪球 token 落地 — 批量补充实时行情指标
+# ===========================================================================
+
+def update_market_snapshot(db: DatabaseInterface) -> dict:
+    """
+    通过雪球 batch/quote API 批量获取全市场实时行情指标，
+    补充 fundamentals 表的 dividend_yield 字段。
+
+    API：/v5/stock/batch/quote.json?symbol=...&extend=detail
+    单次请求最多 50 只，使用 15 并发快速扫描全市场。
+
+    需要的凭证（已由用户在环境或配置中提供）：
+      xq_a_token: 520185f5701cd89ea8a3fef2313ff4f14a64517e
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("📊 任务: 雪球行情快照 (dividend_yield 补充)")
+    logger.info("=" * 60)
+
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import requests as _req
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. 读取全量股票
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT code, market FROM stock_list")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        logger.warning("⚠️  股票列表为空")
+        return {"saved": 0, "total": 0}
+
+    total = len(rows)
+    logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情")
+
+    # 2. 构建 xueqiu session & 分批调用的函数
+    exchange_prefix = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
+
+    def _xueqiu_session() -> _req.Session:
+        s = _req.Session()
+        s.proxies = {"http": None, "https": None}
+        s.trust_env = False
+        # 先访问首页建立 session
+        s.get("https://xueqiu.com", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        s.cookies.set("xq_a_token", "520185f5701cd89ea8a3fef2313ff4f14a64517e", domain=".xueqiu.com")
+        s.cookies.set("xq_r_token", "b083aa65932ee22ff306bc5d5e541dd7216fef03", domain=".xueqiu.com")
+        s.cookies.set("xq_is_login", "1", domain=".xueqiu.com")
+        return s
+
+    def _fetch_batch(symbols_chunk: list[tuple[str, str]]) -> list[dict]:
+        """调用雪球 batch/quote，返回 [{"code": ..., "pe_ttm": ..., "pb": ..., "market_cap": ..., "dividend_yield": ...}]"""
+        xq_symbols = [f"{exchange_prefix.get(m, 'SZ')}{c}" for c, m in symbols_chunk]
+        url = f"https://stock.xueqiu.com/v5/stock/batch/quote.json?symbol={','.join(xq_symbols)}&extend=detail"
+        try:
+            s = _xueqiu_session()
+            resp = s.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/json",
+                    "Referer": "https://xueqiu.com/",
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data", {}).get("items", [])
+                results = []
+                for item in items:
+                    if not item or not item.get("quote"):
+                        continue
+                    q = item["quote"]
+                    code = str(q.get("code", ""))
+                    if code:
+                        results.append({
+                            "code": code,
+                            "pe_ttm": q.get("pe_ttm"),
+                            "pb": q.get("pb"),
+                            "market_cap": q.get("market_capital"),
+                            "dividend_yield": q.get("dividend_yield"),
+                            "eps": q.get("eps"),
+                        })
+                return results
+        except Exception:
+            pass
+        return []
+
+    # 3. 分片并发送
+    batch = 50
+    chunks = [rows[i:i + batch] for i in range(0, total, batch)]
+    logger.info(f"📦 共 {len(chunks)} 批次 (每批 {batch} 只)")
+
+    # 用线程池并发发送多个 batch 请求
+    all_quotes: list[dict] = []
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=15) as pool:
+        fut_map = {pool.submit(_fetch_batch, chunk): chunk for chunk in chunks}
+        for fut in as_completed(fut_map):
+            chunk_results = fut.result()
+            all_quotes.extend(chunk_results)
+            completed += 1
+            if completed % 20 == 0 or completed == len(chunks):
+                logger.info(f"  批次进度: {completed}/{len(chunks)} (已获取 {len(all_quotes)} 只)")
+
+    logger.info(f"📊 雪球行情获取完成: {len(all_quotes)} 只")
+
+    # 4. 写回数据库 — 只补充 dividend_yield/eps (不覆盖现有 pe_ttm/pb/market_cap)
+    if all_quotes:
+        conn = sqlite3.connect(str(db.db_path))
+        cursor = conn.cursor()
+        updated = 0
+        for q in all_quotes:
+            div_yield = q.get("dividend_yield")
+            eps = q.get("eps")
+            if div_yield is not None or eps is not None:
+                cursor.execute(
+                    """UPDATE fundamentals SET dividend_yield = COALESCE(?, dividend_yield)
+                       WHERE ts_code = ? AND trade_date = ?
+                       AND (dividend_yield IS NULL OR ? IS NOT NULL)""",
+                    (div_yield, q["code"], today, div_yield),
+                )
+                if cursor.rowcount:
+                    updated += 1
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ dividend_yield 补充完成: {updated} 只")
+    else:
+        logger.warning("⚠️  雪球行情未获取到数据")
+
+    return {"saved": len(all_quotes), "total": total}
 
 
 # ===========================================================================
@@ -969,7 +1178,7 @@ def update_block_trade(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
     try:
         df = ak.stock_dzjy_mrmx(symbol="A股", start_date=yesterday, end_date=yesterday)
         if df is None or df.empty:
@@ -1113,7 +1322,250 @@ def update_shareholder_count(db: DatabaseInterface) -> dict:
 
 
 # ===========================================================================
-# 任务 10: 重试失败队列
+# 任务 10: 批量获取季度财务数据
+# ===========================================================================
+
+def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
+    """批量获取全市场季度财务数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📋 任务: 批量获取季度财务数据")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "failed": 0, "total": 0, "error": "akshare not installed"}
+
+    stocks = db.get_stock_list()
+    if stocks.empty:
+        logger.error("❌ 股票列表为空")
+        return {"saved": 0, "failed": 0, "total": 0}
+
+    stock_codes = stocks["code"].tolist()
+    total = len(stock_codes)
+    saved = 0
+    failed = 0
+
+    import pandas as _pd
+
+    def _extract_float(df, label):
+        try:
+            mask = df["指标"] == label
+            if mask.any():
+                val = df.loc[mask].iloc[:, 2]
+                if _pd.notna(val.iloc[0]):
+                    return float(val.iloc[0])
+        except Exception:
+            pass
+        return None
+
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            df = ak.stock_financial_abstract(symbol=code)
+            if df is not None and not df.empty and len(df.columns) > 2:
+                data = {
+                    "report_period": str(df.columns[2]),
+                    "revenue": _extract_float(df, "营业总收入"),
+                    "net_profit": _extract_float(df, "归母净利润"),
+                    "operating_cashflow": _extract_float(df, "经营现金流量净额"),
+                    "roe": _extract_float(df, "净资产收益率(ROE)"),
+                    "gross_margin": _extract_float(df, "毛利率"),
+                    "net_margin": _extract_float(df, "销售净利率"),
+                    "revenue_growth": _extract_float(df, "营业总收入增长率"),
+                    "profit_growth": _extract_float(df, "归属母公司净利润增长率"),
+                    "debt_ratio": _extract_float(df, "资产负债率"),
+                    "eps": _extract_float(df, "基本每股收益"),
+                    "bps": _extract_float(df, "每股净资产"),
+                }
+                db.save_quarterly_financials(code, data)
+                saved += 1
+            if i % 200 == 0:
+                logger.info(f"  进度: {i}/{total} (成功: {saved}, 失败: {failed})")
+        except Exception as e:
+            logger.debug(f"  股票 {code} 失败: {e}")
+            failed += 1
+            continue
+
+    logger.info(f"✅ 季度财务数据保存完成: {saved}/{total} (失败: {failed})")
+    return {"saved": saved, "failed": failed, "total": total}
+
+
+# ===========================================================================
+# 任务 11: 更新行业分类（通过东方财富 F10 API + 并发）
+# ===========================================================================
+
+def update_industry(db: DatabaseInterface) -> dict:
+    """
+    批量更新 stock_list.industry 列。
+
+    策略 A: eastmoney F10 CompanySurvey API (SZ/SH 主板/创业板/科创板)
+    https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code=...
+    提取 申万行业 (jbzl.sshy)。
+    策略 B (回退): Sina 财经个股资料页 (覆盖 BJ 及部分新上市股票)
+    http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml
+    使用 ThreadPoolExecutor 并发加速 (~0.1s/只, 5000 只 ≈ 1min 并发)。
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("🏢 任务: 更新行业分类 (F10 API)")
+    logger.info("=" * 60)
+
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import requests as _req
+
+    # 1. 读取需要更新的股票
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT code, market FROM stock_list WHERE industry IS NULL OR industry = '未分类'"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        logger.info("✅ 所有股票已有行业分类")
+        return {"saved": 0, "total": 0}
+
+    total = len(rows)
+    logger.info(f"📊 共 {total} 只股票需要更新行业")
+
+    # 2. 市场前缀映射
+    exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
+
+    # 3. HTTP session（每个线程自建 session 以避免并发问题）
+    def _fetch_industry(code: str, market: str) -> tuple[str, str | None]:
+        # 策略 A: 尝试 eastmoney F10 API（覆盖 SZ/SH 主板/创业板/科创板）
+        prefix = exchange_map.get(market, "SZ")
+        api_code = f"{prefix}{code}"
+        f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
+        try:
+            session = _req.Session()
+            session.proxies = {"http": None, "https": None}
+            session.trust_env = False
+            resp = session.get(
+                f10_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                jbzl = data.get("jbzl")
+                if jbzl and isinstance(jbzl, dict):
+                    industry = jbzl.get("sshy")
+                    if industry and industry != "N/A":
+                        return code, industry
+        except Exception:
+            pass
+
+        # 策略 B: F10 失败时降级到 Sina 财经个股资料页 (覆盖 BJ 及新上市股票)
+        try:
+            sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
+            sin_session = _req.Session()
+            sin_session.proxies = {"http": None, "https": None}
+            sin_session.trust_env = False
+            resp = sin_session.get(
+                sin_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            resp.encoding = "gb2312"
+            if resp.status_code == 200:
+                import re
+                m = re.search(
+                    r'所属行业板块</td>\s*</tr>\s*<tr>.*?<td[^>]*>([^<]+)',
+                    resp.text, re.DOTALL,
+                )
+                if m:
+                    industry = m.group(1).strip()
+                    if industry and "备注" not in industry:
+                        return code, industry
+        except Exception:
+            pass
+
+        return code, None
+
+    # 4. 并发执行
+    success_map: dict[str, str] = {}
+    fail_list: list[str] = []
+    processed = 0
+
+    max_workers = 15
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        fut_map = {}
+        for code, market in rows:
+            fut = pool.submit(_fetch_industry, code, market)
+            fut_map[fut] = code
+
+        for fut in as_completed(fut_map):
+            code = fut_map[fut]
+            result = fut.result()
+            if result and result[1]:
+                success_map[code] = result[1]
+            else:
+                fail_list.append(code)
+
+            processed += 1
+            if processed % 500 == 0 or processed == total:
+                logger.info(
+                    f"  进度: {processed}/{total} "
+                    f"(成功: {len(success_map)}, 失败: {len(fail_list)})"
+                )
+
+    logger.info(
+        f"📊 接口请求完成: 成功 {len(success_map)}, 失败 {len(fail_list)}"
+    )
+
+    # 5. 批量写入数据库
+    if success_map:
+        conn = sqlite3.connect(str(db.db_path))
+        cursor = conn.cursor()
+        updated = 0
+        batch = []
+        for code, industry in success_map.items():
+            batch.append((industry, code))
+            if len(batch) >= 500:
+                cursor.executemany(
+                    "UPDATE stock_list SET industry = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE code = ? AND (industry IS NULL OR industry = '未分类')",
+                    batch,
+                )
+                updated += cursor.rowcount
+                conn.commit()
+                batch = []
+        if batch:
+            cursor.executemany(
+                "UPDATE stock_list SET industry = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE code = ? AND (industry IS NULL OR industry = '未分类')",
+                batch,
+            )
+            updated += cursor.rowcount
+            conn.commit()
+        conn.close()
+        logger.info(f"✅ 行业分类更新完成: {updated} 只股票")
+    else:
+        updated = 0
+        logger.warning("⚠️  未获取到任何行业数据")
+
+    # 6. 更新 stock_list 表索引（如果不存在）
+    try:
+        conn = sqlite3.connect(str(db.db_path))
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_list_industry ON stock_list(industry)"
+        )
+        conn.close()
+    except Exception:
+        pass
+
+    return {
+        "saved": updated,
+        "total": total,
+        "failed": len(fail_list),
+        "coverage_pct": round(100 * updated / total, 1) if total else 0,
+    }
+
+
+# ===========================================================================
+# 任务 12: 重试失败队列
 # ===========================================================================
 
 def retry_failed(
@@ -1314,22 +1766,34 @@ def run_all(
     if not _should_update():
         return {"status": "skipped", "reason": "非交易日"}
 
+    def _safe_task(name: str, fn, *args, **kwargs) -> dict:
+        """安全执行单个任务，异常时记录日志不影响后续任务。"""
+        try:
+            logger.info(f"\n{'='*60}\n▶ 开始任务: {name}\n{'='*60}")
+            return fn(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ 任务 {name} 异常终止: {e}", exc_info=True)
+            return {"error": str(e), "status": "crashed"}
+
     results = {}
-    results["bars"] = update_bars(db, loader, resume=resume)
+    results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume)
 
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
     # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
-    results["indicators"] = update_indicators(db, engine)
+    results["indicators"] = _safe_task("update_indicators", update_indicators, db, engine)
 
-    results["fundamentals"] = update_fundamentals(db, loader)
-    results["fund_flow"] = update_fund_flow(db, loader)
-    results["margin_trading"] = update_margin_trading(db)
-    results["dragon_tiger"] = update_dragon_tiger(db)
-    results["block_trade"] = update_block_trade(db)
-    results["sector_fund_flow"] = update_sector_fund_flow(db)
-    results["shareholder_count"] = update_shareholder_count(db)
-    results["retry"] = retry_failed(db, loader)
-    results["health"] = health_check(db)
+    results["fundamentals"] = _safe_task("update_fundamentals", update_fundamentals, db, loader)
+    results["market_snapshot"] = _safe_task("update_market_snapshot (雪球)", update_market_snapshot, db)
+    results["fund_flow"] = _safe_task("update_fund_flow", update_fund_flow, db, loader)
+    results["margin_trading"] = _safe_task("update_margin_trading", update_margin_trading, db)
+    results["dragon_tiger"] = _safe_task("update_dragon_tiger", update_dragon_tiger, db)
+    results["block_trade"] = _safe_task("update_block_trade", update_block_trade, db)
+    results["sector_fund_flow"] = _safe_task("update_sector_fund_flow", update_sector_fund_flow, db)
+    results["shareholder_count"] = _safe_task("update_shareholder_count", update_shareholder_count, db)
+    results["quarterly_financials"] = _safe_task("update_quarterly_financials", update_quarterly_financials, db, loader)
+    results["industry"] = _safe_task("update_industry", update_industry, db)
+    results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
+    results["health"] = _safe_task("health_check", health_check, db)
 
     elapsed = time.time() - start_time
     logger.info("\n" + "=" * 60)
@@ -1353,12 +1817,15 @@ def main():
             "update_bars",
             "update_indicators",
             "update_fundamentals",
+            "update_market_snapshot",
             "update_fund_flow",
             "update_margin_trading",
             "update_dragon_tiger",
             "update_block_trade",
             "update_sector_fund_flow",
             "update_shareholder_count",
+            "update_quarterly_financials",
+            "update_industry",
             "retry",
             "health_check",
         ],
@@ -1400,6 +1867,8 @@ def main():
         update_indicators(db, engine)
     elif args.task == "update_fundamentals":
         update_fundamentals(db, loader)
+    elif args.task == "update_market_snapshot":
+        update_market_snapshot(db)
     elif args.task == "update_fund_flow":
         update_fund_flow(db, loader)
     elif args.task == "update_margin_trading":
@@ -1412,6 +1881,10 @@ def main():
         update_sector_fund_flow(db)
     elif args.task == "update_shareholder_count":
         update_shareholder_count(db)
+    elif args.task == "update_quarterly_financials":
+        update_quarterly_financials(db, loader)
+    elif args.task == "update_industry":
+        update_industry(db)
     elif args.task == "retry":
         retry_failed(db, loader)
     elif args.task == "health_check":

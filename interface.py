@@ -67,6 +67,14 @@ class DatabaseInterface(Protocol):
         """获取龙虎榜数据。"""
         ...
 
+    def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
+        """保存股东户数数据。"""
+        ...
+
+    def save_quarterly_financials(self, symbol: str, data: dict[str, Any]) -> None:
+        """保存季度财务指标数据。"""
+        ...
+
     def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         """保存大宗交易数据。"""
         ...
