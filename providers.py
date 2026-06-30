@@ -59,6 +59,12 @@ class SmartMoneyDBProvider:
     def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
 
+    def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
+        self._db.save_shareholder_count(symbol, data)
+
+    def save_quarterly_financials(self, symbol: str, data: dict[str, Any]) -> None:
+        self._db.save_quarterly_financials(symbol, data)
+
     def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_block_trade(symbol, data)
 
