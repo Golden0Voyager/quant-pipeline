@@ -291,8 +291,30 @@ class TestUpdateFundamentals:
     def test_normal(self):
         db = MagicMock()
         loader = MagicMock()
-        loader.get_market_valuation.return_value = pd.DataFrame({"code": ["000001.SZ", "600000.SH"], "pe_ttm": [10.0, 8.0], "pb": [1.5, 0.8], "ps_ttm": [2.0, 1.0], "peg": [1.2, None], "market_cap": [1e9, 5e9]})
-        with patch("daily_pipeline.logger"):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "success": True,
+            "result": {
+                "data": [
+                    {"SECURITY_CODE": "000001", "TRADE_DATE": "2026-06-30",
+                     "PE_TTM": 10.0, "PB_MRQ": 1.5, "PS_TTM": 2.0,
+                     "PEG_CAR": 1.2, "TOTAL_MARKET_CAP": 1e9},
+                    {"SECURITY_CODE": "600000", "TRADE_DATE": "2026-06-30",
+                     "PE_TTM": 8.0, "PB_MRQ": 0.8, "PS_TTM": 1.0,
+                     "PEG_CAR": None, "TOTAL_MARKET_CAP": 5e9},
+                ],
+                "count": 2,
+            },
+        }
+        with (
+            patch("daily_pipeline.logger"),
+            patch("requests.Session") as mock_session_cls,
+            patch("daily_pipeline.datetime") as mock_dt,
+        ):
+            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
         assert r["saved"] == 2
         assert r["total"] == 2
@@ -300,25 +322,65 @@ class TestUpdateFundamentals:
     def test_empty(self):
         db = MagicMock()
         loader = MagicMock()
-        loader.get_market_valuation.return_value = pd.DataFrame()
-        with patch("daily_pipeline.logger"):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"success": True, "result": {"data": [], "count": 0}}
+        with (
+            patch("daily_pipeline.logger"),
+            patch("requests.Session") as mock_session_cls,
+            patch("daily_pipeline.datetime") as mock_dt,
+        ):
+            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
         assert r["saved"] == 0
+        assert r["total"] == 0
         db.save_fundamentals.assert_not_called()
 
-    def test_loader_error(self):
+    def test_http_error(self):
         db = MagicMock()
         loader = MagicMock()
-        loader.get_market_valuation.side_effect = RuntimeError("API error")
-        with patch("daily_pipeline.logger"):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = ConnectionError("HTTP error")
+        with (
+            patch("daily_pipeline.logger"),
+            patch("requests.Session", return_value=mock_session),
+            patch("daily_pipeline.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
-        assert r["error"] == "API error"
+        assert r["saved"] == 0
+        assert r["total"] == 0
 
     def test_empty_code_skipped(self):
         db = MagicMock()
         loader = MagicMock()
-        loader.get_market_valuation.return_value = pd.DataFrame({"code": ["", "000001.SZ"], "pe_ttm": [None, 10.0], "pb": [None, 1.5], "ps_ttm": [None, 2.0], "peg": [None, None], "market_cap": [None, 1e9]})
-        with patch("daily_pipeline.logger"):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "success": True,
+            "result": {
+                "data": [
+                    {"SECURITY_CODE": "", "TRADE_DATE": "2026-06-30",
+                     "PE_TTM": None, "PB_MRQ": None, "PS_TTM": None,
+                     "PEG_CAR": None, "TOTAL_MARKET_CAP": None},
+                    {"SECURITY_CODE": "000001", "TRADE_DATE": "2026-06-30",
+                     "PE_TTM": 10.0, "PB_MRQ": 1.5, "PS_TTM": 2.0,
+                     "PEG_CAR": None, "TOTAL_MARKET_CAP": 1e9},
+                ],
+                "count": 2,
+            },
+        }
+        with (
+            patch("daily_pipeline.logger"),
+            patch("requests.Session") as mock_session_cls,
+            patch("daily_pipeline.datetime") as mock_dt,
+        ):
+            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
         assert r["saved"] == 1
 
