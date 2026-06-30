@@ -894,8 +894,9 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     logger.info("=" * 60)
 
     import sqlite3
-    import requests as _req
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import requests as _req
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -966,9 +967,9 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         return []
 
     # 3. 分片并发送
-    BATCH = 50
-    chunks = [rows[i:i + BATCH] for i in range(0, total, BATCH)]
-    logger.info(f"📦 共 {len(chunks)} 批次 (每批 {BATCH} 只)")
+    batch = 50
+    chunks = [rows[i:i + batch] for i in range(0, total, batch)]
+    logger.info(f"📦 共 {len(chunks)} 批次 (每批 {batch} 只)")
 
     # 用线程池并发发送多个 batch 请求
     all_quotes: list[dict] = []
@@ -1409,6 +1410,7 @@ def update_industry(db: DatabaseInterface) -> dict:
 
     import sqlite3
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     import requests as _req
 
     # 1. 读取需要更新的股票
@@ -1483,13 +1485,12 @@ def update_industry(db: DatabaseInterface) -> dict:
         return code, None
 
     # 4. 并发执行
-    from collections import defaultdict
     success_map: dict[str, str] = {}
     fail_list: list[str] = []
     processed = 0
 
-    MAX_WORKERS = 15
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    max_workers = 15
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         fut_map = {}
         for code, market in rows:
             fut = pool.submit(_fetch_industry, code, market)
