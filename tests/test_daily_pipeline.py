@@ -890,3 +890,202 @@ def test_is_trading_day_weekend():
     with patch("daily_pipeline.datetime") as m:
         m.now.return_value = datetime(2026, 6, 27)
         assert not daily_pipeline._is_trading_day()
+
+
+# ===========================================================================
+# New data-layer repair tasks
+# ===========================================================================
+def test_update_historical_valuation():
+    db = MagicMock()
+    db.get_fundamentals_batch.return_value = pd.DataFrame({
+        "ts_code": ["000001", "000002"],
+        "trade_date": ["2026-06-30", "2026-06-30"],
+        "pe_ttm": [10.0, 12.0],
+        "pb": [1.0, 1.5],
+        "ps_ttm": [2.0, 2.5],
+        "dividend_yield": [0.03, 0.02],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_historical_valuation(db)
+    assert r["saved"] == 2
+    db.save_historical_valuation.assert_called()
+
+
+def test_update_sector_industry():
+    db = MagicMock()
+    db.db_path = ":memory:"
+    db.get_stock_list.return_value = pd.DataFrame({
+        "code": ["000001", "000002"],
+        "industry": ["银行", "银行"],
+    })
+    db.get_fundamentals_batch.return_value = pd.DataFrame({
+        "ts_code": ["000001", "000002"],
+        "pe_ttm": [10.0, 12.0],
+        "pb": [1.0, 1.5],
+        "ps_ttm": [2.0, 2.5],
+        "roe": [0.12, 0.10],
+        "revenue_growth": [0.20, 0.15],
+        "profit_growth": [0.18, 0.12],
+        "market_cap": [1e9, 2e9],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_industry(db)
+    assert r["saved"] == 1
+    db.save_sector_industry.assert_called_once()
+# ===========================================================================
+# Sector fund flow tests
+# ===========================================================================
+
+@patch("daily_pipeline.ak")
+def test_fetch_sector_fund_flow_primary(mock_ak: MagicMock):
+    mock_df = pd.DataFrame({
+        "行业": ["银行", "医药"],
+        "主力净流入-净额": [1e8, 5e7],
+        "主力净流入-净占比": [0.5, 0.3],
+        "超大单净流入-净额": [5e7, 2e7],
+        "大单净流入-净额": [3e7, 1e7],
+        "中单净流入-净额": [-2e7, -1e7],
+        "小单净流入-净额": [-1e7, -5e6],
+    })
+    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
+    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
+    assert result is not None
+    assert len(result) == 2
+    assert result.iloc[0]["sector_name"] == "银行"
+
+
+@patch("daily_pipeline.ak")
+def test_fetch_sector_fund_flow_primary_empty(mock_ak: MagicMock):
+    mock_ak.stock_sector_fund_flow_hist.return_value = pd.DataFrame()
+    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
+    assert result is None
+
+
+@patch("daily_pipeline.ak")
+def test_fetch_sector_fund_flow_fallback(mock_ak: MagicMock):
+    mock_df = pd.DataFrame({
+        "行业": ["银行", "医药"],
+        "净额": [1e8, 5e7],
+        "行业-涨跌幅": [0.5, -0.3],
+        "流入资金": [2e8, 1e8],
+        "流出资金": [1e8, 5e7],
+    })
+    mock_ak.stock_fund_flow_industry.return_value = mock_df
+    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
+    assert result is not None
+    assert len(result) == 2
+    assert result.iloc[0]["data_source"] == "akshare_fallback"
+
+
+@patch("daily_pipeline.ak")
+def test_fetch_sector_fund_flow_fallback_empty(mock_ak: MagicMock):
+    mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
+    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
+    assert result is None
+
+
+@patch("daily_pipeline.ak")
+def test_update_sector_fund_flow_primary(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_df = pd.DataFrame({
+        "行业": ["银行"],
+        "主力净流入-净额": [1e8],
+        "主力净流入-净占比": [0.5],
+        "超大单净流入-净额": [5e7],
+        "大单净流入-净额": [3e7],
+        "中单净流入-净额": [-2e7],
+        "小单净流入-净额": [-1e7],
+    })
+    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_fund_flow(db)
+    assert r["saved"] == 1
+    assert r["source"] == "primary"
+
+
+@patch("daily_pipeline.ak")
+def test_update_sector_fund_flow_fallback(mock_ak: MagicMock):
+    """When primary fails, should fall back to secondary source."""
+    db = MagicMock()
+    # Primary fails
+    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
+    # Fallback succeeds
+    mock_df = pd.DataFrame({
+        "行业": ["银行"],
+        "净额": [1e8],
+        "行业-涨跌幅": [0.5],
+        "流入资金": [2e8],
+        "流出资金": [1e8],
+    })
+    mock_ak.stock_fund_flow_industry.return_value = mock_df
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_fund_flow(db)
+    assert r["saved"] == 1
+    assert r["source"] == "fallback"
+
+
+@patch("daily_pipeline.ak")
+def test_update_sector_fund_flow_both_fail(mock_ak: MagicMock):
+    """When both sources fail, should return empty result."""
+    db = MagicMock()
+    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
+    mock_ak.stock_fund_flow_industry.side_effect = Exception("新浪也挂了")
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_fund_flow(db)
+    assert r["total"] == 0
+    assert "error" in r
+
+
+# ===========================================================================
+# update_historical_valuation edge cases
+# ===========================================================================
+
+def test_update_historical_valuation_empty():
+    db = MagicMock()
+    db.get_fundamentals_batch.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_historical_valuation(db)
+    assert r["saved"] == 0
+    assert r["total"] == 0
+
+
+# ===========================================================================
+# update_sector_industry edge cases
+# ===========================================================================
+
+def test_update_sector_industry_no_fundamentals():
+    db = MagicMock()
+    db.get_stock_list.return_value = pd.DataFrame({"code": [], "industry": []})
+    db.get_fundamentals_batch.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_industry(db)
+    assert r["saved"] == 0 or r["total"] == 0
+
+
+# ===========================================================================
+# BJ filtering in update_bars
+# ===========================================================================
+
+def test_update_bars_filters_bj():
+    """Verify that BJ stocks are excluded from update_bars stock list."""
+    db = MagicMock()
+    loader = MagicMock()
+
+    # Create a stock list with a BJ code (880001)
+    stocks_df = pd.DataFrame({
+        "code": ["000001", "880001", "000002"],
+        "name": ["平安银行", "BJ Test", "万科A"],
+    })
+    db.get_stock_list.return_value = stocks_df
+    db.get_daily_bars.return_value = pd.DataFrame()
+
+    with patch("daily_pipeline.is_beijing_stock", side_effect=lambda s: s == "880001"), \
+         patch("daily_pipeline.logger"):
+        from daily_pipeline import ProgressTracker
+        # Clear any previous progress
+        ProgressTracker.clear()
+        r = daily_pipeline.update_bars(db, loader)
+
+    # Should only process 2 stocks (skip the BJ one)
+    assert r["total"] == 2
+    assert r["success"] + r["failed"] + r["skipped"] == 2

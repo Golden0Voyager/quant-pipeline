@@ -62,6 +62,21 @@ def test_db_provider_methods():
     result = provider.get_sector_fund_flow("银行")
     assert result is not None
 
+    provider.save_historical_valuation("000001.SZ", "2026-06-30", {"pe_ttm": 10})
+    provider.save_sector_industry(
+        {
+            "industry_name": "银行",
+            "trade_date": "2026-06-30",
+            "avg_pe": 5,
+            "fund_inflow_rank": 3,
+        }
+    )
+    result = provider.get_sector_industry("银行")
+    assert result is not None
+
+    result = provider.get_fundamentals_batch()
+    assert result is not None
+
     result = provider.watchlist_get_all()
     assert result is not None
 

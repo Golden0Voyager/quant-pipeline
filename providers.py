@@ -77,6 +77,18 @@ class SmartMoneyDBProvider:
     def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
         return self._db.get_sector_fund_flow(sector_name, date)
 
+    def save_historical_valuation(self, symbol: str, trade_date: str, data: dict[str, Any]) -> None:
+        self._db.save_historical_valuation(symbol, trade_date, data)
+
+    def save_sector_industry(self, data: dict[str, Any]) -> None:
+        self._db.save_sector_industry(data)
+
+    def get_sector_industry(self, industry_name: str, trade_date: str = None) -> dict | None:
+        return self._db.get_sector_industry(industry_name, trade_date)
+
+    def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
+        return self._db.get_fundamentals_batch(trade_date)
+
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
 
