@@ -179,24 +179,33 @@ class PipelineApp(App):
 
     async def _run_in_background(self, *args: str) -> None:
         env = get_subprocess_env()
+        logger = logging.getLogger("quant_pipeline.tui")
         try:
-            proc = await asyncio.create_subprocess_exec(*args, env=env)
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                env=env,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
             await proc.wait()
+            if proc.returncode != 0:
+                logger.error(f"Subprocess {' '.join(args)} exited with code {proc.returncode}")
         except Exception as e:
-            logger = logging.getLogger("quant_pipeline.tui")
-            logger.exception(f"Exception running subprocess {' '.join(args)}: {e}")
+            logger.exception(f"Exception running subprocess {' '.join(args)}")
 
     async def action_run_pipeline(self) -> None:
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         asyncio.create_task(
             self._run_in_background(
-                sys.executable, "daily_pipeline.py", "--task", "all", "--force"
+                sys.executable, pipeline_path, "--task", "all", "--force"
             )
         )
 
     async def action_resume_pipeline(self) -> None:
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         asyncio.create_task(
             self._run_in_background(
-                sys.executable, "daily_pipeline.py", "--task", "update_bars", "--resume", "--force"
+                sys.executable, pipeline_path, "--task", "update_bars", "--resume", "--force"
             )
         )
 
@@ -213,9 +222,10 @@ class PipelineApp(App):
         )
 
     async def action_run_health(self) -> None:
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         asyncio.create_task(
             self._run_in_background(
-                sys.executable, "daily_pipeline.py", "--task", "health_check", "--force"
+                sys.executable, pipeline_path, "--task", "health_check", "--force"
             )
         )
 

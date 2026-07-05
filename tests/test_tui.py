@@ -141,6 +141,7 @@ async def test_run_in_background_success():
     mock_proc = MagicMock()
     mock_proc.wait = MagicMock(return_value=asyncio.Future())
     mock_proc.wait.return_value.set_result(0)
+    mock_proc.returncode = 0
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         await app._run_in_background("arg1", "arg2")
@@ -149,27 +150,49 @@ async def test_run_in_background_success():
         assert args == ("arg1", "arg2")
         assert "env" in kwargs
         assert kwargs["env"]["DISABLE_YFINANCE_FALLBACK"] == "1"
+        assert kwargs["stdout"] == asyncio.subprocess.DEVNULL
+        assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
         mock_proc.wait.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_non_zero_exit():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.wait = MagicMock(return_value=asyncio.Future())
+    mock_proc.wait.return_value.set_result(0)
+    mock_proc.returncode = 127
+
+    mock_logger = MagicMock()
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("logging.getLogger", return_value=mock_logger):
+        await app._run_in_background("arg1", "arg2")
+        mock_logger.error.assert_called_once_with("Subprocess arg1 arg2 exited with code 127")
 
 
 @pytest.mark.asyncio
 async def test_run_in_background_exception():
     app = PipelineApp()
-    with patch("asyncio.create_subprocess_exec", side_effect=OSError("Spawn failed")):
-        # Should not raise exception
+    mock_logger = MagicMock()
+    with patch("asyncio.create_subprocess_exec", side_effect=OSError("Spawn failed")), \
+         patch("logging.getLogger", return_value=mock_logger):
         await app._run_in_background("arg1")
+        mock_logger.exception.assert_called_once_with("Exception running subprocess arg1")
 
 
 @pytest.mark.asyncio
 async def test_action_handlers_use_run_in_background():
     app = PipelineApp()
+    expected_pipeline_path = str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py")
+    expected_manager_path = str(Path(sys.modules["tui"].__file__).parent / "manager.sh")
+
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
          patch("asyncio.create_task") as mock_create_task:
 
         await app.action_run_pipeline()
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
-            sys.executable, "daily_pipeline.py", "--task", "all", "--force"
+            sys.executable, expected_pipeline_path, "--task", "all", "--force"
         )
 
         mock_run_bg.reset_mock()
@@ -177,14 +200,13 @@ async def test_action_handlers_use_run_in_background():
         await app.action_resume_pipeline()
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
-            sys.executable, "daily_pipeline.py", "--task", "update_bars", "--resume", "--force"
+            sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
         )
 
         mock_run_bg.reset_mock()
         mock_create_task.reset_mock()
         await app.action_start_daemon()
         mock_create_task.assert_called_once()
-        expected_manager_path = str(Path(sys.modules["tui"].__file__).parent / "manager.sh")
         mock_run_bg.assert_called_once_with(
             expected_manager_path, "daemon-resume"
         )
@@ -202,8 +224,9 @@ async def test_action_handlers_use_run_in_background():
         await app.action_run_health()
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
-            sys.executable, "daily_pipeline.py", "--task", "health_check", "--force"
+            sys.executable, expected_pipeline_path, "--task", "health_check", "--force"
         )
+
 
 
 
