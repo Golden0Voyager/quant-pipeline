@@ -12,6 +12,7 @@ from tui import (
     get_db_size,
     get_launchd_status,
     get_subprocess_env,
+    parse_progress,
 )
 
 
@@ -228,6 +229,29 @@ async def test_action_handlers_use_run_in_background():
         )
 
 
+def test_parse_progress_valid(tmp_path):
+    progress_file = tmp_path / "progress.json"
+    progress_file.write_text("""{
+        "task": "update_bars",
+        "date": "2026-07-05",
+        "start_time": "2026-07-05 12:00:00",
+        "last_symbol": "SZ000001",
+        "processed": 100,
+        "total": 1000,
+        "failed_queue": ["SH600000"]
+    }""", encoding="utf-8")
+    data = parse_progress(str(progress_file))
+    assert data is not None
+    assert data["processed"] == 100
+    assert data["total"] == 1000
+    assert len(data["failed_queue"]) == 1
 
 
+def test_parse_progress_not_exists():
+    assert parse_progress("non_existent_file.json") is None
 
+
+def test_parse_progress_invalid_json(tmp_path):
+    progress_file = tmp_path / "progress.json"
+    progress_file.write_text("{invalid_json}", encoding="utf-8")
+    assert parse_progress(str(progress_file)) is None

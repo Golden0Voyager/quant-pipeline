@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -13,6 +15,17 @@ from textual.widgets import Footer, Header, Static
 
 DEFAULT_DB_PATH = Path.home() / "Code/data/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
+PROGRESS_JSON_PATH = Path.home() / "Code/data/quant_data/progress.json"
+
+def parse_progress(progress_path: str) -> Optional[dict]:
+    p = Path(progress_path)
+    if not p.exists():
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 def get_db_size(db_path: str) -> str:
     p = Path(db_path)
@@ -111,7 +124,34 @@ class OperationsWidget(Static):
         self.update(text)
 
 class ProgressWidget(Static):
-    pass
+    def on_mount(self) -> None:
+        self.set_interval(2.0, self.update_progress)
+
+    def update_progress(self) -> None:
+        progress = parse_progress(str(PROGRESS_JSON_PATH))
+        if not progress:
+            self.update("📈 进度看板\n==========================\n当前无运行中的任务，或未生成进度文件。")
+            return
+        
+        processed = progress.get("processed", 0)
+        total = progress.get("total", 0)
+        last_symbol = progress.get("last_symbol", "")
+        failed_count = len(progress.get("failed_queue", []))
+        
+        pct = (processed / total * 100) if total > 0 else 0
+        bar_length = 20
+        filled = int(bar_length * processed / total) if total > 0 else 0
+        bar = "█" * filled + "░" * (bar_length - filled)
+        
+        text = (
+            "📈 数据抓取进度\n"
+            "==========================\n"
+            f"任务:     {progress.get('task')}\n"
+            f"更新进度: [{bar}] {pct:.1f}% ({processed}/{total})\n"
+            f"当前股票: {last_symbol}\n"
+            f"失败数量: [red]{failed_count}[/red]\n"
+        )
+        self.update(text)
 
 class LogsWidget(Static):
     pass
