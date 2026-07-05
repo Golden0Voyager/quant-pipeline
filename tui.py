@@ -174,6 +174,7 @@ class LogsWidget(RichLog):
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("markup", True)
         kwargs.setdefault("max_lines", 1000)
+        kwargs.setdefault("wrap", True)
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
@@ -191,16 +192,30 @@ class LogsWidget(RichLog):
             self.file_handle = None
 
     def colorize_line(self, line: str) -> str:
-        line = escape(line.strip())
-        if "INFO" in line:
-            return f"[green]{line}[/green]"
-        elif "WARN" in line:
-            return f"[yellow]{line}[/yellow]"
-        elif "ERROR" in line:
-            return f"[red]{line}[/red]"
-        elif "SUCCESS" in line:
-            return f"[bold green]{line}[/bold green]"
-        return line
+        line = line.strip()
+        parts = line.split("|", 2)
+        if len(parts) >= 3:
+            level = parts[1].strip()
+            body = parts[2].strip()
+
+            if "=" in body:
+                body = body.replace("=", "-")
+
+            body = escape(body)
+
+            if "ERROR" in level:
+                return f"[red]❌ {body}[/red]"
+            elif "WARN" in level or "WARNING" in level:
+                return f"[yellow]⚠️  {body}[/yellow]"
+            elif "SUCCESS" in level:
+                return f"[bold green]✅ {body}[/bold green]"
+            elif "INFO" in level:
+                return f"[#e2e8f0]{body}[/#e2e8f0]"
+            return body
+        else:
+            if "=" in line:
+                line = line.replace("=", "-")
+            return escape(line)
 
     def tail_log(self) -> None:
         try:
