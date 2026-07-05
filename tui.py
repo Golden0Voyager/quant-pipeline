@@ -1,8 +1,9 @@
+import asyncio
 import os
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Tuple, Optional
+
 from textual.app import App, ComposeResult
 from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
@@ -17,7 +18,7 @@ def get_db_size(db_path: str) -> str:
         return f"{bytes_size / (1024 * 1024):.2f} MB"
     return "0.00 MB"
 
-def get_daemon_status(pid_path: str) -> Tuple[str, Optional[int]]:
+def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
     p = Path(pid_path)
     if not p.exists():
         return "Stopped", None
@@ -28,9 +29,23 @@ def get_daemon_status(pid_path: str) -> Tuple[str, Optional[int]]:
     except (ValueError, OSError):
         return "Stopped", None
 
-def get_launchd_status() -> bool:
+def get_subprocess_env() -> dict:
+    env = os.environ.copy()
+    env["NO_PROXY"] = "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
+    env["DISABLE_YFINANCE_FALLBACK"] = "1"
+    return env
+
+async def get_launchd_status(env: dict | None = None) -> bool:
+    if env is None:
+        env = get_subprocess_env()
     try:
-        res = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+        res = await asyncio.to_thread(
+            subprocess.run,
+            ["launchctl", "list"],
+            capture_output=True,
+            text=True,
+            env=env
+        )
         return "com.smartmoney.update" in res.stdout
     except Exception:
         return False
@@ -39,30 +54,33 @@ def get_active_stock_count(db_path: str) -> int:
     p = Path(db_path)
     if not p.exists():
         return 0
+    conn = None
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=5.0)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM stock_list")
         count = cursor.fetchone()[0]
-        conn.close()
         return count
     except Exception:
         return 0
+    finally:
+        if conn is not None:
+            conn.close()
 
 class DashboardWidget(Static):
-    def on_mount(self) -> None:
-        self.update_status()
+    async def on_mount(self) -> None:
+        await self.update_status()
         self.set_interval(2.0, self.update_status)
 
-    def update_status(self) -> None:
+    async def update_status(self) -> None:
         db_size = get_db_size(str(DEFAULT_DB_PATH))
         active_stocks = get_active_stock_count(str(DEFAULT_DB_PATH))
         daemon_status, daemon_pid = get_daemon_status(DAEMON_PID_PATH)
-        launchd_active = get_launchd_status()
-        
+        launchd_active = await get_launchd_status()
+
         daemon_str = f"[green]Running (PID: {daemon_pid})[/green]" if daemon_status == "Running" else "[red]Stopped[/red]"
         launchd_str = "[green]Active[/green]" if launchd_active else "[red]Inactive[/red]"
-        
+
         text = (
             "📊 SmartMoney 状态看板\n"
             "==========================\n"
@@ -72,6 +90,7 @@ class DashboardWidget(Static):
             f"定时任务状态: {launchd_str}\n"
         )
         self.update(text)
+
 
 class OperationsWidget(Static):
     pass

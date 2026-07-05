@@ -1,6 +1,14 @@
 import pytest
+from unittest.mock import MagicMock, patch
 
-from tui import PipelineApp
+from tui import (
+    PipelineApp,
+    get_active_stock_count,
+    get_daemon_status,
+    get_db_size,
+    get_launchd_status,
+    get_subprocess_env,
+)
 
 
 @pytest.mark.asyncio
@@ -11,7 +19,6 @@ async def test_app_title():
 
 @pytest.mark.asyncio
 async def test_widgets_present():
-    from tui import PipelineApp
     app = PipelineApp()
     async with app.run_test():
         assert app.query_one("#status-dashboard") is not None
@@ -19,9 +26,6 @@ async def test_widgets_present():
         assert app.query_one("#scraping-progress") is not None
         assert app.query_one("#live-logs") is not None
 
-
-from unittest.mock import patch, MagicMock
-from tui import get_db_size, get_daemon_status, get_launchd_status, get_active_stock_count
 
 def test_get_active_stock_count_empty(tmp_path):
     db_file = tmp_path / "test_empty.db"
@@ -38,7 +42,7 @@ def test_get_active_stock_count_with_table(tmp_path):
     cursor.execute("INSERT INTO stock_list (code, market) VALUES ('600000', 'SH')")
     conn.commit()
     conn.close()
-    
+
     count = get_active_stock_count(str(db_file))
     assert count == 2
 
@@ -81,21 +85,36 @@ def test_get_daemon_status_stale_pid(tmp_path):
     assert status == "Stopped"
     assert pid is None
 
-def test_get_launchd_status_active():
+@pytest.mark.asyncio
+async def test_get_launchd_status_active():
     mock_res = MagicMock()
     mock_res.stdout = "com.smartmoney.update\nother.service"
     with patch("subprocess.run", return_value=mock_res) as mock_run:
-        assert get_launchd_status() is True
-        mock_run.assert_called_once_with(["launchctl", "list"], capture_output=True, text=True)
+        assert await get_launchd_status() is True
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args == (["launchctl", "list"],)
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert "NO_PROXY" in kwargs["env"]
+        assert "DISABLE_YFINANCE_FALLBACK" in kwargs["env"]
 
-def test_get_launchd_status_inactive():
+@pytest.mark.asyncio
+async def test_get_launchd_status_inactive():
     mock_res = MagicMock()
     mock_res.stdout = "other.service"
-    with patch("subprocess.run", return_value=mock_res) as mock_run:
-        assert get_launchd_status() is False
+    with patch("subprocess.run", return_value=mock_res):
+        assert await get_launchd_status() is False
 
-def test_get_launchd_status_exception():
+@pytest.mark.asyncio
+async def test_get_launchd_status_exception():
     with patch("subprocess.run", side_effect=OSError):
-        assert get_launchd_status() is False
+        assert await get_launchd_status() is False
+
+def test_get_subprocess_env():
+    env = get_subprocess_env()
+    assert isinstance(env, dict)
+    assert env.get("NO_PROXY") == "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
+    assert env.get("DISABLE_YFINANCE_FALLBACK") == "1"
 
 
