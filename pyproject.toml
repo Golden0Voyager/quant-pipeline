@@ -20,6 +20,11 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
 ]
+# 需要先安装系统级 C 库: brew install ta-lib
+# 然后运行: uv pip install ta-lib --index-url https://pypi.tuna.tsinghua.edu.cn/simple/
+talib = [
+    "ta-lib>=0.4.0",
+]
 
 [build-system]
 requires = ["hatchling"]
