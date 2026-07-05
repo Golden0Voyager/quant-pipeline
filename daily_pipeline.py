@@ -365,7 +365,7 @@ def _infer_market(code: str) -> str:
       300xxx / 301xxx → gem  (创业板)
       002xxx / 003xxx → sme  (深市中小板)
       000xxx / 001xxx → sz   (深市主板)
-      43xxxx / 83xxxx / 87xxxx / 82xxxx → bj (北交所)
+      43xxxx / 83xxxx / 87xxxx / 82xxxx / 920xxx → bj (北交所)
       其余 → sz (兜底)
     """
     if code.startswith("688"):
@@ -378,7 +378,7 @@ def _infer_market(code: str) -> str:
         return "sme"
     if code.startswith(("000", "001")):
         return "sz"
-    if code.startswith(("4", "8")):
+    if code.startswith(("4", "8", "920")):
         return "bj"
     return "sz"
 
