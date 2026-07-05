@@ -32,6 +32,9 @@ class SmartMoneyDBProvider:
     def get_stock_list(self) -> pd.DataFrame:
         return self._db.get_stock_list()
 
+    def save_stock_list(self, df: pd.DataFrame) -> None:
+        self._db.save_stock_list(df)
+
     def get_daily_bars(self, symbol: str) -> pd.DataFrame:
         return self._db.get_daily_bars(symbol)
 

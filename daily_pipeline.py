@@ -353,6 +353,56 @@ def _sleep_with_progress(seconds: float, label: str = "等待"):
 
 
 # ===========================================================================
+# 任务 0: 更新全市场股票列表
+# ===========================================================================
+
+def _infer_market(code: str) -> str:
+    """根据股票代码前缀推断交易所市场标识。"""
+    if code.startswith("6"):
+        return "sh"
+    if code.startswith(("4", "8")):
+        return "bj"
+    return "sz"
+
+
+def update_stock_list(db: DatabaseInterface) -> dict:
+    """从 AkShare 拉取全量 A 股列表并写入 stock_list 表。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📋 任务: 更新全市场股票列表")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        df_raw = ak.stock_info_a_code_name()
+        if df_raw is None or df_raw.empty:
+            logger.warning("⚠️  未获取到股票列表数据")
+            return {"saved": 0, "error": "empty response"}
+
+        df = df_raw[["code", "name"]].copy()
+        df["code"] = df["code"].astype(str).str.strip()
+        df["name"] = df["name"].astype(str).str.strip()
+        df["market"] = df["code"].apply(_infer_market)
+        df["industry"] = None  # 由 update_industry 任务填充
+
+        db.save_stock_list(df)
+        saved = len(df)
+        sh_count = (df["market"] == "sh").sum()
+        sz_count = (df["market"] == "sz").sum()
+        bj_count = (df["market"] == "bj").sum()
+        logger.info(
+            f"✅ 股票列表更新完成: {saved} 只 "
+            f"(沪市 {sh_count} / 深市 {sz_count} / 北交所 {bj_count})"
+        )
+        return {"saved": saved, "sh": int(sh_count), "sz": int(sz_count), "bj": int(bj_count)}
+    except Exception as e:
+        logger.error(f"❌ 股票列表更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
 # 任务 1: 更新日线数据（增量 + 断点续传）
 # ===========================================================================
 
@@ -2067,6 +2117,7 @@ def run_all(
             return {"error": str(e), "status": "crashed"}
 
     results = {}
+    results["stock_list"] = _safe_task("update_stock_list", update_stock_list, db)
     results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume)
 
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
@@ -2107,6 +2158,7 @@ def main():
         "--task",
         choices=[
             "all",
+            "update_stock_list",
             "update_bars",
             "update_indicators",
             "update_fundamentals",
@@ -2156,6 +2208,8 @@ def main():
 
     if args.task == "all":
         run_all(db, loader, engine, resume=args.resume)
+    elif args.task == "update_stock_list":
+        update_stock_list(db)
     elif args.task == "update_bars":
         update_bars(db, loader, limit=args.limit, resume=args.resume)
     elif args.task == "update_indicators":
