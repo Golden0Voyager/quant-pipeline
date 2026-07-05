@@ -1028,13 +1028,13 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     saved = 0
     total = 0
 
     for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
         try:
-            df = fetcher(date=yesterday)
+            df = fetcher(date=target_date)
             if df is None or df.empty:
                 logger.warning(f"⚠️  {exchange.upper()} 融资融券无数据")
                 continue
@@ -1045,7 +1045,7 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
                     if not code:
                         continue
                     data = {
-                        "trade_date": yesterday,
+                        "trade_date": target_date,
                         "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
                         "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
                         "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
@@ -1080,9 +1080,9 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     try:
-        df = ak.stock_lhb_detail_em(start_date=yesterday, end_date=yesterday)
+        df = ak.stock_lhb_detail_em(start_date=target_date, end_date=target_date)
         if df is None or df.empty:
             logger.warning("⚠️  龙虎榜无数据")
             return {"saved": 0, "total": 0}
@@ -1094,7 +1094,7 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
                 if not code:
                     continue
                 data = {
-                    "trade_date": yesterday,
+                    "trade_date": target_date,
                     "close_price": row.get("收盘价"),
                     "pct_change": row.get("涨跌幅"),
                     "net_buy_amount": row.get("龙虎榜净买额"),
@@ -1131,9 +1131,9 @@ def update_block_trade(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     try:
-        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=yesterday, end_date=yesterday)
+        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date, end_date=target_date)
         if df is None or df.empty:
             logger.warning("⚠️  大宗交易无数据")
             return {"saved": 0, "total": 0}
@@ -1145,7 +1145,7 @@ def update_block_trade(db: DatabaseInterface) -> dict:
                 if not code:
                     continue
                 data = {
-                    "trade_date": yesterday,
+                    "trade_date": target_date,
                     "deal_price": row.get("成交价"),
                     "close_price": row.get("收盘价"),
                     "discount_rate": row.get("折溢率"),
@@ -1233,19 +1233,19 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date = _get_expected_latest_trading_day()
 
     df: pd.DataFrame | None = None
     source = "primary"
     try:
-        df = _fetch_sector_fund_flow_primary(yesterday)
+        df = _fetch_sector_fund_flow_primary(target_date)
     except Exception as e:
         logger.warning(f"⚠️  东财板块资金流向失败: {e}，尝试备用源...")
 
     if df is None or df.empty:
         source = "fallback"
         try:
-            df = _fetch_sector_fund_flow_fallback(yesterday)
+            df = _fetch_sector_fund_flow_fallback(target_date)
         except Exception as e:
             logger.error(f"❌ 备用板块资金流向也失败: {e}")
             return {"saved": 0, "total": 0, "error": str(e)}
@@ -1884,9 +1884,24 @@ def retry_failed(
     return {"success": success, "failed": len(still_failed), "total": len(symbols)}
 
 
-# ===========================================================================
-# 任务 6: 健康检查
-# ===========================================================================
+def _get_expected_latest_trading_day() -> str:
+    """获取期望的最新交易日日期 (YYYY-MM-DD)。
+    如果是周末，期望最新交易日为上周五；
+    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
+    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
+    """
+    now = datetime.now()
+    target = now
+    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
+    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
+        target -= timedelta(days=1)
+
+    # 如果目标日期是周末，则向前回滚到周五
+    while target.weekday() >= 5:
+        target -= timedelta(days=1)
+
+    return target.strftime("%Y-%m-%d")
+
 
 def health_check(db: DatabaseInterface) -> dict:
     """检查数据库健康状态并生成报告。"""
@@ -1959,8 +1974,9 @@ def health_check(db: DatabaseInterface) -> dict:
     report_lines.append(f"  最新板块资金流日期: {latest_sector}")
     report_lines.append(f"  最新股东户数报告期: {latest_holder}")
 
-    if latest_bar != today:
-        issues.append(f"日线数据未更新到最新: {latest_bar} (今天是 {today})")
+    expected_latest = _get_expected_latest_trading_day()
+    if latest_bar < expected_latest:
+        issues.append(f"日线数据未更新到最新: {latest_bar} (期望最新: {expected_latest}, 今天是 {today})")
 
     cursor.execute(
         """
