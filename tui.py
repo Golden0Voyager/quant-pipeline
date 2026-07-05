@@ -125,6 +125,7 @@ class OperationsWidget(Static):
 
 class ProgressWidget(Static):
     def on_mount(self) -> None:
+        self.update_progress()
         self.set_interval(2.0, self.update_progress)
 
     def update_progress(self) -> None:
