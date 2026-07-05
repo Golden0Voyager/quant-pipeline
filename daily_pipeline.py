@@ -45,6 +45,13 @@ if _CODE_DIR not in sys.path:
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
+def should_skip_beijing(symbol: str) -> bool:
+    """判断是否根据环境变量配置跳过北交所股票。"""
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        return False
+    return is_beijing_stock(symbol)
+
 from interface import (
     DatabaseInterface,
     DataLoaderInterface,
@@ -440,14 +447,17 @@ def update_bars(
         logger.error("❌ 股票列表为空")
         return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not is_beijing_stock(c)]
+    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     if limit:
         stock_codes = stock_codes[:limit]
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")
 
     total = len(stock_codes)
     bj_count = len(stocks) - total
-    logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
+    if bj_count > 0:
+        logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
+    else:
+        logger.info(f"📊 共 {total} 只股票待更新（已包含北交所）")
 
     # ── 断点续传检测 ──
     progress = None
@@ -981,7 +991,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         logger.warning("⚠️  股票列表为空")
         return {"saved": 0, "total": 0}
 
-    rows = [(c, m) for c, m in rows if not is_beijing_stock(c)]
+    rows = [(c, m) for c, m in rows if not should_skip_beijing(c)]
 
     if xq._get_token() is None:
         logger.warning("⚠️  XUEQIU_TOKEN 未设置，跳过雪球行情快照")
@@ -1681,7 +1691,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         logger.error("❌ 股票列表为空")
         return {"saved": 0, "failed": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not is_beijing_stock(c)]
+    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     total = len(stock_codes)
     saved = 0
     failed = 0
@@ -1921,7 +1931,7 @@ def retry_failed(
     with open(retry_file, encoding="utf-8") as f:
         symbols = [line.strip() for line in f if line.strip()]
 
-    symbols = [s for s in symbols if not is_beijing_stock(s)]
+    symbols = [s for s in symbols if not should_skip_beijing(s)]
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
