@@ -73,7 +73,7 @@ def test_get_daemon_status_running(tmp_path):
     pid_file = tmp_path / "daemon.pid"
     current_pid = os.getpid()
     pid_file.write_text(str(current_pid))
-    
+
     mock_res = MagicMock()
     mock_res.stdout = "python daily_pipeline.py --task update_bars"
     with patch("subprocess.run", return_value=mock_res):
@@ -269,10 +269,10 @@ def test_find_latest_log_file(tmp_path):
     log1 = tmp_path / "smartmoney_20260704.log"
     log1.touch()
     os.utime(log1, (time.time() - 100, time.time() - 100))
-    
+
     log2 = tmp_path / "smartmoney_20260705.log"
     log2.touch()
-    
+
     latest = find_latest_log_file(str(tmp_path))
     assert Path(latest).name == "smartmoney_20260705.log"
 
@@ -281,10 +281,10 @@ def test_find_latest_log_file(tmp_path):
     log2.unlink()
     daemon_log = tmp_path / "daemon.log"
     daemon_log.touch()
-    
+
     latest_fallback = find_latest_log_file(str(tmp_path))
     assert Path(latest_fallback).name == "daemon.log"
-    
+
     # Test when no logs exist
     daemon_log.unlink()
     assert find_latest_log_file(str(tmp_path)) is None

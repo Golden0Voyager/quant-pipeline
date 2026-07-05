@@ -232,7 +232,7 @@ def main() -> int:
     conn.close()
     elapsed = time.time() - t0
     logger.info(f"\n{'='*60}")
-    logger.info(f"✅ 回填完成")
+    logger.info("✅ 回填完成")
     logger.info(f"   新增: {total_saved} 条")
     logger.info(f"   跳过: {total_skipped} 个已有交易日")
     logger.info(f"   无数据: {total_errors} 个交易日")

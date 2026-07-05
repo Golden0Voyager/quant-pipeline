@@ -7,11 +7,12 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid
-from textual.widgets import Footer, Header, Static, RichLog
+from textual.widgets import Footer, Header, RichLog, Static
 
 DEFAULT_DB_PATH = Path.home() / "Code/data/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
@@ -149,17 +150,17 @@ class ProgressWidget(Static):
         if not progress:
             self.update("📈 进度看板\n==========================\n当前无运行中的任务，或未生成进度文件。")
             return
-        
+
         processed = progress.get("processed", 0)
         total = progress.get("total", 0)
         last_symbol = progress.get("last_symbol", "")
         failed_count = len(progress.get("failed_queue", []))
-        
+
         pct = (processed / total * 100) if total > 0 else 0
         bar_length = 20
         filled = min(bar_length, max(0, int(bar_length * processed / total))) if total > 0 else 0
         bar = "█" * filled + "░" * (bar_length - filled)
-        
+
         text = (
             "📈 数据抓取进度\n"
             "==========================\n"
@@ -183,7 +184,7 @@ class LogsWidget(RichLog):
 
     def on_unmount(self) -> None:
         if self.file_handle:
-            try:
+            try:  # noqa: SIM105
                 self.file_handle.close()
             except Exception:
                 pass
@@ -210,7 +211,7 @@ class LogsWidget(RichLog):
             if latest != self.active_log:
                 if self.file_handle:
                     self.file_handle.close()
-                fh = open(latest, "r", encoding="utf-8", errors="ignore")
+                fh = open(latest, encoding="utf-8", errors="ignore")  # noqa: SIM115
                 # Seek to end on open
                 fh.seek(0, os.SEEK_END)
                 self.file_handle = fh
@@ -307,7 +308,7 @@ class PipelineApp(App):
             await proc.wait()
             if proc.returncode != 0:
                 logger.error(f"Subprocess {' '.join(args)} exited with code {proc.returncode}")
-        except Exception as e:
+        except Exception:
             logger.exception(f"Exception running subprocess {' '.join(args)}")
 
     async def action_run_pipeline(self) -> None:
