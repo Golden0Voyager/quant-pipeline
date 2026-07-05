@@ -980,6 +980,14 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 1. 查找 fundamentals 表中最新的交易日，确保在正确的日期上更新股息率
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(trade_date) FROM fundamentals")
+    row = cursor.fetchone()
+    conn.close()
+    target_date = row[0] if (row and row[0]) else today
+
     # 1. 读取全量股票
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
@@ -1034,7 +1042,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
                     """UPDATE fundamentals SET dividend_yield = ?
                        WHERE ts_code = ? AND trade_date = ?
                        AND (dividend_yield IS NULL OR dividend_yield = 0)""",
-                    (div_yield, q["code"], today),
+                    (div_yield, q["code"], target_date),
                 )
                 if cursor.rowcount:
                     updated += 1
