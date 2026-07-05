@@ -1,5 +1,9 @@
-import pytest
+import asyncio
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from tui import (
     PipelineApp,
@@ -122,13 +126,85 @@ def test_get_subprocess_env():
 async def test_key_bindings():
     from tui import PipelineApp
     app = PipelineApp()
-    async with app.run_test() as pilot:
+    async with app.run_test():
         # Verify action exists
-        assert app.check_action("run_pipeline") is True
-        assert app.check_action("resume_pipeline") is True
-        assert app.check_action("start_daemon") is True
-        assert app.check_action("stop_daemon") is True
-        assert app.check_action("run_health") is True
+        assert app.check_action("run_pipeline", ()) is True
+        assert app.check_action("resume_pipeline", ()) is True
+        assert app.check_action("start_daemon", ()) is True
+        assert app.check_action("stop_daemon", ()) is True
+        assert app.check_action("run_health", ()) is True
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_success():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.wait = MagicMock(return_value=asyncio.Future())
+    mock_proc.wait.return_value.set_result(0)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await app._run_in_background("arg1", "arg2")
+        mock_exec.assert_called_once()
+        args, kwargs = mock_exec.call_args
+        assert args == ("arg1", "arg2")
+        assert "env" in kwargs
+        assert kwargs["env"]["DISABLE_YFINANCE_FALLBACK"] == "1"
+        mock_proc.wait.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_exception():
+    app = PipelineApp()
+    with patch("asyncio.create_subprocess_exec", side_effect=OSError("Spawn failed")):
+        # Should not raise exception
+        await app._run_in_background("arg1")
+
+
+@pytest.mark.asyncio
+async def test_action_handlers_use_run_in_background():
+    app = PipelineApp()
+    with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
+         patch("asyncio.create_task") as mock_create_task:
+
+        await app.action_run_pipeline()
+        mock_create_task.assert_called_once()
+        mock_run_bg.assert_called_once_with(
+            sys.executable, "daily_pipeline.py", "--task", "all", "--force"
+        )
+
+        mock_run_bg.reset_mock()
+        mock_create_task.reset_mock()
+        await app.action_resume_pipeline()
+        mock_create_task.assert_called_once()
+        mock_run_bg.assert_called_once_with(
+            sys.executable, "daily_pipeline.py", "--task", "update_bars", "--resume", "--force"
+        )
+
+        mock_run_bg.reset_mock()
+        mock_create_task.reset_mock()
+        await app.action_start_daemon()
+        mock_create_task.assert_called_once()
+        expected_manager_path = str(Path(sys.modules["tui"].__file__).parent / "manager.sh")
+        mock_run_bg.assert_called_once_with(
+            expected_manager_path, "daemon-resume"
+        )
+
+        mock_run_bg.reset_mock()
+        mock_create_task.reset_mock()
+        await app.action_stop_daemon()
+        mock_create_task.assert_called_once()
+        mock_run_bg.assert_called_once_with(
+            expected_manager_path, "daemon-stop"
+        )
+
+        mock_run_bg.reset_mock()
+        mock_create_task.reset_mock()
+        await app.action_run_health()
+        mock_create_task.assert_called_once()
+        mock_run_bg.assert_called_once_with(
+            sys.executable, "daily_pipeline.py", "--task", "health_check", "--force"
+        )
+
 
 
 

@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -175,41 +177,46 @@ class PipelineApp(App):
             yield ProgressWidget("Progress", id="scraping-progress")
         yield Footer()
 
-    async def action_run_pipeline(self) -> None:
+    async def _run_in_background(self, *args: str) -> None:
         env = get_subprocess_env()
+        try:
+            proc = await asyncio.create_subprocess_exec(*args, env=env)
+            await proc.wait()
+        except Exception as e:
+            logger = logging.getLogger("quant_pipeline.tui")
+            logger.exception(f"Exception running subprocess {' '.join(args)}: {e}")
+
+    async def action_run_pipeline(self) -> None:
         asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                "python", "daily_pipeline.py", "--task", "all", "--force",
-                env=env
+            self._run_in_background(
+                sys.executable, "daily_pipeline.py", "--task", "all", "--force"
             )
         )
 
     async def action_resume_pipeline(self) -> None:
-        env = get_subprocess_env()
         asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                "python", "daily_pipeline.py", "--task", "update_bars", "--resume", "--force",
-                env=env
+            self._run_in_background(
+                sys.executable, "daily_pipeline.py", "--task", "update_bars", "--resume", "--force"
             )
         )
 
     async def action_start_daemon(self) -> None:
-        env = get_subprocess_env()
+        manager_path = str(Path(__file__).parent / "manager.sh")
         asyncio.create_task(
-            asyncio.create_subprocess_exec(
-                "./manager.sh", "daemon-resume",
-                env=env
-            )
+            self._run_in_background(manager_path, "daemon-resume")
         )
 
     async def action_stop_daemon(self) -> None:
+        manager_path = str(Path(__file__).parent / "manager.sh")
         asyncio.create_task(
-            asyncio.create_subprocess_exec("./manager.sh", "daemon-stop")
+            self._run_in_background(manager_path, "daemon-stop")
         )
 
     async def action_run_health(self) -> None:
         asyncio.create_task(
-            asyncio.create_subprocess_exec("python", "daily_pipeline.py", "--task", "health_check", "--force")
+            self._run_in_background(
+                sys.executable, "daily_pipeline.py", "--task", "health_check", "--force"
+            )
         )
 
 if __name__ == "__main__":
