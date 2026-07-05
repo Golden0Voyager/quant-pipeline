@@ -357,9 +357,27 @@ def _sleep_with_progress(seconds: float, label: str = "等待"):
 # ===========================================================================
 
 def _infer_market(code: str) -> str:
-    """根据股票代码前缀推断交易所市场标识。"""
+    """根据股票代码前缀精确推断板块市场标识。
+
+    分类规则：
+      688xxx → star  (科创板)
+      6xxxxx → sh    (沪市主板)
+      300xxx / 301xxx → gem  (创业板)
+      002xxx / 003xxx → sme  (深市中小板)
+      000xxx / 001xxx → sz   (深市主板)
+      43xxxx / 83xxxx / 87xxxx / 82xxxx → bj (北交所)
+      其余 → sz (兜底)
+    """
+    if code.startswith("688"):
+        return "star"
     if code.startswith("6"):
         return "sh"
+    if code.startswith(("300", "301")):
+        return "gem"
+    if code.startswith(("002", "003")):
+        return "sme"
+    if code.startswith(("000", "001")):
+        return "sz"
     if code.startswith(("4", "8")):
         return "bj"
     return "sz"
