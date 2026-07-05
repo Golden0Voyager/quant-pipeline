@@ -74,7 +74,7 @@ class DashboardWidget(Static):
 
     async def update_status(self) -> None:
         db_size = get_db_size(str(DEFAULT_DB_PATH))
-        active_stocks = get_active_stock_count(str(DEFAULT_DB_PATH))
+        active_stocks = await asyncio.to_thread(get_active_stock_count, str(DEFAULT_DB_PATH))
         daemon_status, daemon_pid = get_daemon_status(DAEMON_PID_PATH)
         launchd_active = await get_launchd_status()
 
