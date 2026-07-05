@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
@@ -93,7 +94,19 @@ class DashboardWidget(Static):
 
 
 class OperationsWidget(Static):
-    pass
+    def on_mount(self) -> None:
+        text = (
+            "⚙️ 控制面板 (Operations)\n"
+            "==========================\n"
+            "快捷键操作：\n"
+            "  • [R] 立即启动完整更新\n"
+            "  • [M] 断点续续数据更新\n"
+            "  • [D] 启动守护进程 (Daemon)\n"
+            "  • [S] 停止守护进程 (Daemon)\n"
+            "  • [H] 立即进行数据库健康检查\n"
+            "  • [Q] 退出监控面板\n"
+        )
+        self.update(text)
 
 class ProgressWidget(Static):
     pass
@@ -103,6 +116,15 @@ class LogsWidget(Static):
 
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
+    BINDINGS = [
+        Binding("r", "run_pipeline", "Run Pipeline"),
+        Binding("m", "resume_pipeline", "Resume"),
+        Binding("d", "start_daemon", "Start Daemon"),
+        Binding("s", "stop_daemon", "Stop Daemon"),
+        Binding("h", "run_health", "Health Check"),
+        Binding("q", "quit", "Quit"),
+    ]
+
     CSS = """
     $cyan: #00ffff;
     $green: #00ff00;
@@ -144,7 +166,6 @@ class PipelineApp(App):
     }
     """
 
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Grid(id="main-grid"):
@@ -153,6 +174,43 @@ class PipelineApp(App):
             yield OperationsWidget("Operations", id="operations")
             yield ProgressWidget("Progress", id="scraping-progress")
         yield Footer()
+
+    async def action_run_pipeline(self) -> None:
+        env = get_subprocess_env()
+        asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                "python", "daily_pipeline.py", "--task", "all", "--force",
+                env=env
+            )
+        )
+
+    async def action_resume_pipeline(self) -> None:
+        env = get_subprocess_env()
+        asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                "python", "daily_pipeline.py", "--task", "update_bars", "--resume", "--force",
+                env=env
+            )
+        )
+
+    async def action_start_daemon(self) -> None:
+        env = get_subprocess_env()
+        asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                "./manager.sh", "daemon-resume",
+                env=env
+            )
+        )
+
+    async def action_stop_daemon(self) -> None:
+        asyncio.create_task(
+            asyncio.create_subprocess_exec("./manager.sh", "daemon-stop")
+        )
+
+    async def action_run_health(self) -> None:
+        asyncio.create_task(
+            asyncio.create_subprocess_exec("python", "daily_pipeline.py", "--task", "health_check", "--force")
+        )
 
 if __name__ == "__main__":
     app = PipelineApp()

@@ -118,3 +118,17 @@ def test_get_subprocess_env():
     assert env.get("DISABLE_YFINANCE_FALLBACK") == "1"
 
 
+@pytest.mark.asyncio
+async def test_key_bindings():
+    from tui import PipelineApp
+    app = PipelineApp()
+    async with app.run_test() as pilot:
+        # Verify action exists
+        assert app.check_action("run_pipeline") is True
+        assert app.check_action("resume_pipeline") is True
+        assert app.check_action("start_daemon") is True
+        assert app.check_action("stop_daemon") is True
+        assert app.check_action("run_health") is True
+
+
+
