@@ -261,11 +261,16 @@ class PipelineApp(App):
         task.add_done_callback(self._background_tasks.discard)
 
     CSS = """
-    $border-normal: #334155;
-    $border-hover: #475569;
-    $border-focus: #38bdf8;
     $bg-panel: #111827;
     $bg-screen: #030712;
+
+    $blue-normal: #1d4ed8;
+    $blue-hover: #3b82f6;
+    $blue-focus: #60a5fa;
+
+    $rose-normal: #be123c;
+    $rose-hover: #e11d48;
+    $rose-focus: #fb7185;
 
     Screen {
         background: $bg-screen;
@@ -278,23 +283,37 @@ class PipelineApp(App):
         height: 100%;
         padding: 1 2;
     }
-    #status-dashboard, #operations, #scraping-progress, #live-logs {
-        border: round $border-normal;
+    #status-dashboard, #operations, #scraping-progress {
+        border: round $blue-normal;
         background: $bg-panel;
         padding: 1 2;
         border-title-align: left;
-        border-title-color: #94a3b8;
+        border-title-color: #60a5fa;
     }
-    #status-dashboard:hover, #operations:hover, #scraping-progress:hover, #live-logs:hover {
-        border: round $border-hover;
-        border-title-color: #f8fafc;
+    #status-dashboard:hover, #operations:hover, #scraping-progress:hover {
+        border: round $blue-hover;
+        border-title-color: #93c5fd;
     }
-    #status-dashboard:focus, #operations:focus, #scraping-progress:focus, #live-logs:focus {
-        border: round $border-focus;
-        border-title-color: #38bdf8;
+    #status-dashboard:focus, #operations:focus, #scraping-progress:focus {
+        border: round $blue-focus;
+        border-title-color: #3b82f6;
     }
+
     #live-logs {
+        border: round $rose-normal;
+        background: $bg-panel;
+        padding: 1 2;
+        border-title-align: left;
+        border-title-color: #fb7185;
         row-span: 3;
+    }
+    #live-logs:hover {
+        border: round $rose-hover;
+        border-title-color: #fecdd3;
+    }
+    #live-logs:focus {
+        border: round $rose-focus;
+        border-title-color: #e11d48;
     }
     """
 
