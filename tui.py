@@ -1,21 +1,32 @@
 import asyncio
+import glob
 import json
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Header, Static, RichLog
 
 DEFAULT_DB_PATH = Path.home() / "Code/data/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
 PROGRESS_JSON_PATH = Path.home() / "Code/data/quant_data/progress.json"
+LOGS_DIR_PATH = Path.home() / "Code/data/quant_data/logs"
+
+
+def find_latest_log_file(logs_dir: str) -> Optional[str]:
+    files = glob.glob(os.path.join(logs_dir, "smartmoney_*.log"))
+    if not files:
+        daemon_log = os.path.join(logs_dir, "daemon.log")
+        return daemon_log if os.path.exists(daemon_log) else None
+    return max(files, key=os.path.getmtime)
 
 def parse_progress(progress_path: str) -> Optional[dict]:
     p = Path(progress_path)
@@ -154,8 +165,46 @@ class ProgressWidget(Static):
         )
         self.update(text)
 
-class LogsWidget(Static):
-    pass
+class LogsWidget(RichLog):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("markup", True)
+        super().__init__(*args, **kwargs)
+
+    def on_mount(self) -> None:
+        self.active_log: Optional[str] = None
+        self.file_handle = None
+        self.set_interval(1.0, self.tail_log)
+
+    def colorize_line(self, line: str) -> str:
+        line = line.strip()
+        if "INFO" in line:
+            return f"[green]{line}[/green]"
+        elif "WARN" in line:
+            return f"[yellow]{line}[/yellow]"
+        elif "ERROR" in line:
+            return f"[red]{line}[/red]"
+        elif "SUCCESS" in line:
+            return f"[bold green]{line}[/bold green]"
+        return line
+
+    def tail_log(self) -> None:
+        latest = find_latest_log_file(str(LOGS_DIR_PATH))
+        if not latest:
+            return
+
+        if latest != self.active_log:
+            self.active_log = latest
+            if self.file_handle:
+                self.file_handle.close()
+            self.file_handle = open(latest, "r", encoding="utf-8", errors="ignore")
+            # Seek to end on open
+            self.file_handle.seek(0, os.SEEK_END)
+            self.write(f"--- 绑定新日志文件: {os.path.basename(latest)} ---")
+
+        if self.file_handle:
+            lines = self.file_handle.readlines()
+            for line in lines:
+                self.write(self.colorize_line(line))
 
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
@@ -222,7 +271,7 @@ class PipelineApp(App):
         yield Header(show_clock=True)
         with Grid(id="main-grid"):
             yield DashboardWidget("Dashboard", id="status-dashboard")
-            yield LogsWidget("Live Logs", id="live-logs")
+            yield LogsWidget(id="live-logs")
             yield OperationsWidget("Operations", id="operations")
             yield ProgressWidget("Progress", id="scraping-progress")
         yield Footer()

@@ -7,6 +7,7 @@ import pytest
 
 from tui import (
     PipelineApp,
+    find_latest_log_file,
     get_active_stock_count,
     get_daemon_status,
     get_db_size,
@@ -255,3 +256,31 @@ def test_parse_progress_invalid_json(tmp_path):
     progress_file = tmp_path / "progress.json"
     progress_file.write_text("{invalid_json}", encoding="utf-8")
     assert parse_progress(str(progress_file)) is None
+
+
+def test_find_latest_log_file(tmp_path):
+    import os
+    import time
+    # Create mock log files
+    log1 = tmp_path / "smartmoney_20260704.log"
+    log1.touch()
+    os.utime(log1, (time.time() - 100, time.time() - 100))
+    
+    log2 = tmp_path / "smartmoney_20260705.log"
+    log2.touch()
+    
+    latest = find_latest_log_file(str(tmp_path))
+    assert Path(latest).name == "smartmoney_20260705.log"
+
+    # Clean up and test fallback to daemon.log
+    log1.unlink()
+    log2.unlink()
+    daemon_log = tmp_path / "daemon.log"
+    daemon_log.touch()
+    
+    latest_fallback = find_latest_log_file(str(tmp_path))
+    assert Path(latest_fallback).name == "daemon.log"
+    
+    # Test when no logs exist
+    daemon_log.unlink()
+    assert find_latest_log_file(str(tmp_path)) is None
