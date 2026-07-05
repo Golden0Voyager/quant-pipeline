@@ -6,7 +6,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -41,7 +40,10 @@ def get_db_size(db_path: str) -> str:
     p = Path(db_path)
     if p.exists():
         bytes_size = p.stat().st_size
-        return f"{bytes_size / (1024 * 1024):.2f} MB"
+        mb = bytes_size / (1024 * 1024)
+        if mb >= 1024:
+            return f"{mb / 1024:.2f} GB"
+        return f"{mb:.2f} MB"
     return "0.00 MB"
 
 def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
@@ -51,14 +53,18 @@ def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
     try:
         pid = int(p.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
-        return "Running", pid
-    except (ValueError, OSError):
+        res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=2.0)
+        if "daily_pipeline.py" in res.stdout or "manager.sh" in res.stdout:
+            return "Running", pid
+        return "Stopped", None
+    except (ValueError, OSError, subprocess.SubprocessError):
         return "Stopped", None
 
 def get_subprocess_env() -> dict:
     env = os.environ.copy()
     env["NO_PROXY"] = "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
     env["DISABLE_YFINANCE_FALLBACK"] = "1"
+    env["QUANT_DB_PATH"] = str(DEFAULT_DB_PATH)
     return env
 
 async def get_launchd_status(env: dict | None = None) -> bool:
@@ -101,7 +107,7 @@ class DashboardWidget(Static):
     async def update_status(self) -> None:
         db_size = get_db_size(str(DEFAULT_DB_PATH))
         active_stocks = await asyncio.to_thread(get_active_stock_count, str(DEFAULT_DB_PATH))
-        daemon_status, daemon_pid = get_daemon_status(DAEMON_PID_PATH)
+        daemon_status, daemon_pid = await asyncio.to_thread(get_daemon_status, DAEMON_PID_PATH)
         launchd_active = await get_launchd_status()
 
         daemon_str = f"[green]Running (PID: {daemon_pid})[/green]" if daemon_status == "Running" else "[red]Stopped[/red]"
@@ -151,7 +157,7 @@ class ProgressWidget(Static):
         
         pct = (processed / total * 100) if total > 0 else 0
         bar_length = 20
-        filled = int(bar_length * processed / total) if total > 0 else 0
+        filled = min(bar_length, max(0, int(bar_length * processed / total))) if total > 0 else 0
         bar = "█" * filled + "░" * (bar_length - filled)
         
         text = (
@@ -167,6 +173,7 @@ class ProgressWidget(Static):
 class LogsWidget(RichLog):
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("markup", True)
+        kwargs.setdefault("max_lines", 1000)
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
@@ -201,12 +208,13 @@ class LogsWidget(RichLog):
                 return
 
             if latest != self.active_log:
-                self.active_log = latest
                 if self.file_handle:
                     self.file_handle.close()
-                self.file_handle = open(latest, "r", encoding="utf-8", errors="ignore")
+                fh = open(latest, "r", encoding="utf-8", errors="ignore")
                 # Seek to end on open
-                self.file_handle.seek(0, os.SEEK_END)
+                fh.seek(0, os.SEEK_END)
+                self.file_handle = fh
+                self.active_log = latest
                 self.write(f"--- 绑定新日志文件: {os.path.basename(latest)} ---")
 
             if self.file_handle:

@@ -73,9 +73,13 @@ def test_get_daemon_status_running(tmp_path):
     pid_file = tmp_path / "daemon.pid"
     current_pid = os.getpid()
     pid_file.write_text(str(current_pid))
-    status, pid = get_daemon_status(str(pid_file))
-    assert status == "Running"
-    assert pid == current_pid
+    
+    mock_res = MagicMock()
+    mock_res.stdout = "python daily_pipeline.py --task update_bars"
+    with patch("subprocess.run", return_value=mock_res):
+        status, pid = get_daemon_status(str(pid_file))
+        assert status == "Running"
+        assert pid == current_pid
 
 def test_get_daemon_status_invalid_pid(tmp_path):
     pid_file = tmp_path / "daemon.pid"
