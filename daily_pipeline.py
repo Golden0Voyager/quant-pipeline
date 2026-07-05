@@ -998,7 +998,11 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": 0, "skipped": True}
 
     total = len(rows)
-    logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已跳过北交所）")
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已包含北交所）")
+    else:
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已跳过北交所）")
 
     # 2. 分批调用（每批 50 只，串行 + 小延迟避免风控）
     batch = 50
