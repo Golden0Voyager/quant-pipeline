@@ -8,8 +8,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid
@@ -21,14 +20,14 @@ PROGRESS_JSON_PATH = Path.home() / "Code/data/quant_data/progress.json"
 LOGS_DIR_PATH = Path.home() / "Code/data/quant_data/logs"
 
 
-def find_latest_log_file(logs_dir: str) -> Optional[str]:
+def find_latest_log_file(logs_dir: str) -> str | None:
     files = glob.glob(os.path.join(logs_dir, "smartmoney_*.log"))
     if not files:
         daemon_log = os.path.join(logs_dir, "daemon.log")
         return daemon_log if os.path.exists(daemon_log) else None
     return max(files, key=os.path.getmtime)
 
-def parse_progress(progress_path: str) -> Optional[dict]:
+def parse_progress(progress_path: str) -> dict | None:
     p = Path(progress_path)
     if not p.exists():
         return None
@@ -171,12 +170,20 @@ class LogsWidget(RichLog):
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
-        self.active_log: Optional[str] = None
+        self.active_log: str | None = None
         self.file_handle = None
         self.set_interval(1.0, self.tail_log)
 
+    def on_unmount(self) -> None:
+        if self.file_handle:
+            try:
+                self.file_handle.close()
+            except Exception:
+                pass
+            self.file_handle = None
+
     def colorize_line(self, line: str) -> str:
-        line = line.strip()
+        line = escape(line.strip())
         if "INFO" in line:
             return f"[green]{line}[/green]"
         elif "WARN" in line:
@@ -188,23 +195,26 @@ class LogsWidget(RichLog):
         return line
 
     def tail_log(self) -> None:
-        latest = find_latest_log_file(str(LOGS_DIR_PATH))
-        if not latest:
-            return
+        try:
+            latest = find_latest_log_file(str(LOGS_DIR_PATH))
+            if not latest:
+                return
 
-        if latest != self.active_log:
-            self.active_log = latest
+            if latest != self.active_log:
+                self.active_log = latest
+                if self.file_handle:
+                    self.file_handle.close()
+                self.file_handle = open(latest, "r", encoding="utf-8", errors="ignore")
+                # Seek to end on open
+                self.file_handle.seek(0, os.SEEK_END)
+                self.write(f"--- 绑定新日志文件: {os.path.basename(latest)} ---")
+
             if self.file_handle:
-                self.file_handle.close()
-            self.file_handle = open(latest, "r", encoding="utf-8", errors="ignore")
-            # Seek to end on open
-            self.file_handle.seek(0, os.SEEK_END)
-            self.write(f"--- 绑定新日志文件: {os.path.basename(latest)} ---")
-
-        if self.file_handle:
-            lines = self.file_handle.readlines()
-            for line in lines:
-                self.write(self.colorize_line(line))
+                lines = self.file_handle.readlines()
+                for line in lines:
+                    self.write(self.colorize_line(line))
+        except Exception as e:
+            self.write(f"[red]Error tailing log: {escape(str(e))}[/red]")
 
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
