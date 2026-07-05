@@ -102,6 +102,7 @@ def get_active_stock_count(db_path: str) -> int:
 
 class DashboardWidget(Static):
     async def on_mount(self) -> None:
+        self.border_title = "📊 SmartMoney 状态看板"
         await self.update_status()
         self.set_interval(2.0, self.update_status)
 
@@ -111,44 +112,42 @@ class DashboardWidget(Static):
         daemon_status, daemon_pid = await asyncio.to_thread(get_daemon_status, DAEMON_PID_PATH)
         launchd_active = await get_launchd_status()
 
-        daemon_str = f"[green]Running (PID: {daemon_pid})[/green]" if daemon_status == "Running" else "[red]Stopped[/red]"
-        launchd_str = "[green]Active[/green]" if launchd_active else "[red]Inactive[/red]"
+        daemon_str = f"[bold green]Running[/bold green] [gray](PID: {daemon_pid})[/gray]" if daemon_status == "Running" else "[bold red]Stopped[/bold red]"
+        launchd_str = "[bold green]Active[/bold green]" if launchd_active else "[bold red]Inactive[/bold red]"
 
         text = (
-            "📊 SmartMoney 状态看板\n"
-            "==========================\n"
-            f"数据库大小:  {db_size}\n"
-            f"有效股票数量: {active_stocks}\n"
-            f"守护进程状态: {daemon_str}\n"
-            f"定时任务状态: {launchd_str}\n"
+            f" • [bold gray]数据库大小：[/bold gray]  [cyan]{db_size}[/cyan]\n"
+            f" • [bold gray]有效股票数：[/bold gray]  [cyan]{active_stocks}[/cyan]\n"
+            f" • [bold gray]守护进程：[/bold gray]    {daemon_str}\n"
+            f" • [bold gray]定时任务：[/bold gray]    {launchd_str}\n"
         )
         self.update(text)
 
 
 class OperationsWidget(Static):
     def on_mount(self) -> None:
+        self.border_title = "⚙️ 控制面板 (Operations)"
         text = (
-            "⚙️ 控制面板 (Operations)\n"
-            "==========================\n"
-            "快捷键操作：\n"
-            "  • [R] 立即启动完整更新\n"
-            "  • [M] 断点续续数据更新\n"
-            "  • [D] 启动守护进程 (Daemon)\n"
-            "  • [S] 停止守护进程 (Daemon)\n"
-            "  • [H] 立即进行数据库健康检查\n"
-            "  • [Q] 退出监控面板\n"
+            " [bold #f1f5f9 on #334155] R [/]  立即启动完整更新\n"
+            " [bold #f1f5f9 on #334155] M [/]  断点续传数据更新\n"
+            " [bold #f1f5f9 on #334155] D [/]  启动守护进程 (Daemon)\n"
+            " [bold #f1f5f9 on #334155] S [/]  停止守护进程 (Daemon)\n"
+            " [bold #f1f5f9 on #334155] H [/]  立即进行数据健康检查\n"
+            " [bold #f1f5f9 on #334155] Q [/]  退出系统监控面板\n"
         )
         self.update(text)
 
+
 class ProgressWidget(Static):
     def on_mount(self) -> None:
+        self.border_title = "📈 进度看板"
         self.update_progress()
         self.set_interval(2.0, self.update_progress)
 
     def update_progress(self) -> None:
         progress = parse_progress(str(PROGRESS_JSON_PATH))
         if not progress:
-            self.update("📈 进度看板\n==========================\n当前无运行中的任务，或未生成进度文件。")
+            self.update(" 当前无运行中的任务，或未生成进度文件。")
             return
 
         processed = progress.get("processed", 0)
@@ -162,14 +161,14 @@ class ProgressWidget(Static):
         bar = "█" * filled + "░" * (bar_length - filled)
 
         text = (
-            "📈 数据抓取进度\n"
-            "==========================\n"
-            f"任务:     {progress.get('task')}\n"
-            f"更新进度: [{bar}] {pct:.1f}% ({processed}/{total})\n"
-            f"当前股票: {last_symbol}\n"
-            f"失败数量: [red]{failed_count}[/red]\n"
+            f" • [bold gray]当前任务：[/bold gray]  [yellow]{progress.get('task')}[/yellow]\n"
+            f" • [bold gray]更新进度：[/bold gray]  [bold #e2e8f0]{pct:.1f}%[/bold #e2e8f0] ([cyan]{processed}[/cyan]/[cyan]{total}[/cyan])\n"
+            f"            [bold #c084fc]{bar}[/bold #c084fc]\n"
+            f" • [bold gray]当前股票：[/bold gray]  [cyan]{last_symbol}[/cyan]\n"
+            f" • [bold gray]失败数量：[/bold gray]  [bold red]{failed_count}[/bold red]\n"
         )
         self.update(text)
+
 
 class LogsWidget(RichLog):
     def __init__(self, *args, **kwargs) -> None:
@@ -178,6 +177,7 @@ class LogsWidget(RichLog):
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
+        self.border_title = "📋 实时系统日志"
         self.active_log: str | None = None
         self.file_handle = None
         self.set_interval(1.0, self.tail_log)
@@ -246,14 +246,14 @@ class PipelineApp(App):
         task.add_done_callback(self._background_tasks.discard)
 
     CSS = """
-    $cyan: #00ffff;
-    $green: #00ff00;
-    $magenta: #ff00ff;
-    $yellow: #ffff00;
-    $panel: #1e1e1e;
+    $border-normal: #334155;
+    $border-hover: #475569;
+    $border-focus: #38bdf8;
+    $bg-panel: #111827;
+    $bg-screen: #030712;
 
     Screen {
-        background: #121212;
+        background: $bg-screen;
     }
     #main-grid {
         layout: grid;
@@ -261,38 +261,35 @@ class PipelineApp(App):
         grid-rows: 1fr 1fr 1fr;
         grid-columns: 1fr 1fr;
         height: 100%;
-        padding: 1;
+        padding: 1 2;
     }
-    #status-dashboard {
-        border: double $cyan;
-        background: $panel;
-        padding: 1;
+    #status-dashboard, #operations, #scraping-progress, #live-logs {
+        border: round $border-normal;
+        background: $bg-panel;
+        padding: 1 2;
+        border-title-align: left;
+        border-title-color: #94a3b8;
     }
-    #operations {
-        border: double $green;
-        background: $panel;
-        padding: 1;
+    #status-dashboard:hover, #operations:hover, #scraping-progress:hover, #live-logs:hover {
+        border: round $border-hover;
+        border-title-color: #f8fafc;
     }
-    #scraping-progress {
-        border: double $magenta;
-        background: $panel;
-        padding: 1;
+    #status-dashboard:focus, #operations:focus, #scraping-progress:focus, #live-logs:focus {
+        border: round $border-focus;
+        border-title-color: #38bdf8;
     }
     #live-logs {
-        border: double $yellow;
-        background: $panel;
         row-span: 3;
-        padding: 1;
     }
     """
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Grid(id="main-grid"):
-            yield DashboardWidget("Dashboard", id="status-dashboard")
+            yield DashboardWidget(id="status-dashboard")
             yield LogsWidget(id="live-logs")
-            yield OperationsWidget("Operations", id="operations")
-            yield ProgressWidget("Progress", id="scraping-progress")
+            yield OperationsWidget(id="operations")
+            yield ProgressWidget(id="scraping-progress")
         yield Footer()
 
     async def _run_in_background(self, *args: str) -> None:
