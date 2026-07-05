@@ -127,6 +127,15 @@ class PipelineApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _create_background_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     CSS = """
     $cyan: #00ffff;
     $green: #00ff00;
@@ -195,7 +204,7 @@ class PipelineApp(App):
 
     async def action_run_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
-        asyncio.create_task(
+        self._create_background_task(
             self._run_in_background(
                 sys.executable, pipeline_path, "--task", "all", "--force"
             )
@@ -203,7 +212,7 @@ class PipelineApp(App):
 
     async def action_resume_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
-        asyncio.create_task(
+        self._create_background_task(
             self._run_in_background(
                 sys.executable, pipeline_path, "--task", "update_bars", "--resume", "--force"
             )
@@ -211,19 +220,19 @@ class PipelineApp(App):
 
     async def action_start_daemon(self) -> None:
         manager_path = str(Path(__file__).parent / "manager.sh")
-        asyncio.create_task(
+        self._create_background_task(
             self._run_in_background(manager_path, "daemon-resume")
         )
 
     async def action_stop_daemon(self) -> None:
         manager_path = str(Path(__file__).parent / "manager.sh")
-        asyncio.create_task(
+        self._create_background_task(
             self._run_in_background(manager_path, "daemon-stop")
         )
 
     async def action_run_health(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
-        asyncio.create_task(
+        self._create_background_task(
             self._run_in_background(
                 sys.executable, pipeline_path, "--task", "health_check", "--force"
             )
