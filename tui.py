@@ -259,7 +259,7 @@ class PipelineApp(App):
         layout: grid;
         grid-size: 2 3;
         grid-rows: 1fr 1fr 1fr;
-        grid-columns: 1fr 1fr;
+        grid-columns: 35fr 65fr;
         height: 100%;
         padding: 1 2;
     }
