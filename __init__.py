@@ -4,7 +4,7 @@ Quant Data Pipeline — 数据基础设施维护管道
 职责：独立于任何应用项目，维护共享 SQLite 数据库。
 
 用法：
-    python ~/Code/data/quant_data/pipeline/daily_pipeline.py --task all
+    python daily_pipeline.py --task all
 """
 import os
 import sys

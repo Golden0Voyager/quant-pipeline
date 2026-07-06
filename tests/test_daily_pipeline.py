@@ -426,40 +426,48 @@ class TestUpdateFundFlow:
 # retry_failed
 # ===========================================================================
 class TestRetryFailed:
-    def test_no_file(self, tmp_path: Path):
+    def _make_progress(self, tmp_path: Path, failed: list[str]):
+        import json
+        prog = tmp_path / "progress.json"
+        prog.write_text(json.dumps({"failed_queue": failed, "task": "retry"}))
+
+    def test_no_progress(self, tmp_path: Path):
         db = MagicMock()
         loader = MagicMock()
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, loader)
         assert r["total"] == 0
 
-    def test_empty_file(self, tmp_path: Path):
+    def test_empty_queue(self, tmp_path: Path):
+        self._make_progress(tmp_path, [])
         db = MagicMock()
-        (tmp_path / "retry_queue.txt").write_text("")
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, MagicMock())
         assert r["total"] == 0
 
     def test_normal(self, tmp_path: Path):
+        self._make_progress(tmp_path, ["000001.SZ", "000002.SZ"])
         db = MagicMock()
         loader = MagicMock()
         db.get_daily_bars.return_value = _bars_df(["2024-01-02"])
         loader.incremental_update.return_value = _bars_df(["2024-01-02", "2024-01-03"])
-        (tmp_path / "retry_queue.txt").write_text("000001.SZ\n000002.SZ\n")
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, loader)
         assert r["success"] == 2
 
     def test_some_still_fail(self, tmp_path: Path):
-        (tmp_path / "retry_queue.txt").write_text("000001.SZ\n000002.SZ\n")
+        self._make_progress(tmp_path, ["000001.SZ", "000002.SZ"])
         with patch.object(daily_pipeline, "_update_single_bar") as mock_update:
             mock_update.side_effect = ["failed", "success"]
             with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
                 r = daily_pipeline.retry_failed(MagicMock(), MagicMock())
         assert r["success"] == 1
         assert r["failed"] == 1
-        remaining = (tmp_path / "retry_queue.txt").read_text().strip()
-        assert remaining in ("000001.SZ", "000002.SZ")
+        # 确认 progress.json 仍保留剩余失败的记录
+        import json
+        saved = json.loads((tmp_path / "progress.json").read_text())
+        assert "000001.SZ" in saved["failed_queue"]
+        assert "000002.SZ" not in saved["failed_queue"]
 
 
 # ===========================================================================
@@ -1080,7 +1088,8 @@ def test_update_bars_filters_bj():
     db.get_daily_bars.return_value = pd.DataFrame()
 
     with patch("daily_pipeline.is_beijing_stock", side_effect=lambda s: s == "880001"), \
-         patch("daily_pipeline.logger"):
+         patch("daily_pipeline.logger"), \
+         patch.dict(os.environ, {"INCLUDE_BJ": "0"}):
         from daily_pipeline import ProgressTracker
         # Clear any previous progress
         ProgressTracker.clear()

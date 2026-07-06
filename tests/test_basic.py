@@ -6,9 +6,9 @@ import pathlib
 
 def test_import_main_modules():
     import interface  # noqa: F401
-    import validate_and_vacuum  # noqa: F401
+    from scripts import validate_and_vacuum  # noqa: F401
 
 
-def test_manager_script_exists():
-    manager_path = pathlib.Path(__file__).parent.parent / "manager.sh"
-    assert manager_path.exists()
+def test_daemon_script_exists():
+    daemon_path = pathlib.Path(__file__).parent.parent / "scripts" / "daemon.py"
+    assert daemon_path.exists()

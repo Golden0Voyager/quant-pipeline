@@ -35,7 +35,7 @@ for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("~/Code/data/quant_data/quant_core.db").expanduser()
+DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 
 
 def _is_trade_day(d: datetime) -> bool:

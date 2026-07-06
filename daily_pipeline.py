@@ -46,6 +46,27 @@ if _CODE_DIR not in sys.path:
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 
+def _load_env_file(env_path: str | Path = ".env") -> None:
+    """
+    从项目根目录加载 .env 文件到环境变量。
+    格式：KEY=VALUE，支持 # 注释和空行。
+    """
+    env_file = Path(env_path)
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("\"'")
+        if key not in os.environ:  # 不覆盖已存在的环境变量
+            os.environ[key] = value
+
+
+_load_env_file()
+
+
 def should_skip_beijing(symbol: str) -> bool:
     """判断是否根据环境变量配置跳过北交所股票。"""
     include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
@@ -97,9 +118,12 @@ if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
 # ---------------------------------------------------------------------------
 # 配置：数据库路径（环境变量优先）
 # ---------------------------------------------------------------------------
-DEFAULT_DB_PATH = os.path.expanduser("~/Code/data/quant_data/quant_core.db")
+DEFAULT_DB_PATH = os.path.expanduser("~/Code/quant_data/quant_core.db")
 DB_PATH = os.getenv("QUANT_DB_PATH", DEFAULT_DB_PATH)
 SHARED_DATA_DIR = Path(DB_PATH).parent
+
+# 全量拉取回溯天数（默认 2190 天 ≈ 6 年）
+DEFAULT_LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2190"))
 
 # ---------------------------------------------------------------------------
 # 日志配置（统一存放到数据目录下）
@@ -307,14 +331,6 @@ class ProgressTracker:
         if cls.FILE.exists():
             cls.FILE.unlink()
             logger.info("🗑️  进度文件已清除")
-        # 同时清理 retry_queue.txt（如果存在且为空则删除）
-        retry_file = SHARED_DATA_DIR / "retry_queue.txt"
-        if retry_file.exists():
-            with open(retry_file, encoding="utf-8") as f:
-                content = f.read().strip()
-            if not content:
-                retry_file.unlink()
-                logger.info("🗑️  retry_queue.txt 已清理")
 
     @classmethod
     def find_resume_index(cls, stock_codes: list[str], last_symbol: str) -> int:
@@ -344,10 +360,13 @@ def _is_trading_day() -> bool:
 
 
 def _should_update() -> bool:
-    """判断是否需要更新（收盘后且是交易日）。"""
+    """判断是否需要更新（交易日且已收盘）。"""
     now = datetime.now()
     if now.weekday() >= 5:
         logger.info("今天是周末，跳过更新")
+        return False
+    if 9 <= now.hour < 15:
+        logger.info(f"当前时间 {now.hour}:{now.minute:02d}，盘中不执行（15:00 收盘后自动允许）")
         return False
     return True
 
@@ -487,25 +506,12 @@ def update_bars(
         if ProgressTracker.FILE.exists():
             ProgressTracker.clear()
 
-    success_count = progress.get("processed", 0) if progress else 0
+    processed_count = progress.get("processed", 0) if progress else 0
+    success_count = 0
     failed_count = 0
     skipped_count = 0
     failed_symbols: list[str] = progress.get("failed_queue", []) if progress else []
     last_symbol = ""
-
-    # ── 加载 retry_queue.txt 中之前失败的股票 ──
-    retry_file = SHARED_DATA_DIR / "retry_queue.txt"
-    if retry_file.exists():
-        with open(retry_file, encoding="utf-8") as f:
-            retry_symbols = [line.strip() for line in f if line.strip()]
-        if retry_symbols:
-            # 去重合并到 failed_symbols
-            new_retries = [s for s in retry_symbols if s not in failed_symbols]
-            if new_retries:
-                logger.info(f"🔄 从 retry_queue.txt 加载 {len(new_retries)} 只历史失败股票")
-                failed_symbols.extend(new_retries)
-        # 清空 retry_queue.txt，避免重复累积
-        retry_file.unlink()
 
     # 计算剩余需要处理的股票
     remaining_codes = stock_codes[start_idx:]
@@ -557,6 +563,7 @@ def update_bars(
                 failed_count += 1
                 if symbol not in failed_symbols:
                     failed_symbols.append(symbol)
+            processed_count += 1
 
             # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
             if result != "skipped":
@@ -569,7 +576,7 @@ def update_bars(
                 time.sleep(random.uniform(0.1, 0.4))
 
             # 每 N 只股票刷新一次进度文件
-            current_processed = success_count + skipped_count + failed_count
+            current_processed = processed_count
             if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
                 logger.info(
                     f"  📥 进度: {current_processed}/{total} "
@@ -610,7 +617,7 @@ def update_bars(
                 }
 
         # 每批次结束也刷新进度
-        current_processed = success_count + skipped_count + failed_count
+        current_processed = processed_count
         ProgressTracker.save(
             task="update_bars",
             last_symbol=last_symbol,
@@ -629,22 +636,21 @@ def update_bars(
             logger.info(f"⏳ 批次间休息 {batch_sleep:.1f}s... (倍率 {multiplier}x)")
             time.sleep(batch_sleep)
 
-    # 处理完成：去重并保存失败队列，清除进度文件
+    # 处理完成：去重并保存失败队列
     unique_failed = list(dict.fromkeys(failed_symbols))  # 保持顺序去重
     if unique_failed:
-        retry_file = SHARED_DATA_DIR / "retry_queue.txt"
-        with open(retry_file, "w", encoding="utf-8") as f:
-            for s in unique_failed:
-                f.write(f"{s}\n")
-        logger.warning(f"⚠️  {len(unique_failed)} 只股票写入 retry 队列: {retry_file}")
+        # 保留进度文件，记录失败队列供 retry_failed 任务使用
+        ProgressTracker.save(
+            task="retry",
+            last_symbol=last_symbol,
+            processed=processed_count,
+            total=total,
+            failed_queue=unique_failed,
+        )
+        logger.warning(f"⚠️  {len(unique_failed)} 只股票记录到失败队列，可通过 retry_failed 任务重试")
     else:
-        # 如果没有失败，确保 retry_queue.txt 不存在
-        retry_file = SHARED_DATA_DIR / "retry_queue.txt"
-        if retry_file.exists():
-            retry_file.unlink()
-
-    # 成功完成，清除进度文件
-    ProgressTracker.clear()
+        # 无失败，清除进度文件
+        ProgressTracker.clear()
 
     logger.info("\n" + "=" * 60)
     logger.info("📈 日线数据更新完成")
@@ -740,8 +746,10 @@ def _update_single_bar(
                 if len(df_bars) == len(existing):
                     return "skipped"
             else:
-                # 正常非自选股的全量拉取走默认的 3 年配置
-                df_bars = loader.get_daily_bars(symbol)
+                # 正常非自选股的全量拉取走 DEFAULT_LOOKBACK_DAYS 天配置
+                df_bars = loader.get_daily_bars(symbol, start_date=(
+                    datetime.now() - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+                ).strftime("%Y%m%d"))
 
             if df_bars.empty:
                 return "skipped"
@@ -1936,18 +1944,20 @@ def retry_failed(
     db: DatabaseInterface, loader: DataLoaderInterface
 ) -> dict:
     """重试之前失败的股票。"""
-    retry_file = SHARED_DATA_DIR / "retry_queue.txt"
-    if not retry_file.exists():
-        logger.info("ℹ️  retry 队列为空")
-        return {"success": 0, "failed": 0, "total": 0}
-
-    with open(retry_file, encoding="utf-8") as f:
-        symbols = [line.strip() for line in f if line.strip()]
-
+    prog_file = SHARED_DATA_DIR / "progress.json"
+    symbols: list[str] = []
+    if prog_file.exists():
+        try:
+            data = json.loads(prog_file.read_text(encoding="utf-8"))
+            symbols = data.get("failed_queue", [])
+        except Exception:
+            pass
     symbols = [s for s in symbols if not should_skip_beijing(s)]
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
+        if prog_file.exists():
+            prog_file.unlink()
         return {"success": 0, "failed": 0, "total": 0}
 
     logger.info("\n" + "=" * 60)
@@ -1955,7 +1965,7 @@ def retry_failed(
     logger.info("=" * 60)
 
     success = 0
-    still_failed = []
+    still_failed: list[str] = []
 
     for symbol in symbols:
         result = _update_single_bar(db, loader, symbol)
@@ -1964,13 +1974,26 @@ def retry_failed(
         else:
             still_failed.append(symbol)
 
-    with open(retry_file, "w", encoding="utf-8") as f:
-        for s in still_failed:
-            f.write(f"{s}\n")
-
-    logger.info(f"✅ 重试完成: {success}/{len(symbols)} 只成功")
     if still_failed:
-        logger.warning(f"⚠️  仍有 {len(still_failed)} 只失败，保留在队列中")
+        # 原子写入：先写临时文件，再 rename
+        data = {
+            "task": "retry",
+            "last_symbol": symbols[-1],
+            "processed": success,
+            "total": len(symbols),
+            "failed_queue": still_failed,
+        }
+        tmp = prog_file.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(prog_file)
+        logger.warning(f"⚠️  仍有 {len(still_failed)} 只失败，保留在重试队列中")
+    else:
+        if prog_file.exists():
+            prog_file.unlink()
+        logger.info(f"✅ 重试完成: {success}/{len(symbols)} 只成功")
 
     return {"success": success, "failed": len(still_failed), "total": len(symbols)}
 
@@ -2099,7 +2122,7 @@ def health_check(db: DatabaseInterface) -> dict:
         if free_size > 10 * 1024 * 1024 and free_pct > 20:
             issues.append(
                 f"数据库存在较多碎片空间 (约 {free_size / (1024*1024):.2f} MB, "
-                f"占比 {free_pct:.1f}%)，建议运行 `python validate_and_vacuum.py --vacuum` 进行压缩整理"
+                f"占比 {free_pct:.1f}%)，建议运行 `python scripts/validate_and_vacuum.py --vacuum` 进行压缩整理"
             )
     except Exception as e:
         logger.warning(f"⚠️  无法读取数据库 Page 状态: {e}")

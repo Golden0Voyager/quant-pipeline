@@ -16,7 +16,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MASTER_DB = Path.home() / "Code/data/quant_data/quant_core.db"
+MASTER_DB = Path.home() / "Code/quant_data/quant_core.db"
 
 
 def fmt_num(n: int) -> str:

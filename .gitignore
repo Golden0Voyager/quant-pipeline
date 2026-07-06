@@ -18,3 +18,7 @@ logs/
 
 # AI agent workflow config
 .omo/
+.superpowers/
+
+# Environment config (may contain secrets)
+.env

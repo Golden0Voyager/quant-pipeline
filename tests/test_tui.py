@@ -190,7 +190,7 @@ async def test_run_in_background_exception():
 async def test_action_handlers_use_run_in_background():
     app = PipelineApp()
     expected_pipeline_path = str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py")
-    expected_manager_path = str(Path(sys.modules["tui"].__file__).parent / "manager.sh")
+    expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
          patch("asyncio.create_task") as mock_create_task:
@@ -214,7 +214,7 @@ async def test_action_handlers_use_run_in_background():
         await app.action_start_daemon()
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
-            expected_manager_path, "daemon-resume"
+            sys.executable, expected_daemon_path, "start", "--resume"
         )
 
         mock_run_bg.reset_mock()
@@ -222,7 +222,7 @@ async def test_action_handlers_use_run_in_background():
         await app.action_stop_daemon()
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
-            expected_manager_path, "daemon-stop"
+            sys.executable, expected_daemon_path, "stop"
         )
 
         mock_run_bg.reset_mock()

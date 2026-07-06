@@ -14,10 +14,10 @@ from textual.binding import Binding
 from textual.containers import Grid
 from textual.widgets import Footer, Header, RichLog, Static
 
-DEFAULT_DB_PATH = Path.home() / "Code/data/quant_data/quant_core.db"
+DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
-PROGRESS_JSON_PATH = Path.home() / "Code/data/quant_data/progress.json"
-LOGS_DIR_PATH = Path.home() / "Code/data/quant_data/logs"
+PROGRESS_JSON_PATH = Path.home() / "Code/quant_data/progress.json"
+LOGS_DIR_PATH = Path.home() / "Code/quant_data/logs"
 
 
 def find_latest_log_file(logs_dir: str) -> str | None:
@@ -55,7 +55,7 @@ def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
         pid = int(p.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
         res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=2.0)
-        if "daily_pipeline.py" in res.stdout or "manager.sh" in res.stdout:
+        if "daily_pipeline.py" in res.stdout or "daemon.py" in res.stdout:
             return "Running", pid
         return "Stopped", None
     except (ValueError, OSError, subprocess.SubprocessError):
@@ -359,15 +359,15 @@ class PipelineApp(App):
         )
 
     async def action_start_daemon(self) -> None:
-        manager_path = str(Path(__file__).parent / "manager.sh")
+        daemon_path = str(Path(__file__).parent / "scripts" / "daemon.py")
         self._create_background_task(
-            self._run_in_background(manager_path, "daemon-resume")
+            self._run_in_background(sys.executable, daemon_path, "start", "--resume")
         )
 
     async def action_stop_daemon(self) -> None:
-        manager_path = str(Path(__file__).parent / "manager.sh")
+        daemon_path = str(Path(__file__).parent / "scripts" / "daemon.py")
         self._create_background_task(
-            self._run_in_background(manager_path, "daemon-stop")
+            self._run_in_background(sys.executable, daemon_path, "stop")
         )
 
     async def action_run_health(self) -> None:

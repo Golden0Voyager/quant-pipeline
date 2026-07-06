@@ -14,7 +14,7 @@ v2 改进：
     python reconcile_with_akshare.py --limit 50 --dry-run
 
     # 2. 全量修复（先备份数据库！）
-    cp ~/Code/data/quant_data/quant_core.db ~/Code/data/quant_data/quant_core.db.backup
+    cp ~/Code/quant_data/quant_core.db ~/Code/quant_data/quant_core.db.backup
     python reconcile_with_akshare.py
 
     # 3. 只重跑之前 AkShare 失败的股票
@@ -75,7 +75,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-DEFAULT_DB_PATH = os.path.expanduser("~/Code/data/quant_data/quant_core.db")
+DEFAULT_DB_PATH = os.path.expanduser("~/Code/quant_data/quant_core.db")
 LOG_DIR = Path(DEFAULT_DB_PATH).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / f"reconcile_{datetime.now().strftime('%Y%m%d')}.log"

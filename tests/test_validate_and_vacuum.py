@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from validate_and_vacuum import do_vacuum, fmt_num, run_checks
+from scripts.validate_and_vacuum import do_vacuum, fmt_num, run_checks
 
 
 @pytest.fixture
@@ -106,7 +106,7 @@ def test_do_vacuum(tmp_path: Path):
 
 
 def test_main_with_nonexistent_db():
-    from validate_and_vacuum import main
+    from scripts.validate_and_vacuum import main
 
     with patch.object(sys, "argv", ["validate_and_vacuum.py", "--db", "/nonexistent/test.db"]):
         with pytest.raises(SystemExit) as exc:
@@ -115,7 +115,7 @@ def test_main_with_nonexistent_db():
 
 
 def test_main_with_vacuum_and_failure(tmp_path: Path, daily_bars_schema: str):
-    from validate_and_vacuum import main
+    from scripts.validate_and_vacuum import main
 
     db_path = tmp_path / "broken.db"
     conn = sqlite3.connect(str(db_path))
@@ -132,7 +132,7 @@ def test_main_with_vacuum_and_failure(tmp_path: Path, daily_bars_schema: str):
 
 
 def test_main_with_vacuum_success(tmp_path: Path, daily_bars_schema: str):
-    from validate_and_vacuum import main
+    from scripts.validate_and_vacuum import main
 
     db_path = tmp_path / "clean.db"
     conn = sqlite3.connect(str(db_path))
