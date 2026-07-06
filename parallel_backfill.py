@@ -35,7 +35,7 @@ from pathlib import Path
 HOME = Path.home()
 MASTER_DB = HOME / "Code/data/quant_data/quant_core.db"
 PIPELINE_DIR = HOME / "Code/quant_pipeline"
-PYTHON = HOME / "Code/smartmoney_hunter/.venv/bin/python3"
+PYTHON = HOME / "Code/quant_hunter/.venv/bin/python3"
 
 
 def copy_schema(src_db: Path, dst_db: Path):
