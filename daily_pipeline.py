@@ -45,6 +45,7 @@ if _CODE_DIR not in sys.path:
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
+
 def should_skip_beijing(symbol: str) -> bool:
     """判断是否根据环境变量配置跳过北交所股票。"""
     include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
