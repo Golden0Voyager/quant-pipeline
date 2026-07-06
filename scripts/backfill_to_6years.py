@@ -6,17 +6,16 @@
 """
 from __future__ import annotations
 
-import os
+import argparse
+import logging
+import random
+import sqlite3
 import sys
 import time
-import sqlite3
-import random
-import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import akshare as ak
-import argparse
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-7s | %(message)s')
