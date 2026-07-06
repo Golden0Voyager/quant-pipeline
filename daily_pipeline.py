@@ -45,6 +45,13 @@ if _CODE_DIR not in sys.path:
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
+def should_skip_beijing(symbol: str) -> bool:
+    """判断是否根据环境变量配置跳过北交所股票。"""
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        return False
+    return is_beijing_stock(symbol)
+
 from interface import (
     DatabaseInterface,
     DataLoaderInterface,
@@ -353,6 +360,74 @@ def _sleep_with_progress(seconds: float, label: str = "等待"):
 
 
 # ===========================================================================
+# 任务 0: 更新全市场股票列表
+# ===========================================================================
+
+def _infer_market(code: str) -> str:
+    """根据股票代码前缀精确推断板块市场标识。
+
+    分类规则：
+      688xxx → star  (科创板)
+      6xxxxx → sh    (沪市主板)
+      300xxx / 301xxx → gem  (创业板)
+      002xxx / 003xxx → sme  (深市中小板)
+      000xxx / 001xxx → sz   (深市主板)
+      43xxxx / 83xxxx / 87xxxx / 82xxxx / 920xxx → bj (北交所)
+      其余 → sz (兜底)
+    """
+    if code.startswith("688"):
+        return "star"
+    if code.startswith("6"):
+        return "sh"
+    if code.startswith(("300", "301")):
+        return "gem"
+    if code.startswith(("002", "003")):
+        return "sme"
+    if code.startswith(("000", "001")):
+        return "sz"
+    if code.startswith(("4", "8", "920")):
+        return "bj"
+    return "sz"
+
+
+def update_stock_list(db: DatabaseInterface) -> dict:
+    """从 AkShare 拉取全量 A 股列表并写入 stock_list 表。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📋 任务: 更新全市场股票列表")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        df_raw = ak.stock_info_a_code_name()
+        if df_raw is None or df_raw.empty:
+            logger.warning("⚠️  未获取到股票列表数据")
+            return {"saved": 0, "error": "empty response"}
+
+        df = df_raw[["code", "name"]].copy()
+        df["code"] = df["code"].astype(str).str.strip()
+        df["name"] = df["name"].astype(str).str.strip()
+        df["market"] = df["code"].apply(_infer_market)
+        df["industry"] = None  # 由 update_industry 任务填充
+
+        db.save_stock_list(df)
+        saved = len(df)
+        sh_count = (df["market"] == "sh").sum()
+        sz_count = (df["market"] == "sz").sum()
+        bj_count = (df["market"] == "bj").sum()
+        logger.info(
+            f"✅ 股票列表更新完成: {saved} 只 "
+            f"(沪市 {sh_count} / 深市 {sz_count} / 北交所 {bj_count})"
+        )
+        return {"saved": saved, "sh": int(sh_count), "sz": int(sz_count), "bj": int(bj_count)}
+    except Exception as e:
+        logger.error(f"❌ 股票列表更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
 # 任务 1: 更新日线数据（增量 + 断点续传）
 # ===========================================================================
 
@@ -372,14 +447,17 @@ def update_bars(
         logger.error("❌ 股票列表为空")
         return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not is_beijing_stock(c)]
+    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     if limit:
         stock_codes = stock_codes[:limit]
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")
 
     total = len(stock_codes)
     bj_count = len(stocks) - total
-    logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
+    if bj_count > 0:
+        logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
+    else:
+        logger.info(f"📊 共 {total} 只股票待更新（已包含北交所）")
 
     # ── 断点续传检测 ──
     progress = None
@@ -902,6 +980,14 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 1. 查找 fundamentals 表中最新的交易日，确保在正确的日期上更新股息率
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(trade_date) FROM fundamentals")
+    row = cursor.fetchone()
+    conn.close()
+    target_date = row[0] if (row and row[0]) else today
+
     # 1. 读取全量股票
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
@@ -913,14 +999,18 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         logger.warning("⚠️  股票列表为空")
         return {"saved": 0, "total": 0}
 
-    rows = [(c, m) for c, m in rows if not is_beijing_stock(c)]
+    rows = [(c, m) for c, m in rows if not should_skip_beijing(c)]
 
     if xq._get_token() is None:
         logger.warning("⚠️  XUEQIU_TOKEN 未设置，跳过雪球行情快照")
         return {"saved": 0, "total": 0, "skipped": True}
 
     total = len(rows)
-    logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已跳过北交所）")
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已包含北交所）")
+    else:
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已跳过北交所）")
 
     # 2. 分批调用（每批 50 只，串行 + 小延迟避免风控）
     batch = 50
@@ -952,7 +1042,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
                     """UPDATE fundamentals SET dividend_yield = ?
                        WHERE ts_code = ? AND trade_date = ?
                        AND (dividend_yield IS NULL OR dividend_yield = 0)""",
-                    (div_yield, q["code"], today),
+                    (div_yield, q["code"], target_date),
                 )
                 if cursor.rowcount:
                     updated += 1
@@ -1028,13 +1118,13 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     saved = 0
     total = 0
 
     for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
         try:
-            df = fetcher(date=yesterday)
+            df = fetcher(date=target_date)
             if df is None or df.empty:
                 logger.warning(f"⚠️  {exchange.upper()} 融资融券无数据")
                 continue
@@ -1045,7 +1135,7 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
                     if not code:
                         continue
                     data = {
-                        "trade_date": yesterday,
+                        "trade_date": target_date,
                         "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
                         "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
                         "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
@@ -1080,9 +1170,9 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     try:
-        df = ak.stock_lhb_detail_em(start_date=yesterday, end_date=yesterday)
+        df = ak.stock_lhb_detail_em(start_date=target_date, end_date=target_date)
         if df is None or df.empty:
             logger.warning("⚠️  龙虎榜无数据")
             return {"saved": 0, "total": 0}
@@ -1094,7 +1184,7 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
                 if not code:
                     continue
                 data = {
-                    "trade_date": yesterday,
+                    "trade_date": target_date,
                     "close_price": row.get("收盘价"),
                     "pct_change": row.get("涨跌幅"),
                     "net_buy_amount": row.get("龙虎榜净买额"),
@@ -1131,9 +1221,9 @@ def update_block_trade(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_date = _get_expected_latest_trading_day().replace("-", "")
     try:
-        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=yesterday, end_date=yesterday)
+        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date, end_date=target_date)
         if df is None or df.empty:
             logger.warning("⚠️  大宗交易无数据")
             return {"saved": 0, "total": 0}
@@ -1145,7 +1235,7 @@ def update_block_trade(db: DatabaseInterface) -> dict:
                 if not code:
                     continue
                 data = {
-                    "trade_date": yesterday,
+                    "trade_date": target_date,
                     "deal_price": row.get("成交价"),
                     "close_price": row.get("收盘价"),
                     "discount_rate": row.get("折溢率"),
@@ -1233,19 +1323,19 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date = _get_expected_latest_trading_day()
 
     df: pd.DataFrame | None = None
     source = "primary"
     try:
-        df = _fetch_sector_fund_flow_primary(yesterday)
+        df = _fetch_sector_fund_flow_primary(target_date)
     except Exception as e:
         logger.warning(f"⚠️  东财板块资金流向失败: {e}，尝试备用源...")
 
     if df is None or df.empty:
         source = "fallback"
         try:
-            df = _fetch_sector_fund_flow_fallback(yesterday)
+            df = _fetch_sector_fund_flow_fallback(target_date)
         except Exception as e:
             logger.error(f"❌ 备用板块资金流向也失败: {e}")
             return {"saved": 0, "total": 0, "error": str(e)}
@@ -1613,7 +1703,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         logger.error("❌ 股票列表为空")
         return {"saved": 0, "failed": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not is_beijing_stock(c)]
+    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     total = len(stock_codes)
     saved = 0
     failed = 0
@@ -1853,7 +1943,7 @@ def retry_failed(
     with open(retry_file, encoding="utf-8") as f:
         symbols = [line.strip() for line in f if line.strip()]
 
-    symbols = [s for s in symbols if not is_beijing_stock(s)]
+    symbols = [s for s in symbols if not should_skip_beijing(s)]
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
@@ -1884,9 +1974,24 @@ def retry_failed(
     return {"success": success, "failed": len(still_failed), "total": len(symbols)}
 
 
-# ===========================================================================
-# 任务 6: 健康检查
-# ===========================================================================
+def _get_expected_latest_trading_day() -> str:
+    """获取期望的最新交易日日期 (YYYY-MM-DD)。
+    如果是周末，期望最新交易日为上周五；
+    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
+    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
+    """
+    now = datetime.now()
+    target = now
+    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
+    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
+        target -= timedelta(days=1)
+
+    # 如果目标日期是周末，则向前回滚到周五
+    while target.weekday() >= 5:
+        target -= timedelta(days=1)
+
+    return target.strftime("%Y-%m-%d")
+
 
 def health_check(db: DatabaseInterface) -> dict:
     """检查数据库健康状态并生成报告。"""
@@ -1959,8 +2064,9 @@ def health_check(db: DatabaseInterface) -> dict:
     report_lines.append(f"  最新板块资金流日期: {latest_sector}")
     report_lines.append(f"  最新股东户数报告期: {latest_holder}")
 
-    if latest_bar != today:
-        issues.append(f"日线数据未更新到最新: {latest_bar} (今天是 {today})")
+    expected_latest = _get_expected_latest_trading_day()
+    if latest_bar < expected_latest:
+        issues.append(f"日线数据未更新到最新: {latest_bar} (期望最新: {expected_latest}, 今天是 {today})")
 
     cursor.execute(
         """
@@ -2051,6 +2157,7 @@ def run_all(
             return {"error": str(e), "status": "crashed"}
 
     results = {}
+    results["stock_list"] = _safe_task("update_stock_list", update_stock_list, db)
     results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume)
 
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
@@ -2091,6 +2198,7 @@ def main():
         "--task",
         choices=[
             "all",
+            "update_stock_list",
             "update_bars",
             "update_indicators",
             "update_fundamentals",
@@ -2140,6 +2248,8 @@ def main():
 
     if args.task == "all":
         run_all(db, loader, engine, resume=args.resume)
+    elif args.task == "update_stock_list":
+        update_stock_list(db)
     elif args.task == "update_bars":
         update_bars(db, loader, limit=args.limit, resume=args.resume)
     elif args.task == "update_indicators":

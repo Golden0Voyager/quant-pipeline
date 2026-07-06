@@ -15,3 +15,6 @@ __pycache__/
 .coverage
 htmlcov/
 logs/
+
+# AI agent workflow config
+.omo/

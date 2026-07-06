@@ -1089,3 +1089,27 @@ def test_update_bars_filters_bj():
     # Should only process 2 stocks (skip the BJ one)
     assert r["total"] == 2
     assert r["success"] + r["failed"] + r["skipped"] == 2
+
+
+def test_update_bars_includes_bj_when_configured():
+    """Verify that BJ stocks are included in update_bars when INCLUDE_BJ is set."""
+    db = MagicMock()
+    loader = MagicMock()
+
+    stocks_df = pd.DataFrame({
+        "code": ["000001", "880001", "000002"],
+        "name": ["平安银行", "BJ Test", "万科A"],
+    })
+    db.get_stock_list.return_value = stocks_df
+    db.get_daily_bars.return_value = pd.DataFrame()
+
+    with patch.dict(os.environ, {"INCLUDE_BJ": "1"}), \
+         patch("daily_pipeline.is_beijing_stock", side_effect=lambda s: s == "880001"), \
+         patch("daily_pipeline.logger"):
+        from daily_pipeline import ProgressTracker
+        ProgressTracker.clear()
+        r = daily_pipeline.update_bars(db, loader)
+
+    # Should process all 3 stocks (include the BJ one)
+    assert r["total"] == 3
+    assert r["success"] + r["failed"] + r["skipped"] == 3
