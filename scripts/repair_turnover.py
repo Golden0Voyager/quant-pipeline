@@ -28,7 +28,7 @@ def symbol_to_sina(symbol: str) -> str:
         return f"sh{symbol}"
     if symbol.startswith("0") or symbol.startswith("3"):
         return f"sz{symbol}"
-    if symbol.startswith("8") or symbol.startswith("4"):
+    if symbol.startswith("8") or symbol.startswith("4") or symbol.startswith("920"):
         return f"bj{symbol}"
     return symbol
 
