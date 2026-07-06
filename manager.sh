@@ -6,7 +6,7 @@ set -e
 
 LABEL_UPDATE="com.smartmoney.update"
 LABEL_HEALTH="com.smartmoney.healthcheck"
-PYTHON="/Users/hainingyu/Code/smartmoney_hunter/.venv/bin/python3"
+PYTHON="/Users/hainingyu/Code/quant_hunter/.venv/bin/python3"
 PIPELINE_DIR="/Users/hainingyu/Code/quant_pipeline"
 
 # 颜色
