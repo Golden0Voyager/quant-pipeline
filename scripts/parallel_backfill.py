@@ -181,6 +181,7 @@ def main():
     parser.add_argument("--merge-only", action="store_true", help="仅合并已有 worker 库，不启动新任务")
     parser.add_argument("--no-cleanup", action="store_true", help="合并后不删除临时库")
     args = parser.parse_args()
+    os.nice(10)
 
     if not MASTER_DB.exists():
         print(f"❌ 主库不存在: {MASTER_DB}")

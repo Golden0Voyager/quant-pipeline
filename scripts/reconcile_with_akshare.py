@@ -591,6 +591,7 @@ def main():
         help="每 N 只强制做一次全量对比（忽略快速跳过），防止早期污染漏检。0=关闭 (默认)",
     )
     args = parser.parse_args()
+    os.nice(10)
 
     conn = sqlite3.connect(args.db_path)
     cursor = conn.cursor()

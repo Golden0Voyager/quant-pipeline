@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 import time
@@ -74,6 +75,7 @@ def main() -> int:
     parser.add_argument("--cutoff", default="2026-06-01", help="修复起始日期")
     parser.add_argument("--limit", type=int, default=None, help="最多修复 N 只股票（测试用）")
     args = parser.parse_args()
+    os.nice(10)
 
     end_date = (pd.Timestamp.now() + pd.Timedelta(days=1)).strftime("%Y%m%d")
 

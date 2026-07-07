@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import glob
 import json
 import logging
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -11,11 +13,13 @@ from pathlib import Path
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid
-from textual.widgets import Footer, Header, RichLog, Static
+from textual.containers import Grid, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, Label, RichLog, Static
 
 DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
+PIPELINE_PID_PATH = "/tmp/daily_pipeline.pid"
 PROGRESS_JSON_PATH = Path.home() / "Code/quant_data/progress.json"
 LOGS_DIR_PATH = Path.home() / "Code/quant_data/logs"
 
@@ -61,6 +65,119 @@ def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
     except (ValueError, OSError, subprocess.SubprocessError):
         return "Stopped", None
 
+
+def find_running_pipeline_processes() -> list[dict[str, str | int]]:
+    """查找所有正在运行的 daily_pipeline.py 进程（非 daemon）。"""
+    processes = []
+    # 1. 检查 pidfile
+    pidfile = Path(PIPELINE_PID_PATH)
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, 0)
+            res = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "pid,etime,command="],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if "daily_pipeline.py" in res.stdout:
+                parts = res.stdout.strip().split(None, 2)
+                processes.append({
+                    "pid": int(parts[0]),
+                    "elapsed": parts[1] if len(parts) > 1 else "unknown",
+                    "command": parts[2] if len(parts) > 2 else "daily_pipeline.py",
+                })
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+
+    # 2. 扫描所有 daily_pipeline.py 进程（兜底，覆盖 pidfile 之前的旧进程）
+    try:
+        res = subprocess.run(
+            ["pgrep", "-f", "daily_pipeline\\.py"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        for line in res.stdout.strip().splitlines():
+            pid = int(line.strip())
+            # 跳过已在列表中的
+            if any(p["pid"] == pid for p in processes):
+                continue
+            # 跳过 TUI 自身的子进程（ppid 是 TUI）
+            try:
+                ppid_res = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "ppid="],
+                    capture_output=True, text=True, timeout=2.0,
+                )
+                ppid = int(ppid_res.stdout.strip())
+                if ppid == os.getpid():
+                    continue
+            except Exception:
+                continue
+            res2 = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "pid,etime,command="],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            if res2.stdout.strip():
+                parts = res2.stdout.strip().split(None, 2)
+                processes.append({
+                    "pid": int(parts[0]),
+                    "elapsed": parts[1] if len(parts) > 1 else "unknown",
+                    "command": parts[2] if len(parts) > 2 else "daily_pipeline.py",
+                })
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+
+    return processes
+
+
+class ConfirmStopScreen(ModalScreen[bool]):
+    """弹窗：检测到后台进程，询问是否终止。"""
+
+    CSS = """
+    ConfirmStopScreen {
+        align: center middle;
+    }
+    #confirm-dialog {
+        width: 70;
+        height: auto;
+        max-height: 20;
+        background: #1e293b;
+        border: thick #f59e0b;
+        padding: 1 2;
+    }
+    #confirm-dialog Label {
+        width: 100%;
+    }
+    #confirm-buttons {
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, processes: list[dict[str, str | int]]) -> None:
+        super().__init__()
+        self._processes = processes
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label("[bold yellow]⚠️  Background pipeline processes detected:[/bold yellow]")
+            for p in self._processes:
+                yield Label(
+                    f"  PID {p['pid']}  |  已运行 {p['elapsed']}  |  {p['command']}"
+                )
+            yield Label("")
+            yield Label("Stop these processes?")
+            with Horizontal(id="confirm-buttons"):
+                yield Label("[bold green]  Y = Stop & Start  [/bold green]")
+                yield Label("     ")
+                yield Label("[bold red]  N = Keep Running  [/bold red]")
+
+    def on_key(self, event) -> None:
+        if event.key.lower() == "y":
+            self.dismiss(True)
+        elif event.key.lower() == "n":
+            self.dismiss(False)
+
 def get_subprocess_env() -> dict:
     env = os.environ.copy()
     env["NO_PROXY"] = "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
@@ -83,6 +200,150 @@ async def get_launchd_status(env: dict | None = None) -> bool:
     except Exception:
         return False
 
+def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
+    """Query row counts for all key tables.
+
+    fast=True: 使用 PRAGMA page_count 估算（瞬间完成，大表有误差）
+    fast=False: 精确 COUNT(*)（大表可能耗时 10s+）
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return {}
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        tables = [
+            "daily_bars", "indicators", "fundamentals",
+            "fund_flow", "margin_trading", "dragon_tiger",
+            "block_trade", "sector_fund_flow", "shareholder_count",
+            "quarterly_financials", "historical_valuation",
+            "sector_industry", "stock_list",
+        ]
+        result = {}
+        if fast:
+            # 快速估算：用 page_count * page_size 推算行数（SQLite 内部统计）
+            cur.execute("PRAGMA page_count")
+            page_count = cur.fetchone()[0]
+            cur.execute("PRAGMA page_size")
+            page_size = cur.fetchone()[0]
+            db_bytes = page_count * page_size
+            # 粗略估算：每行约 500 bytes（含索引开销）
+            estimated_total = max(1, db_bytes // 500)
+            for tbl in tables:
+                result[tbl] = 0  # 先返回 0，后台精确更新
+            result["_estimated_total"] = estimated_total
+            result["_db_bytes"] = db_bytes
+        else:
+            for tbl in tables:
+                try:
+                    cur.execute(f"SELECT COUNT(*) FROM {tbl}")
+                    result[tbl] = cur.fetchone()[0]
+                except Exception:
+                    result[tbl] = 0
+        return result
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+TABLE_DATE_COLUMNS: dict[str, str] = {
+    "daily_bars": "trade_date",
+    "indicators": "trade_date",
+    "fundamentals": "trade_date",
+    "fund_flow": "trade_date",
+    "margin_trading": "trade_date",
+    "dragon_tiger": "trade_date",
+    "block_trade": "trade_date",
+    "sector_fund_flow": "trade_date",
+    "shareholder_count": "report_date",
+    "quarterly_financials": "report_period",
+    "historical_valuation": "trade_date",
+}
+
+
+def _get_expected_latest_trading_day() -> str:
+    """获取期望的最新交易日日期 (YYYY-MM-DD)。
+
+    周末 → 上周五；周一至周五 15:30 之前 → 前一天；15:30 之后 → 今天。
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    target = now
+    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
+        target -= timedelta(days=1)
+    while target.weekday() >= 5:
+        target -= timedelta(days=1)
+    return target.strftime("%Y-%m-%d")
+
+
+def get_latest_dates(db_path: str) -> dict[str, str | None]:
+    """查询每个表最新日期/报告期。"""
+    p = Path(db_path)
+    if not p.exists():
+        return {}
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        result: dict[str, str | None] = {}
+        for tbl, col in TABLE_DATE_COLUMNS.items():
+            try:
+                cur.execute(f"SELECT MAX({col}) FROM {tbl}")
+                value = cur.fetchone()[0]
+                result[tbl] = str(value) if value is not None else None
+            except Exception:
+                result[tbl] = None
+        return result
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _date_status(latest: str | None, expected: str) -> tuple[str, str]:
+    """返回日期新鲜度标记和状态标签。
+
+    使用 Rich 颜色标记替代 emoji，避免终端字体大小不一致导致图标过大。
+    """
+    if not latest:
+        return "[red]●[/red]", "无数据"
+    if latest == expected:
+        return "[green]●[/green]", "最新"
+    try:
+        from datetime import datetime, timedelta
+
+        latest_dt = datetime.strptime(latest, "%Y-%m-%d")
+        expected_dt = datetime.strptime(expected, "%Y-%m-%d")
+        if latest_dt >= expected_dt - timedelta(days=2):
+            return "[yellow]●[/yellow]", "略滞后"
+    except Exception:
+        pass
+    return "[red]●[/red]", "滞后"
+
+
+def format_count(n: int) -> str:
+    """Format a count into human-readable form."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def format_chinese_magnitude(n: int) -> str:
+    """将数字转为中文量级：万、亿。"""
+    if n >= 100_000_000:
+        return f"{n / 100_000_000:.2f}亿"
+    if n >= 10_000:
+        return f"{n / 10_000:.1f}万"
+    return str(n)
+
+
 def get_active_stock_count(db_path: str) -> int:
     p = Path(db_path)
     if not p.exists():
@@ -102,7 +363,7 @@ def get_active_stock_count(db_path: str) -> int:
 
 class DashboardWidget(Static):
     async def on_mount(self) -> None:
-        self.border_title = "📊 SmartMoney 状态看板"
+        self.border_title = "📊 Dashboard"
         await self.update_status()
         self.set_interval(2.0, self.update_status)
 
@@ -116,31 +377,157 @@ class DashboardWidget(Static):
         launchd_str = "[bold green]Active[/bold green]" if launchd_active else "[bold red]Inactive[/bold red]"
 
         text = (
-            f" • [bold gray]数据库大小：[/bold gray]  [cyan]{db_size}[/cyan]\n"
-            f" • [bold gray]有效股票数：[/bold gray]  [cyan]{active_stocks}[/cyan]\n"
-            f" • [bold gray]守护进程：[/bold gray]    {daemon_str}\n"
-            f" • [bold gray]定时任务：[/bold gray]    {launchd_str}\n"
+            f" • [bold gray]DB Size:    [/bold gray] [cyan]{db_size}[/cyan]\n"
+            f" • [bold gray]Stocks:     [/bold gray] [cyan]{active_stocks}[/cyan]\n"
+            f" • [bold gray]Daemon:     [/bold gray] {daemon_str}\n"
+            f" • [bold gray]Scheduler:  [/bold gray] {launchd_str}\n"
         )
         self.update(text)
 
 
 class OperationsWidget(Static):
     def on_mount(self) -> None:
-        self.border_title = "⚙️ 控制面板 (Operations)"
+        self.border_title = "⚙️ Controls"
         text = (
-            " [bold #f1f5f9 on #334155] R [/]  立即启动完整更新\n"
-            " [bold #f1f5f9 on #334155] M [/]  断点续传数据更新\n"
-            " [bold #f1f5f9 on #334155] D [/]  启动守护进程 (Daemon)\n"
-            " [bold #f1f5f9 on #334155] S [/]  停止守护进程 (Daemon)\n"
-            " [bold #f1f5f9 on #334155] H [/]  立即进行数据健康检查\n"
-            " [bold #f1f5f9 on #334155] Q [/]  退出系统监控面板\n"
+            " [bold #f1f5f9 on #334155] S [/]  Full Update\n"
+            " [bold #f1f5f9 on #334155] R [/]  Resume (Checkpoint)\n"
+            " [bold #f1f5f9 on #334155] X [/]  Stop Running Task\n"
+            " [bold #f1f5f9 on #334155] D [/]  Start Daemon\n"
+            " [bold #f1f5f9 on #334155] Z [/]  Stop Daemon\n"
+            " [bold #f1f5f9 on #334155] H [/]  Health Check\n"
+            " [bold #f1f5f9 on #334155] T [/]  Toggle Theme\n"
+            " [bold #f1f5f9 on #334155] C [/]  Copy Logs\n"
+            " [bold #f1f5f9 on #334155] Q [/]  Quit"
         )
         self.update(text)
 
 
+class DataCompletenessWidget(Static):
+    TABLE_LABELS: dict[str, str] = {
+        "daily_bars": "Daily Bars",
+        "indicators": "Indicators",
+        "fundamentals": "Fundamentals",
+        "historical_valuation": "Valuation",
+        "fund_flow": "Fund Flow",
+        "margin_trading": "Margin Trading",
+        "dragon_tiger": "Dragon Tiger",
+        "block_trade": "Block Trade",
+        "sector_fund_flow": "Sector Flow",
+        "shareholder_count": "Shareholders",
+        "quarterly_financials": "Quarterly Fin.",
+        "sector_industry": "Industry",
+        "stock_list": "Stock List",
+    }
+
+    async def on_mount(self) -> None:
+        self.border_title = "📀 Data Completeness"
+        self._counts: dict[str, int] = {}
+        self._latest_dates: dict[str, str | None] = {}
+        self._bg_tasks: set[asyncio.Task] = set()
+        self.set_interval(30.0, self.update_completeness)
+        # 先快速加载（瞬间完成），再后台精确更新
+        self._counts = await asyncio.to_thread(
+            get_all_table_counts, str(DEFAULT_DB_PATH), fast=True
+        )
+        self._rebuild_content()
+        task = asyncio.create_task(self._refresh_exact_counts())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _refresh_exact_counts(self) -> None:
+        """后台精确更新行数与最新日期（不阻塞界面）。"""
+        exact = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
+        latest = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
+        if exact:
+            self._counts = exact
+        if latest:
+            self._latest_dates = latest
+        self._rebuild_content()
+
+    async def update_completeness(self) -> None:
+        self._counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH))
+        self._latest_dates = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
+        self._rebuild_content()
+
+    def _rebuild_content(self) -> None:
+        counts = self._counts
+        latest_dates = self._latest_dates
+        if not counts:
+            self.update(" 等待数据库连接...")
+            return
+
+        # 快速模式：显示估算值，等待后台精确更新
+        estimated_total = counts.get("_estimated_total", 0)
+        if estimated_total and sum(counts.get(k, 0) for k in self.TABLE_LABELS) == 0:
+            db_size = get_db_size(str(DEFAULT_DB_PATH))
+            lines = [
+                f" • [bold]数据库：[/bold][cyan]{db_size}[/cyan]  [dim]行数加载中...[/dim]",
+                "",
+            ]
+            for _tbl, label in self.TABLE_LABELS.items():
+                lines.append(f" • [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
+            self.update("\n".join(lines))
+            return
+
+        stock_count = counts.get("stock_list", 0) or 5527
+        daily_bars = counts.get("daily_bars", 0) or 1
+        expected_date = _get_expected_latest_trading_day()
+
+        total_rows = sum(v for k, v in counts.items() if not k.startswith("_"))
+        db_size = get_db_size(str(DEFAULT_DB_PATH))
+
+        lines = [
+            f" • [bold]总数据量：[/bold][cyan]{format_chinese_magnitude(total_rows)}[/cyan] 行  [gray]({db_size})[/gray]",
+            f" • [bold]期望最新日期：[/bold][cyan]{expected_date}[/cyan]",
+            "",
+        ]
+
+        for tbl, label in self.TABLE_LABELS.items():
+            n = counts.get(tbl, 0)
+            formatted = format_count(n)
+            cn_formatted = format_chinese_magnitude(n)
+            latest = latest_dates.get(tbl)
+            emoji, status = _date_status(latest, expected_date)
+            date_str = f"[gray]{latest or '—'}[/gray]"
+            status_str = f"{emoji} [bold]{status}[/bold]"
+
+            if tbl == "daily_bars":
+                expected = stock_count * 1500
+                pct = min(n / expected * 100, 100) if expected else 0
+                bar, pct_int = self._mini_bar(pct)
+                lines.append(
+                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
+                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray] {bar} [dim]{pct_int}%[/dim]"
+                )
+            elif tbl == "indicators":
+                pct = n / daily_bars * 100 if daily_bars else 0
+                bar, pct_int = self._mini_bar(pct)
+                lines.append(
+                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
+                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray] {bar} [dim]{pct_int}%[/dim]"
+                )
+            elif tbl == "stock_list":
+                lines.append(f" • [bold gray]{label}[/bold gray]: [cyan]{formatted}[/cyan] 只")
+            else:
+                lines.append(
+                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
+                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]"
+                )
+
+        self.update("\n".join(lines))
+
+    @staticmethod
+    def _mini_bar(pct: float) -> tuple[str, int]:
+        length = 10
+        pct_int = max(0, min(100, int(round(pct))))
+        filled = max(0, min(length, round(length * pct_int / 100)))
+        bar = "█" * filled + "░" * (length - filled)
+        return f"[bold #22c55e]{bar}[/bold #22c55e]", pct_int
+
+
 class ProgressWidget(Static):
     def on_mount(self) -> None:
-        self.border_title = "📈 进度看板"
+        self.border_title = "📈 Progress"
         self.update_progress()
         self.set_interval(2.0, self.update_progress)
 
@@ -171,6 +558,8 @@ class ProgressWidget(Static):
 
 
 class LogsWidget(RichLog):
+    ALLOW_SELECT = True
+
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("markup", True)
         kwargs.setdefault("max_lines", 1000)
@@ -178,17 +567,15 @@ class LogsWidget(RichLog):
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
-        self.border_title = "📋 实时系统日志"
+        self.border_title = "📋 Live Logs"
         self.active_log: str | None = None
         self.file_handle = None
         self.set_interval(1.0, self.tail_log)
 
     def on_unmount(self) -> None:
         if self.file_handle:
-            try:  # noqa: SIM105
+            with contextlib.suppress(Exception):
                 self.file_handle.close()
-            except Exception:
-                pass
             self.file_handle = None
 
     def colorize_line(self, line: str) -> str:
@@ -231,7 +618,7 @@ class LogsWidget(RichLog):
                 fh.seek(0, os.SEEK_END)
                 self.file_handle = fh
                 self.active_log = latest
-                self.write(f"--- 绑定新日志文件: {os.path.basename(latest)} ---")
+                self.write(f"--- Bound to log: {os.path.basename(latest)} ---")
 
             if self.file_handle:
                 lines = self.file_handle.readlines()
@@ -243,17 +630,74 @@ class LogsWidget(RichLog):
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
     BINDINGS = [
-        Binding("r", "run_pipeline", "Run Pipeline"),
-        Binding("m", "resume_pipeline", "Resume"),
+        Binding("s", "run_pipeline", "Full Update"),
+        Binding("r", "resume_pipeline", "Resume"),
+        Binding("x", "stop_pipeline", "Stop"),
         Binding("d", "start_daemon", "Start Daemon"),
-        Binding("s", "stop_daemon", "Stop Daemon"),
+        Binding("z", "stop_daemon", "Stop Daemon"),
         Binding("h", "run_health", "Health Check"),
+        Binding("t", "toggle_theme", "Theme"),
+        Binding("c", "copy_logs", "Copy Logs"),
         Binding("q", "quit", "Quit"),
     ]
+
+    THEMES = {
+        "dark": {
+            "bg-screen": "#030712",
+            "bg-panel": "#111827",
+            "blue-normal": "#1d4ed8",
+            "blue-hover": "#3b82f6",
+            "blue-focus": "#60a5fa",
+            "rose-normal": "#be123c",
+            "rose-hover": "#e11d48",
+            "rose-focus": "#fb7185",
+        },
+        "light": {
+            "bg-screen": "#f8fafc",
+            "bg-panel": "#ffffff",
+            "blue-normal": "#2563eb",
+            "blue-hover": "#3b82f6",
+            "blue-focus": "#60a5fa",
+            "rose-normal": "#e11d48",
+            "rose-hover": "#f43f5e",
+            "rose-focus": "#fb7185",
+        },
+        "green": {
+            "bg-screen": "#022c22",
+            "bg-panel": "#064e3b",
+            "blue-normal": "#047857",
+            "blue-hover": "#059669",
+            "blue-focus": "#34d399",
+            "rose-normal": "#b91c1c",
+            "rose-hover": "#dc2626",
+            "rose-focus": "#f87171",
+        },
+    }
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._background_tasks: set[asyncio.Task] = set()
+        self._current_process: asyncio.subprocess.Process | None = None
+        self._theme_names = list(self.THEMES.keys())
+        self._theme_index = 0
+
+    async def on_mount(self) -> None:
+        """启动时检测后台进程，询问用户是否终止。"""
+        processes = find_running_pipeline_processes()
+        if not processes:
+            return
+        should_stop = await self.push_screen_wait(ConfirmStopScreen(processes))
+        if should_stop:
+            for p in processes:
+                with contextlib.suppress(OSError):
+                    os.kill(p["pid"], signal.SIGTERM)
+            self.notify(
+                f"Sent SIGTERM to {len(processes)} process(es)",
+                severity="information",
+                timeout=3.0,
+            )
+        else:
+            self.notify("Background processes kept running", severity="information", timeout=3.0)
 
     def _create_background_task(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -277,24 +721,24 @@ class PipelineApp(App):
     }
     #main-grid {
         layout: grid;
-        grid-size: 2 3;
-        grid-rows: 1fr 1fr 1fr;
+        grid-size: 2 4;
+        grid-rows: 1fr 1fr 1fr 1fr;
         grid-columns: 35fr 65fr;
         height: 100%;
         padding: 1 2;
     }
-    #status-dashboard, #operations, #scraping-progress {
+    #status-dashboard, #operations, #data-completeness, #scraping-progress {
         border: round $blue-normal;
         background: $bg-panel;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
     }
-    #status-dashboard:hover, #operations:hover, #scraping-progress:hover {
+    #status-dashboard:hover, #operations:hover, #data-completeness:hover, #scraping-progress:hover {
         border: round $blue-hover;
         border-title-color: #93c5fd;
     }
-    #status-dashboard:focus, #operations:focus, #scraping-progress:focus {
+    #status-dashboard:focus, #operations:focus, #data-completeness:focus, #scraping-progress:focus {
         border: round $blue-focus;
         border-title-color: #3b82f6;
     }
@@ -305,7 +749,7 @@ class PipelineApp(App):
         padding: 1 2;
         border-title-align: left;
         border-title-color: #fb7185;
-        row-span: 3;
+        row-span: 4;
     }
     #live-logs:hover {
         border: round $rose-hover;
@@ -323,24 +767,58 @@ class PipelineApp(App):
             yield DashboardWidget(id="status-dashboard")
             yield LogsWidget(id="live-logs")
             yield OperationsWidget(id="operations")
+            yield DataCompletenessWidget(id="data-completeness")
             yield ProgressWidget(id="scraping-progress")
         yield Footer()
+
+    async def _stop_current_process(self) -> None:
+        """终止当前正在运行的子进程及其整个进程组。"""
+        proc = self._current_process
+        if proc is None or proc.returncode is not None:
+            self.notify("No running task to stop", severity="warning", timeout=3.0)
+            return
+        try:
+            # 杀整个进程组（start_new_session=True 创建的）
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                await proc.wait()
+            self.notify("Task stopped", severity="information", timeout=3.0)
+        except ProcessLookupError:
+            self.notify("Process already exited", severity="information", timeout=3.0)
+        finally:
+            self._current_process = None
 
     async def _run_in_background(self, *args: str) -> None:
         env = get_subprocess_env()
         logger = logging.getLogger("quant_pipeline.tui")
+
+        await self._stop_current_process()
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 env=env,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
             )
+            self._current_process = proc
             await proc.wait()
             if proc.returncode != 0:
                 logger.error(f"Subprocess {' '.join(args)} exited with code {proc.returncode}")
         except Exception:
             logger.exception(f"Exception running subprocess {' '.join(args)}")
+        finally:
+            self._current_process = None
 
     async def action_run_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
@@ -370,6 +848,15 @@ class PipelineApp(App):
             self._run_in_background(sys.executable, daemon_path, "stop")
         )
 
+    async def action_stop_pipeline(self) -> None:
+        """停止当前正在运行的 pipeline / resume / health 子进程。"""
+        logger = logging.getLogger("quant_pipeline.tui")
+        if self._current_process is None:
+            logger.info("没有正在运行的任务可停止")
+            return
+        await self._stop_current_process()
+        logger.info("已停止当前运行的任务")
+
     async def action_run_health(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         self._create_background_task(
@@ -377,6 +864,23 @@ class PipelineApp(App):
                 sys.executable, pipeline_path, "--task", "health_check", "--force"
             )
         )
+
+    def action_toggle_theme(self) -> None:
+        self._theme_index = (self._theme_index + 1) % len(self._theme_names)
+        theme_name = self._theme_names[self._theme_index]
+        theme = self.THEMES[theme_name]
+        for var, color in theme.items():
+            self.styles.setvar(var, color)
+        self.notify(f"Theme: {theme_name}", severity="information", timeout=2.0)
+
+    def action_copy_logs(self) -> None:
+        logs_widget = self.query_one("#live-logs", LogsWidget)
+        text = logs_widget.copy_recent_logs(line_count=500)
+        if not text:
+            self.notify("No logs to copy", severity="warning", timeout=2.0)
+            return
+        self.copy_to_clipboard(text)
+        self.notify("Logs copied to clipboard", severity="information", timeout=2.0)
 
 if __name__ == "__main__":
     app = PipelineApp()

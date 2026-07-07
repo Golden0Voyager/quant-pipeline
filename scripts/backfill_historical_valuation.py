@@ -143,6 +143,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印要抓取的日期，不写入数据库")
     args = parser.parse_args()
+    os.nice(10)
 
     # 确定日期范围
     if args.days:
