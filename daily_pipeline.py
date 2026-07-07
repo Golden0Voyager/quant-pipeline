@@ -28,7 +28,9 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 # 设置全局套接字超时，防止网络悬挂/DNS阻塞导致 API 请求无限期挂起
@@ -42,6 +44,10 @@ import pandas as pd
 _CODE_DIR = os.path.expanduser("~/Code")
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
+# smartmoney_hunter 包位于 quant_hunter/src/ 下（~/Code/smartmoney_hunter 是到 quant_hunter 的符号链接）
+_HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
+if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
+    sys.path.insert(0, _HUNTER_SRC)
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
@@ -110,8 +116,8 @@ if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
                 os.environ["http_proxy"] = _proxy_url
                 os.environ["https_proxy"] = _proxy_url
                 # 绕过代理直接访问的域名
-                os.environ["NO_PROXY"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,*.eastmoney.com"
-                os.environ["no_proxy"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,*.eastmoney.com"
+                os.environ["NO_PROXY"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,push2delay.eastmoney.com,*.eastmoney.com"
+                os.environ["no_proxy"] = "localhost,127.0.0.1,datacenter-web.eastmoney.com,push2.eastmoney.com,push2his.eastmoney.com,push2delay.eastmoney.com,*.eastmoney.com"
     except Exception:
         pass
 
@@ -169,6 +175,10 @@ if os.getenv("ULTRA_SAFE") == "1":
     RETRY_DELAY = 3.0           # 重试等待时间缩短为 3s，提高降级流转速率
 
 PROGRESS_FLUSH_INTERVAL = 10  # 每处理 N 只股票刷新一次进度文件
+
+# 并行拉取模式（通过环境变量 PARALLEL_WORKERS 控制，默认 1=串行）
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "1"))
+assert PARALLEL_WORKERS >= 1, "PARALLEL_WORKERS 必须 >= 1"
 
 # ---------------------------------------------------------------------------
 # AkShare 稳定性监控
@@ -546,65 +556,66 @@ def update_bars(
             f"({batch[0]} ~ {batch[-1]}, {abs_start+1}-{abs_end}/{total})"
         )
 
-        for symbol in batch:
-            result = _update_single_bar(
-                db,
-                loader,
-                symbol,
-                watchlist_symbols=watchlist_symbols,
-                backfilled_symbols=backfilled_symbols,
-                backfill_file=backfill_file,
-            )
-            if result == "success":
-                success_count += 1
-            elif result == "skipped":
-                skipped_count += 1
-            else:
-                failed_count += 1
-                if symbol not in failed_symbols:
-                    failed_symbols.append(symbol)
-            processed_count += 1
+        if PARALLEL_WORKERS > 1 and len(batch) > 1:
+            db_write_lock = threading.Lock()
+            with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+                fut_to_symbol = {
+                    executor.submit(
+                        _update_single_bar, db, loader, symbol,
+                        watchlist_symbols=watchlist_symbols,
+                        backfilled_symbols=backfilled_symbols,
+                        backfill_file=backfill_file,
+                        db_lock=db_write_lock,
+                    ): symbol
+                    for symbol in batch
+                }
+                for future in as_completed(fut_to_symbol):
+                    symbol = fut_to_symbol[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        logger.error(f"❌ {symbol} 并行处理异常: {e}")
+                        result = "failed"
 
-            # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
-            if result != "skipped":
-                monitor.record(result == "success", symbol)
+                    # ── 以下结果处理逻辑与串行分支一致 ──
+                    if result == "success":
+                        success_count += 1
+                    elif result == "skipped":
+                        skipped_count += 1
+                    else:
+                        failed_count += 1
+                        if symbol not in failed_symbols:
+                            failed_symbols.append(symbol)
+                    processed_count += 1
 
-            last_symbol = symbol
+                    if result != "skipped":
+                        monitor.record(result == "success", symbol)
 
-            # 如果触发了网络抓取（非 skipped），增加 0.1s 到 0.4s 的随机抖动延迟，平滑并发请求，避免被封锁
-            if result != "skipped":
-                time.sleep(random.uniform(0.1, 0.4))
+                    last_symbol = symbol
 
-            # 每 N 只股票刷新一次进度文件
-            current_processed = processed_count
-            if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
-                logger.info(
-                    f"  📥 进度: {current_processed}/{total} "
-                    f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
-                )
-                ProgressTracker.save(
-                    task="update_bars",
-                    last_symbol=last_symbol,
-                    processed=current_processed,
-                    total=total,
-                    failed_queue=failed_symbols,
-                )
+                    # 每 N 只股票刷新一次进度文件
+                    current_processed = processed_count
+                    if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
+                        logger.info(
+                            f"  📥 进度: {current_processed}/{total} "
+                            f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
+                        )
+                        ProgressTracker.save(
+                            task="update_bars",
+                            last_symbol=last_symbol,
+                            processed=current_processed,
+                            total=total,
+                            failed_queue=failed_symbols,
+                        )
 
-            # 动态调整限流：成功率低时增加休息时间（只有真的抓取了新数据或失败时才休息，skipped不休息）
-            if result != "skipped":
-                multiplier = monitor.get_recommended_sleep_multiplier()
-                sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP) * multiplier
-                time.sleep(sleep_time)
-
-            # 检查是否需要中止（AkShare 极度不稳定时）
+            # 并行批次结束后检查是否需要中止
             should_abort, abort_msg = monitor.should_abort()
             if should_abort:
                 logger.warning(f"⛔ {abort_msg}")
-                # 保存进度并退出
                 ProgressTracker.save(
                     task="update_bars",
                     last_symbol=last_symbol,
-                    processed=current_processed,
+                    processed=processed_count,
                     total=total,
                     failed_queue=failed_symbols,
                 )
@@ -615,6 +626,75 @@ def update_bars(
                     "total": total,
                     "failed_symbols": failed_symbols,
                 }
+        else:
+            for symbol in batch:
+                result = _update_single_bar(
+                    db,
+                    loader,
+                    symbol,
+                    watchlist_symbols=watchlist_symbols,
+                    backfilled_symbols=backfilled_symbols,
+                    backfill_file=backfill_file,
+                )
+                if result == "success":
+                    success_count += 1
+                elif result == "skipped":
+                    skipped_count += 1
+                else:
+                    failed_count += 1
+                    if symbol not in failed_symbols:
+                        failed_symbols.append(symbol)
+                processed_count += 1
+
+                # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
+                if result != "skipped":
+                    monitor.record(result == "success", symbol)
+
+                last_symbol = symbol
+
+                # 如果触发了网络抓取（非 skipped），增加 0.1s 到 0.4s 的随机抖动延迟，平滑请求
+                if result != "skipped":
+                    time.sleep(random.uniform(0.1, 0.4))
+
+                # 每 N 只股票刷新一次进度文件
+                current_processed = processed_count
+                if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
+                    logger.info(
+                        f"  📥 进度: {current_processed}/{total} "
+                        f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
+                    )
+                    ProgressTracker.save(
+                        task="update_bars",
+                        last_symbol=last_symbol,
+                        processed=current_processed,
+                        total=total,
+                        failed_queue=failed_symbols,
+                    )
+
+                # 动态调整限流：成功率低时增加休息时间
+                if result != "skipped":
+                    multiplier = monitor.get_recommended_sleep_multiplier()
+                    sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP) * multiplier
+                    time.sleep(sleep_time)
+
+                # 检查是否需要中止（AkShare 极度不稳定时）
+                should_abort, abort_msg = monitor.should_abort()
+                if should_abort:
+                    logger.warning(f"⛔ {abort_msg}")
+                    ProgressTracker.save(
+                        task="update_bars",
+                        last_symbol=last_symbol,
+                        processed=current_processed,
+                        total=total,
+                        failed_queue=failed_symbols,
+                    )
+                    return {
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                        "total": total,
+                        "failed_symbols": failed_symbols,
+                    }
 
         # 每批次结束也刷新进度
         current_processed = processed_count
@@ -675,6 +755,7 @@ def _update_single_bar(
     watchlist_symbols: set[str] | None = None,
     backfilled_symbols: set[str] | None = None,
     backfill_file: Path | None = None,
+    db_lock: threading.Lock | None = None,
 ) -> str:
     """更新单只股票的日线数据，带重试。
 
@@ -687,7 +768,11 @@ def _update_single_bar(
     # ── 自选股及全量拉取逻辑初始化 ──
     if watchlist_symbols is None:
         try:
-            watchlist_df = db.watchlist_get_all()
+            if db_lock:
+                with db_lock:
+                    watchlist_df = db.watchlist_get_all()
+            else:
+                watchlist_df = db.watchlist_get_all()
             watchlist_symbols = set(watchlist_df["ts_code"].tolist()) if not watchlist_df.empty else set()
         except Exception:
             watchlist_symbols = set()
@@ -722,16 +807,29 @@ def _update_single_bar(
                             logger.warning(f"  ⚠️ {symbol} 自选股全量拉取全部来自 yfinance，跳过保存")
                             return "failed"
 
-                    db.save_daily_bars(symbol, df_bars)
+                    if db_lock:
+                        with db_lock:
+                            db.save_daily_bars(symbol, df_bars)
+                    else:
+                        db.save_daily_bars(symbol, df_bars)
                     logger.info(f"✅ {symbol} 自选股全量历史K线拉取并保存成功，共 {len(df_bars)} 条")
 
                     # 记录已完成全量回填
-                    backfilled_symbols.add(symbol)
-                    try:
-                        with open(backfill_file, "a", encoding="utf-8") as f:
-                            f.write(f"{symbol}\n")
-                    except Exception as fe:
-                        logger.warning(f"⚠️ 无法更新自选股全量标记文件 {backfill_file}: {fe}")
+                    if db_lock:
+                        with db_lock:
+                            backfilled_symbols.add(symbol)
+                            try:
+                                with open(backfill_file, "a", encoding="utf-8") as f:
+                                    f.write(f"{symbol}\n")
+                            except Exception as fe:
+                                logger.warning(f"⚠️ 无法更新自选股全量标记文件 {backfill_file}: {fe}")
+                    else:
+                        backfilled_symbols.add(symbol)
+                        try:
+                            with open(backfill_file, "a", encoding="utf-8") as f:
+                                f.write(f"{symbol}\n")
+                        except Exception as fe:
+                            logger.warning(f"⚠️ 无法更新自选股全量标记文件 {backfill_file}: {fe}")
 
                     return "success"
                 else:
@@ -739,7 +837,11 @@ def _update_single_bar(
                     return "failed"
 
             # 2. 正常增量/全量拉取路径
-            existing = db.get_daily_bars(symbol)
+            if db_lock:
+                with db_lock:
+                    existing = db.get_daily_bars(symbol)
+            else:
+                existing = db.get_daily_bars(symbol)
             if not existing.empty:
                 df_bars = loader.incremental_update(symbol, existing)
                 # 优化点：如果行数没变，说明已经是最新，无需重复保存，直接返回 skipped
@@ -764,7 +866,11 @@ def _update_single_bar(
                     )
                     return "failed"
 
-            db.save_daily_bars(symbol, df_bars)
+            if db_lock:
+                with db_lock:
+                    db.save_daily_bars(symbol, df_bars)
+            else:
+                db.save_daily_bars(symbol, df_bars)
             logger.debug(f"  ✅ {symbol}: {len(df_bars)} 条")
             return "success"
 
@@ -1099,6 +1205,15 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
                     "large_net_inflow_pct": row.get("large_net_inflow_pct"),
                     "simulated": False,
                 }
+                # Skip rows where ALL six numeric fields are NaN/None
+                numeric_fields = [
+                    "main_net_inflow", "main_net_inflow_pct",
+                    "super_large_net_inflow", "super_large_net_inflow_pct",
+                    "large_net_inflow", "large_net_inflow_pct",
+                ]
+                if all(pd.isna(data.get(f)) for f in numeric_fields):
+                    logger.debug(f"  跳过全空资金流: {code}")
+                    continue
                 db.save_fund_flow(code, data)
                 saved += 1
             except Exception as e:
@@ -1270,35 +1385,11 @@ def update_block_trade(db: DatabaseInterface) -> dict:
 # 任务 8: 批量获取板块资金流向
 # ===========================================================================
 
-def _fetch_sector_fund_flow_primary(trade_date: str) -> pd.DataFrame | None:
-    """Primary source: Eastmoney sector fund flow history."""
-    df = ak.stock_sector_fund_flow_hist(symbol="行业资金流")
-    if df is None or df.empty:
-        return None
-    records = []
-    for _, row in df.iterrows():
-        sector = str(row.get("行业", "")).strip()
-        if not sector:
-            continue
-        records.append({
-            "sector_name": sector,
-            "trade_date": trade_date,
-            "main_net_inflow": row.get("主力净流入-净额"),
-            "main_net_inflow_pct": row.get("主力净流入-净占比"),
-            "super_large_net_inflow": row.get("超大单净流入-净额"),
-            "large_net_inflow": row.get("大单净流入-净额"),
-            "medium_net_inflow": row.get("中单净流入-净额"),
-            "small_net_inflow": row.get("小单净流入-净额"),
-            "data_source": "akshare_eastmoney",
-        })
-    return pd.DataFrame(records)
+def _fetch_sector_fund_flow(trade_date: str) -> pd.DataFrame | None:
+    """获取行业资金流向排名（同花顺源）。
 
-
-def _fetch_sector_fund_flow_fallback(trade_date: str) -> pd.DataFrame | None:
-    """Fallback source: Sina/Tonghuashun industry fund flow ranking.
-
-    This endpoint is reachable when Eastmoney is blocked and provides
-    net inflow (净额) and rank (序号) per industry.
+    注意：同花顺仅提供"即时"快照，无法回填历史数据。
+    此函数只用于每日积累，板块资金缺乏免费历史 API。
     """
     df = ak.stock_fund_flow_industry()
     if df is None or df.empty:
@@ -1317,13 +1408,13 @@ def _fetch_sector_fund_flow_fallback(trade_date: str) -> pd.DataFrame | None:
             "large_net_inflow": row.get("流入资金"),
             "medium_net_inflow": row.get("流出资金"),
             "small_net_inflow": None,
-            "data_source": "akshare_fallback",
+            "data_source": "ths",
         })
     return pd.DataFrame(records)
 
 
 def update_sector_fund_flow(db: DatabaseInterface) -> dict:
-    """批量获取板块资金流向并保存（主源失败时自动降级到备用源）。"""
+    """批量获取板块资金流向并保存（同花顺源，仅今日快照，每日积累）。"""
     logger.info("\n" + "=" * 60)
     logger.info("🏭 任务: 批量获取板块资金流向")
     logger.info("=" * 60)
@@ -1334,21 +1425,7 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
 
     target_date = _get_expected_latest_trading_day()
 
-    df: pd.DataFrame | None = None
-    source = "primary"
-    try:
-        df = _fetch_sector_fund_flow_primary(target_date)
-    except Exception as e:
-        logger.warning(f"⚠️  东财板块资金流向失败: {e}，尝试备用源...")
-
-    if df is None or df.empty:
-        source = "fallback"
-        try:
-            df = _fetch_sector_fund_flow_fallback(target_date)
-        except Exception as e:
-            logger.error(f"❌ 备用板块资金流向也失败: {e}")
-            return {"saved": 0, "total": 0, "error": str(e)}
-
+    df = _fetch_sector_fund_flow(target_date)
     if df is None or df.empty:
         logger.warning("⚠️  板块资金流向无数据")
         return {"saved": 0, "total": 0}
@@ -1361,8 +1438,8 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         except Exception:
             continue
 
-    logger.info(f"✅ 板块资金流向保存完成 ({source}): {saved}/{len(df)}")
-    return {"saved": saved, "total": len(df), "source": source}
+    logger.info(f"✅ 板块资金流向保存完成: {saved}/{len(df)}")
+    return {"saved": saved, "total": len(df), "source": "ths"}
 
 
 # ===========================================================================
@@ -2166,6 +2243,7 @@ def run_all(
     start_time = time.time()
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
+    logger.info(f"⚙️  并行线程: {PARALLEL_WORKERS} (默认 1=串行)")
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
@@ -2262,6 +2340,13 @@ def main():
     # 初始化 provider
     ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
     db = ProviderFactory.get_db()
+
+    # 启用 WAL 模式，提升多项目并发读性能
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    conn.close()
     loader = ProviderFactory.get_loader()
     engine = ProviderFactory.get_indicator_engine()
 
