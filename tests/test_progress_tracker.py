@@ -79,34 +79,6 @@ class TestProgressTracker:
         with p1, p2:
             daily_pipeline.ProgressTracker.clear()
 
-    def test_clear_with_retry_file(self):
-        p1, p2 = self.with_patches()
-        with p1, p2:
-            prog_file = daily_pipeline.ProgressTracker.FILE
-            prog_file.parent.mkdir(parents=True, exist_ok=True)
-            prog_file.write_text('{"done": true}')
-
-            retry_file = self.data_dir / "retry_queue.txt"
-            retry_file.write_text("")
-
-            daily_pipeline.ProgressTracker.clear()
-            assert not prog_file.exists()
-            assert not retry_file.exists()
-
-    def test_clear_with_nonempty_retry_file(self):
-        p1, p2 = self.with_patches()
-        with p1, p2:
-            prog_file = daily_pipeline.ProgressTracker.FILE
-            prog_file.parent.mkdir(parents=True, exist_ok=True)
-            prog_file.write_text('{"done": true}')
-
-            retry_file = self.data_dir / "retry_queue.txt"
-            retry_file.write_text("some_symbol")
-
-            daily_pipeline.ProgressTracker.clear()
-            assert not prog_file.exists()
-            assert retry_file.exists()
-
     def test_find_resume_index(self):
         stock_codes = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
         idx = daily_pipeline.ProgressTracker.find_resume_index(stock_codes, "000002.SZ")

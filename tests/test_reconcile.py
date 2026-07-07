@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-import reconcile_with_akshare as rwa
+from scripts import reconcile_with_akshare as rwa
 
 
 # ===========================================================================
@@ -140,7 +140,7 @@ def _ak_df(dates: list[str], close: float = 10.0) -> pd.DataFrame:
 
 class TestGetAkshareData:
     def test_ak_none(self):
-        with patch.object(rwa, "ak", None), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "ak", None), patch("scripts.reconcile_with_akshare.logger"):
             df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert df.empty
 
@@ -152,7 +152,7 @@ class TestGetAkshareData:
                 "成交额": [10500000], "换手率": [0.5], "涨跌幅": [2.0],
                 "振幅": [1.5],
             })
-            with patch("reconcile_with_akshare.no_proxy"):
+            with patch("scripts.reconcile_with_akshare.no_proxy"):
                 df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert not df.empty
         assert "date" in df.columns
@@ -161,7 +161,7 @@ class TestGetAkshareData:
     def test_empty_result(self):
         with patch.object(rwa, "ak") as ak:
             ak.stock_zh_a_hist.return_value = pd.DataFrame()
-            with patch("reconcile_with_akshare.no_proxy"), patch("reconcile_with_akshare.logger"):
+            with patch("scripts.reconcile_with_akshare.no_proxy"), patch("scripts.reconcile_with_akshare.logger"):
                 df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert df.empty
 
@@ -174,18 +174,18 @@ class TestGetAkshareData:
         })
         with patch.object(rwa, "ak") as ak:
             ak.stock_zh_a_hist.side_effect = [Exception("timeout"), good_df]
-            with patch("reconcile_with_akshare.no_proxy"), \
-                 patch("reconcile_with_akshare.time.sleep"), \
-                 patch("reconcile_with_akshare.logger"):
+            with patch("scripts.reconcile_with_akshare.no_proxy"), \
+                 patch("scripts.reconcile_with_akshare.time.sleep"), \
+                 patch("scripts.reconcile_with_akshare.logger"):
                 df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert not df.empty
 
     def test_all_retries_fail(self):
         with patch.object(rwa, "ak") as ak:
             ak.stock_zh_a_hist.side_effect = Exception("fail")
-            with patch("reconcile_with_akshare.no_proxy"), \
-                 patch("reconcile_with_akshare.time.sleep"), \
-                 patch("reconcile_with_akshare.logger"):
+            with patch("scripts.reconcile_with_akshare.no_proxy"), \
+                 patch("scripts.reconcile_with_akshare.time.sleep"), \
+                 patch("scripts.reconcile_with_akshare.logger"):
                 df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert df.empty
 
@@ -226,14 +226,14 @@ class TestCompareAndRepair:
     def test_ak_empty(self, db_conn: sqlite3.Connection):
         _insert_bars(db_conn, "000001.SZ", ["2024-01-02"])
         with patch.object(rwa, "get_akshare_data", return_value=pd.DataFrame()), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ")
         assert result["failed"] == 1
 
     def test_no_date_overlap(self, db_conn: sqlite3.Connection):
         _insert_bars(db_conn, "000001.SZ", ["2024-01-02"])
         ak_df = _ak_df(["2024-02-01"])
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ")
         assert result["diff"] == 1
         assert result["matched"] == -1  # merged empty → len(merged) - total_diff = 0 - 1
@@ -242,7 +242,7 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 10)]
         _insert_bars(db_conn, "000001.SZ", dates)
         ak_df = _ak_df(dates)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ")
         assert result["diff"] == 0
         assert result["matched"] > 0
@@ -251,7 +251,7 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 10)]
         _insert_bars(db_conn, "000001.SZ", dates, data_source=None)
         ak_df = _ak_df(dates)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", backfill_source=True)
         assert result["diff"] == 0
         assert result["fixed"] > 0
@@ -260,7 +260,7 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 10)]
         _insert_bars(db_conn, "000001.SZ", dates, close=10.0)
         ak_df = _ak_df(dates, close=9.5)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", dry_run=True)
         assert result["diff"] > 0
         assert result["fixed"] == 0
@@ -269,7 +269,7 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 10)]
         _insert_bars(db_conn, "000001.SZ", dates, close=10.0)
         ak_df = _ak_df(dates, close=9.5)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", full_check=True)
         assert result["diff"] > 0
 
@@ -281,7 +281,7 @@ class TestCompareAndRepair:
         ak_data.update(dict.fromkeys(dates[3:], 10.0))
         ak_df = _ak_df(dates)
         ak_df["close"] = [ak_data[d] for d in dates]
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", full_check=True, smart_repair=True)
         assert result["fixed"] > 0
 
@@ -289,7 +289,7 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 20)]
         _insert_bars(db_conn, "000001.SZ", dates, close=10.0)
         ak_df = _ak_df(dates, close=9.5)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", smart_repair=True)
         assert result["fixed"] > 0
 
@@ -299,7 +299,7 @@ class TestCompareAndRepair:
         # Only return recent dates from AkShare
         recent_dates = [f"2024-01-{d:02d}" for d in range(8, 12)]
         ak_df = _ak_df(recent_dates)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", since="2024-01-08")
         assert result["total"] == 4  # since filter limits DB rows too
         assert result["matched"] == 4  # all 4 overlap with ak
@@ -309,14 +309,14 @@ class TestCompareAndRepair:
         dates = [f"2024-01-{d:02d}" for d in range(1, 10)]
         _insert_bars(db_conn, "000001.SZ", dates, data_source=None)
         ak_df = _ak_df(dates)
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ", backfill_source=False)
         assert result["fixed"] == 0
 
     def test_less_than_5_rows(self, db_conn: sqlite3.Connection):
         _insert_bars(db_conn, "000001.SZ", ["2024-01-02", "2024-01-03"])
         ak_df = _ak_df(["2024-01-02", "2024-01-03"])
-        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("reconcile_with_akshare.logger"):
+        with patch.object(rwa, "get_akshare_data", return_value=ak_df), patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.compare_and_repair(db_conn, "000001.SZ")
         assert result["diff"] == 0
 
@@ -331,7 +331,7 @@ class TestUpdateIndicators:
             "smartmoney_hunter.indicators": None,
         }
         with patch.dict("sys.modules", import_paths, clear=False), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.update_indicators_for_symbols("/tmp/nonexistent.db", ["000001.SZ"])
         assert result["success"] == 0
         assert result["failed"] == 0
@@ -349,7 +349,7 @@ class TestUpdateIndicators:
             "smartmoney_hunter.indicators": MagicMock(IndicatorCalculator=MagicMock(return_value=calc)),
         }
         with patch.dict("sys.modules", modules, clear=False), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.update_indicators_for_symbols("/tmp/fake.db", ["000001.SZ"])
         assert result["success"] == 1
 
@@ -363,7 +363,7 @@ class TestUpdateIndicators:
             "smartmoney_hunter.indicators": MagicMock(IndicatorCalculator=MagicMock(return_value=calc)),
         }
         with patch.dict("sys.modules", modules, clear=False), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.update_indicators_for_symbols("/tmp/fake.db", ["000001.SZ"])
         assert result["success"] == 0
 
@@ -380,7 +380,7 @@ class TestUpdateIndicators:
             "smartmoney_hunter.indicators": MagicMock(IndicatorCalculator=MagicMock(return_value=calc)),
         }
         with patch.dict("sys.modules", modules, clear=False), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             result = rwa.update_indicators_for_symbols("/tmp/fake.db", ["000001.SZ"])
         assert result["failed"] == 1
 
@@ -396,7 +396,7 @@ class TestMain:
         conn.commit()
         conn.close()
         with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             rwa.main()
 
     def test_retry_failed_with_symbols(self, tmp_path: Path):
@@ -412,7 +412,7 @@ class TestMain:
              patch.object(rwa, "RETRY_FILE", retry_file), \
              patch.object(rwa, "ReconcileProgress"), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
             rwa.main()
@@ -431,7 +431,7 @@ class TestMain:
             "--db-path", str(db_path),
         ]), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
             rwa.main()
@@ -450,7 +450,7 @@ class TestMain:
         ]), \
              patch.object(rwa, "ReconcileProgress") as mock_prog, \
              patch.object(rwa, "compare_and_repair") as mock_car, \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             mock_prog.load.return_value = (2, "000002.SZ")
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
@@ -468,7 +468,7 @@ class TestMain:
             "reconcile.py", "--limit", "3", "--db-path", str(db_path),
         ]), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
             rwa.main()
@@ -486,7 +486,7 @@ class TestMain:
         ]), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
              patch.object(rwa, "update_indicators_for_symbols") as mock_ind, \
-             patch("reconcile_with_akshare.logger"):
+             patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 0, "diff": 1, "fixed": 1,
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
             rwa.main()

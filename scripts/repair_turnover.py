@@ -19,7 +19,7 @@ import pandas as pd
 sys.path.insert(0, str(Path("~/Code").expanduser()))
 from smartmoney_hunter.market_utils import is_beijing_stock
 
-DB_PATH = Path("~/Code/data/quant_data/quant_core.db").expanduser()
+DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 REQUEST_TIMEOUT = 20  # seconds for each Sina request
 
 

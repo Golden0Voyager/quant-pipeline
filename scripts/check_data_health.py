@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path("~/Code/data/quant_data/quant_core.db").expanduser()
+DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 
 
 def get_column_names(cur: sqlite3.Cursor, table: str) -> set[str]:

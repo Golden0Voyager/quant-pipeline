@@ -33,7 +33,7 @@ from pathlib import Path
 # 路径配置
 # ---------------------------------------------------------------------------
 HOME = Path.home()
-MASTER_DB = HOME / "Code/data/quant_data/quant_core.db"
+MASTER_DB = HOME / "Code/quant_data/quant_core.db"
 PIPELINE_DIR = HOME / "Code/quant_pipeline"
 PYTHON = HOME / "Code/quant_hunter/.venv/bin/python3"
 

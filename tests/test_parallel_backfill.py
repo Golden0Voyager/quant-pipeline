@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import parallel_backfill
-from parallel_backfill import copy_schema, prepare_worker_db
+from scripts import parallel_backfill
+from scripts.parallel_backfill import copy_schema, prepare_worker_db
 
 
 # ===========================================================================
@@ -234,7 +234,7 @@ class TestMain:
         conn.commit()
         conn.close()
         with patch.object(parallel_backfill, "MASTER_DB", master), \
-             patch.object(sys, "argv", ["parallel_backfill.py", "--merge-only"]), patch("parallel_backfill.print"):
+             patch.object(sys, "argv", ["parallel_backfill.py", "--merge-only"]), patch("scripts.parallel_backfill.print"):
             parallel_backfill.main()
 
     def test_merge_only_with_data(self, tmp_path: Path):
@@ -252,7 +252,7 @@ class TestMain:
         conn2.close()
         with patch.object(parallel_backfill, "MASTER_DB", master), \
              patch.object(sys, "argv", ["parallel_backfill.py", "--merge-only", "--no-cleanup"]), \
-             patch("parallel_backfill.print"):
+             patch("scripts.parallel_backfill.print"):
             parallel_backfill.main()
         conn3 = sqlite3.connect(str(master))
         rows = conn3.execute("SELECT * FROM daily_bars").fetchall()
@@ -271,7 +271,7 @@ class TestMain:
         conn.close()
         with patch.object(parallel_backfill, "MASTER_DB", master), \
              patch.object(sys, "argv", ["parallel_backfill.py"]), \
-             patch("parallel_backfill.print"):
+             patch("scripts.parallel_backfill.print"):
             parallel_backfill.main()
 
     def test_normal_run_with_cleanup(self, tmp_path: Path):
@@ -285,7 +285,7 @@ class TestMain:
         with patch.object(parallel_backfill, "MASTER_DB", master), \
              patch.object(sys, "argv", ["parallel_backfill.py"]), \
              patch.object(parallel_backfill, "Process") as mock_process, \
-             patch("parallel_backfill.print"):
+             patch("scripts.parallel_backfill.print"):
             proc = MagicMock()
             mock_process.return_value = proc
             parallel_backfill.main()
@@ -309,7 +309,7 @@ class TestMainRemaining:
         conn2.close()
         with patch.object(parallel_backfill, "MASTER_DB", master), \
              patch.object(sys, "argv", ["parallel_backfill.py", "--merge-only"]), \
-             patch("parallel_backfill.print"):
+             patch("scripts.parallel_backfill.print"):
             parallel_backfill.main()
         assert not worker.exists()
 
@@ -324,7 +324,7 @@ class TestMainRemaining:
         with patch.object(parallel_backfill, "MASTER_DB", master), \
              patch.object(sys, "argv", ["parallel_backfill.py", "--no-cleanup"]), \
              patch.object(parallel_backfill, "Process") as mock_process, \
-             patch("parallel_backfill.print"):
+             patch("scripts.parallel_backfill.print"):
             proc = MagicMock()
             mock_process.return_value = proc
             parallel_backfill.main()

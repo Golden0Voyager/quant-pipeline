@@ -21,7 +21,7 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-7s | %(message)s')
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("~/Code/data/quant_data/quant_core.db").expanduser()
+DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 SKIP_FILE = Path(__file__).parent / ".backfill_skip"
 
 

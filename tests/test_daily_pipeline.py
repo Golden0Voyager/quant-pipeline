@@ -290,6 +290,7 @@ class TestUpdateIndicators:
 class TestUpdateFundamentals:
     def test_normal(self):
         db = MagicMock()
+        db.save_fundamentals_batch.return_value = 2
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -307,6 +308,7 @@ class TestUpdateFundamentals:
                 "count": 2,
             },
         }
+        db.save_fundamentals_batch.return_value = 2
         with (
             patch("daily_pipeline.logger"),
             patch("requests.Session") as mock_session_cls,
@@ -356,6 +358,7 @@ class TestUpdateFundamentals:
 
     def test_empty_code_skipped(self):
         db = MagicMock()
+        db.save_fundamentals_batch.return_value = 1
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -391,6 +394,7 @@ class TestUpdateFundamentals:
 class TestUpdateFundFlow:
     def test_normal(self):
         db = MagicMock()
+        db.save_fund_flow_batch.return_value = 1
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = pd.DataFrame({"code": ["000001.SZ"], "main_net_inflow": [1e8], "main_net_inflow_pct": [0.05], "super_large_net_inflow": [5e7], "super_large_net_inflow_pct": [0.03], "large_net_inflow": [5e7], "large_net_inflow_pct": [0.02]})
         with patch("daily_pipeline.logger"):
@@ -421,45 +425,71 @@ class TestUpdateFundFlow:
             r = daily_pipeline.update_fund_flow(db, loader)
         assert r["saved"] == 0
 
+    def test_all_nan_rows_skipped(self):
+        """All-NaN numeric fields should be skipped — save_fund_flow not called."""
+        db = MagicMock()
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = pd.DataFrame({
+            "code": ["000001.SZ"],
+            "main_net_inflow": [float("nan")],
+            "main_net_inflow_pct": [float("nan")],
+            "super_large_net_inflow": [float("nan")],
+            "super_large_net_inflow_pct": [float("nan")],
+            "large_net_inflow": [float("nan")],
+            "large_net_inflow_pct": [float("nan")],
+        })
+        with patch("daily_pipeline.logger"):
+            r = daily_pipeline.update_fund_flow(db, loader)
+        assert r["saved"] == 0
+        db.save_fund_flow.assert_not_called()
+
 
 # ===========================================================================
 # retry_failed
 # ===========================================================================
 class TestRetryFailed:
-    def test_no_file(self, tmp_path: Path):
+    def _make_progress(self, tmp_path: Path, failed: list[str]):
+        import json
+        prog = tmp_path / "progress.json"
+        prog.write_text(json.dumps({"failed_queue": failed, "task": "retry"}))
+
+    def test_no_progress(self, tmp_path: Path):
         db = MagicMock()
         loader = MagicMock()
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, loader)
         assert r["total"] == 0
 
-    def test_empty_file(self, tmp_path: Path):
+    def test_empty_queue(self, tmp_path: Path):
+        self._make_progress(tmp_path, [])
         db = MagicMock()
-        (tmp_path / "retry_queue.txt").write_text("")
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, MagicMock())
         assert r["total"] == 0
 
     def test_normal(self, tmp_path: Path):
+        self._make_progress(tmp_path, ["000001.SZ", "000002.SZ"])
         db = MagicMock()
         loader = MagicMock()
         db.get_daily_bars.return_value = _bars_df(["2024-01-02"])
         loader.incremental_update.return_value = _bars_df(["2024-01-02", "2024-01-03"])
-        (tmp_path / "retry_queue.txt").write_text("000001.SZ\n000002.SZ\n")
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
             r = daily_pipeline.retry_failed(db, loader)
         assert r["success"] == 2
 
     def test_some_still_fail(self, tmp_path: Path):
-        (tmp_path / "retry_queue.txt").write_text("000001.SZ\n000002.SZ\n")
+        self._make_progress(tmp_path, ["000001.SZ", "000002.SZ"])
         with patch.object(daily_pipeline, "_update_single_bar") as mock_update:
             mock_update.side_effect = ["failed", "success"]
             with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), patch("daily_pipeline.logger"):
                 r = daily_pipeline.retry_failed(MagicMock(), MagicMock())
         assert r["success"] == 1
         assert r["failed"] == 1
-        remaining = (tmp_path / "retry_queue.txt").read_text().strip()
-        assert remaining in ("000001.SZ", "000002.SZ")
+        # 确认 progress.json 仍保留剩余失败的记录
+        import json
+        saved = json.loads((tmp_path / "progress.json").read_text())
+        assert "000001.SZ" in saved["failed_queue"]
+        assert "000002.SZ" not in saved["failed_queue"]
 
 
 # ===========================================================================
@@ -650,6 +680,7 @@ class TestMain:
 class TestDirectAkShareTasks:
     def test_margin_trading_sse_only(self):
         db = MagicMock()
+        db.save_margin_trading_batch.return_value = 1
         df = pd.DataFrame({"标的证券代码": ["000001.SZ"], "融资余额": [1e9], "融资买入额": [1e8], "融资偿还额": [5e7], "融券余量": [1e5], "融券卖出量": [1e4], "融资融券余额": [1.1e9]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_margin_detail_sse.return_value = df
@@ -671,6 +702,7 @@ class TestDirectAkShareTasks:
 
     def test_dragon_tiger_normal(self):
         db = MagicMock()
+        db.save_dragon_tiger_batch.return_value = 1
         df = pd.DataFrame({"代码": ["000001.SZ"], "收盘价": [10.5], "涨跌幅": [0.02], "龙虎榜净买额": [1e8], "龙虎榜买入额": [2e8], "龙虎榜卖出额": [1e8], "换手率": [0.05], "流通市值": [1e9], "上榜原因": ["连续三日"]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_lhb_detail_em.return_value = df
@@ -698,6 +730,7 @@ class TestDirectAkShareTasks:
 
     def test_block_trade_normal(self):
         db = MagicMock()
+        db.save_block_trade_batch.return_value = 1
         df = pd.DataFrame({"证券代码": ["000001.SZ"], "成交价": [10.0], "收盘价": [10.5], "折溢率": [-0.05], "成交量": [1e6], "成交额": [1e7], "买方营业部": ["A"], "卖方营业部": ["B"]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_dzjy_mrmx.return_value = df
@@ -725,9 +758,10 @@ class TestDirectAkShareTasks:
 
     def test_sector_fund_flow_normal(self):
         db = MagicMock()
-        df = pd.DataFrame({"行业": ["银行"], "主力净流入-净额": [1e9], "主力净流入-净占比": [0.02], "超大单净流入-净额": [5e8], "大单净流入-净额": [5e8], "中单净流入-净额": [-3e8], "小单净流入-净额": [-7e8]})
+        db.save_sector_fund_flow_batch.return_value = 1
+        df = pd.DataFrame({"行业": ["银行"], "主力净流入-净额": [1e9], "主力净流入-净占比": [0.02], "超大单净流入-净额": [5e8], "流入资金": [5e8], "流出资金": [-3e8]})
         with patch.object(daily_pipeline, "ak") as ak:
-            ak.stock_sector_fund_flow_hist.return_value = df
+            ak.stock_fund_flow_industry.return_value = df
             with patch("daily_pipeline.datetime") as m:
                 m.now.return_value = datetime(2024, 6, 21)
                 m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -739,6 +773,7 @@ class TestDirectAkShareTasks:
 
     def test_shareholder_count_normal(self):
         db = MagicMock()
+        db.save_shareholder_count_batch.return_value = 1
         df = pd.DataFrame({"证券代码": ["000001.SZ"], "本期股东人数": [50000], "股东人数增幅": [-0.05], "本期人均持股数量": [20000]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_hold_num_cninfo.return_value = df
@@ -854,7 +889,7 @@ def test_update_bars_empty_stock_list():
 
 def test_update_fundamentals_save_error():
     db = MagicMock()
-    db.save_fundamentals.side_effect = ValueError("save failed")
+    db.save_fundamentals_batch.side_effect = ValueError("batch save failed")
     loader = MagicMock()
     loader.get_market_valuation.return_value = pd.DataFrame({
         "code": ["000001.SZ"], "pe_ttm": [10.0], "pb": [1.5],
@@ -867,7 +902,7 @@ def test_update_fundamentals_save_error():
 
 def test_update_fund_flow_save_error():
     db = MagicMock()
-    db.save_fund_flow.side_effect = ValueError("save failed")
+    db.save_fund_flow_batch.side_effect = ValueError("batch save failed")
     loader = MagicMock()
     loader.get_market_fund_flow.return_value = pd.DataFrame({
         "code": ["000001.SZ"], "main_net_inflow": [1e8],
@@ -937,98 +972,63 @@ def test_update_sector_industry():
 # ===========================================================================
 
 @patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_primary(mock_ak: MagicMock):
+def test_fetch_sector_fund_flow(mock_ak: MagicMock):
     mock_df = pd.DataFrame({
         "行业": ["银行", "医药"],
         "主力净流入-净额": [1e8, 5e7],
         "主力净流入-净占比": [0.5, 0.3],
         "超大单净流入-净额": [5e7, 2e7],
-        "大单净流入-净额": [3e7, 1e7],
-        "中单净流入-净额": [-2e7, -1e7],
-        "小单净流入-净额": [-1e7, -5e6],
+        "流入资金": [3e7, 1e7],
+        "流出资金": [-2e7, -1e7],
     })
-    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
-    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
+    mock_ak.stock_fund_flow_industry.return_value = mock_df
+    result = daily_pipeline._fetch_sector_fund_flow("2026-07-01")
     assert result is not None
     assert len(result) == 2
     assert result.iloc[0]["sector_name"] == "银行"
 
 
 @patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_primary_empty(mock_ak: MagicMock):
-    mock_ak.stock_sector_fund_flow_hist.return_value = pd.DataFrame()
-    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
-    assert result is None
-
-
-@patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_fallback(mock_ak: MagicMock):
-    mock_df = pd.DataFrame({
-        "行业": ["银行", "医药"],
-        "净额": [1e8, 5e7],
-        "行业-涨跌幅": [0.5, -0.3],
-        "流入资金": [2e8, 1e8],
-        "流出资金": [1e8, 5e7],
-    })
-    mock_ak.stock_fund_flow_industry.return_value = mock_df
-    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
-    assert result is not None
-    assert len(result) == 2
-    assert result.iloc[0]["data_source"] == "akshare_fallback"
-
-
-@patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_fallback_empty(mock_ak: MagicMock):
+def test_fetch_sector_fund_flow_empty(mock_ak: MagicMock):
     mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
-    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
+    result = daily_pipeline._fetch_sector_fund_flow("2026-07-01")
     assert result is None
 
 
 @patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_primary(mock_ak: MagicMock):
+def test_update_sector_fund_flow_success(mock_ak: MagicMock):
     db = MagicMock()
+    db.save_sector_fund_flow_batch.return_value = 1
     mock_df = pd.DataFrame({
         "行业": ["银行"],
         "主力净流入-净额": [1e8],
         "主力净流入-净占比": [0.5],
         "超大单净流入-净额": [5e7],
-        "大单净流入-净额": [3e7],
-        "中单净流入-净额": [-2e7],
-        "小单净流入-净额": [-1e7],
-    })
-    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_sector_fund_flow(db)
-    assert r["saved"] == 1
-    assert r["source"] == "primary"
-
-
-@patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_fallback(mock_ak: MagicMock):
-    """When primary fails, should fall back to secondary source."""
-    db = MagicMock()
-    # Primary fails
-    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
-    # Fallback succeeds
-    mock_df = pd.DataFrame({
-        "行业": ["银行"],
-        "净额": [1e8],
-        "行业-涨跌幅": [0.5],
-        "流入资金": [2e8],
-        "流出资金": [1e8],
+        "流入资金": [3e7],
+        "流出资金": [-2e7],
     })
     mock_ak.stock_fund_flow_industry.return_value = mock_df
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_fund_flow(db)
     assert r["saved"] == 1
-    assert r["source"] == "fallback"
+    assert r["source"] == "ths"
 
 
 @patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_both_fail(mock_ak: MagicMock):
-    """When both sources fail, should return empty result."""
+def test_update_sector_fund_flow_empty_df(mock_ak: MagicMock):
+    """When the single source returns empty, should return zero saved."""
     db = MagicMock()
-    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
+    mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_fund_flow(db)
+    assert r["saved"] == 0
+    assert r["total"] == 0
+
+
+@patch("daily_pipeline.ak")
+def test_update_sector_fund_flow_akshare_error(mock_ak: MagicMock):
+    """When the single source raises, should return error dict."""
+    db = MagicMock()
     mock_ak.stock_fund_flow_industry.side_effect = Exception("新浪也挂了")
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_fund_flow(db)
@@ -1080,7 +1080,8 @@ def test_update_bars_filters_bj():
     db.get_daily_bars.return_value = pd.DataFrame()
 
     with patch("daily_pipeline.is_beijing_stock", side_effect=lambda s: s == "880001"), \
-         patch("daily_pipeline.logger"):
+         patch("daily_pipeline.logger"), \
+         patch.dict(os.environ, {"INCLUDE_BJ": "0"}):
         from daily_pipeline import ProgressTracker
         # Clear any previous progress
         ProgressTracker.clear()
