@@ -421,6 +421,24 @@ class TestUpdateFundFlow:
             r = daily_pipeline.update_fund_flow(db, loader)
         assert r["saved"] == 0
 
+    def test_all_nan_rows_skipped(self):
+        """All-NaN numeric fields should be skipped — save_fund_flow not called."""
+        db = MagicMock()
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = pd.DataFrame({
+            "code": ["000001.SZ"],
+            "main_net_inflow": [float("nan")],
+            "main_net_inflow_pct": [float("nan")],
+            "super_large_net_inflow": [float("nan")],
+            "super_large_net_inflow_pct": [float("nan")],
+            "large_net_inflow": [float("nan")],
+            "large_net_inflow_pct": [float("nan")],
+        })
+        with patch("daily_pipeline.logger"):
+            r = daily_pipeline.update_fund_flow(db, loader)
+        assert r["saved"] == 0
+        db.save_fund_flow.assert_not_called()
+
 
 # ===========================================================================
 # retry_failed
