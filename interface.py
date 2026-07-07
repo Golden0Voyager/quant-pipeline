@@ -27,6 +27,26 @@ class DatabaseInterface(Protocol):
         """返回数据库文件路径（字符串）。"""
         ...
 
+    def close(self) -> None:
+        """释放数据库连接资源。"""
+        ...
+
+    def get_distinct_codes(self, table: str, column: str = "ts_code") -> set[str]:
+        """获取指定表中某列的不重复值，用于增量检测。"""
+        ...
+
+    def count_fundamentals_for_date(self, trade_date: str) -> int:
+        """获取 fundamentals 表某交易日的记录数，用于增量检测。"""
+        ...
+
+    def record_task_run(self, task_name: str, run_date: str) -> None:
+        """记录任务成功运行日期。"""
+        ...
+
+    def get_last_task_run(self, task_name: str) -> str | None:
+        """获取任务最近一次成功运行的日期。"""
+        ...
+
     def get_stock_list(self) -> pd.DataFrame:
         """获取全部股票列表，返回 DataFrame（至少包含 'code' 列）。"""
         ...

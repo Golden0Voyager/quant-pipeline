@@ -43,6 +43,7 @@ def is_running() -> bool:
 
 
 def start(resume: bool = False) -> None:
+    os.nice(10)
     if is_running():
         old_pid = PIDFILE.read_text().strip()
         print(f"⚠️  守护进程已在运行 (PID: {old_pid})")

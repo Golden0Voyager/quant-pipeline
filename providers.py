@@ -29,6 +29,21 @@ class SmartMoneyDBProvider:
     def db_path(self) -> str:
         return str(self._db.db_path)
 
+    def close(self) -> None:
+        self._db.close()
+
+    def get_distinct_codes(self, table: str, column: str = "ts_code") -> set[str]:
+        return self._db.get_distinct_codes(table, column)
+
+    def count_fundamentals_for_date(self, trade_date: str) -> int:
+        return self._db.count_fundamentals_for_date(trade_date)
+
+    def record_task_run(self, task_name: str, run_date: str) -> None:
+        self._db.record_task_run(task_name, run_date)
+
+    def get_last_task_run(self, task_name: str) -> str | None:
+        return self._db.get_last_task_run(task_name)
+
     def get_stock_list(self) -> pd.DataFrame:
         return self._db.get_stock_list()
 
@@ -47,11 +62,20 @@ class SmartMoneyDBProvider:
     def save_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_fundamentals(symbol, data)
 
+    def save_fundamentals_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_fundamentals_batch(records)
+
     def save_fund_flow(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_fund_flow(symbol, data)
 
+    def save_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_fund_flow_batch(records)
+
     def save_margin_trading(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_margin_trading(symbol, data)
+
+    def save_margin_trading_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_margin_trading_batch(records)
 
     def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_margin_trading(symbol, date)
@@ -59,23 +83,38 @@ class SmartMoneyDBProvider:
     def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_dragon_tiger(symbol, data)
 
+    def save_dragon_tiger_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_dragon_tiger_batch(records)
+
     def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
 
     def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_shareholder_count(symbol, data)
 
+    def save_shareholder_count_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_shareholder_count_batch(records)
+
     def save_quarterly_financials(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_quarterly_financials(symbol, data)
 
+    def save_quarterly_financials_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_quarterly_financials_batch(records)
+
     def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_block_trade(symbol, data)
+
+    def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_block_trade_batch(records)
 
     def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
 
     def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
         self._db.save_sector_fund_flow(sector_name, data)
+
+    def save_sector_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_sector_fund_flow_batch(records)
 
     def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
         return self._db.get_sector_fund_flow(sector_name, date)

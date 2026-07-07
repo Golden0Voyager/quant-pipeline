@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -73,6 +74,7 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     args = parser.parse_args()
+    os.nice(10)
 
     if not DB_PATH.exists():
         logger.error(f"数据库不存在: {DB_PATH}")

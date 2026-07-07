@@ -291,6 +291,7 @@ class TestUpdateFundamentals:
     def test_normal(self):
         db = MagicMock()
         db.save_fundamentals_batch.return_value = 2
+        db.count_fundamentals_for_date.return_value = 0
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -323,6 +324,7 @@ class TestUpdateFundamentals:
 
     def test_empty(self):
         db = MagicMock()
+        db.count_fundamentals_for_date.return_value = 0
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -342,6 +344,7 @@ class TestUpdateFundamentals:
 
     def test_http_error(self):
         db = MagicMock()
+        db.count_fundamentals_for_date.return_value = 0
         loader = MagicMock()
         mock_session = MagicMock()
         mock_session.get.side_effect = ConnectionError("HTTP error")
@@ -359,6 +362,7 @@ class TestUpdateFundamentals:
     def test_empty_code_skipped(self):
         db = MagicMock()
         db.save_fundamentals_batch.return_value = 1
+        db.count_fundamentals_for_date.return_value = 0
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -640,6 +644,21 @@ class TestMain:
             daily_pipeline.main()
             fn.assert_called_once()
 
+    def test_main_does_not_create_magicmock_file(self, weekday_mock, tmp_path):
+        """main() 不应在 ProviderFactory.get_db() 为 MagicMock 时生成垃圾 SQLite 文件。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.run_all"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+            magicmock_files = list(tmp_path.glob("*MagicMock*"))
+            cwd_magicmock = [p for p in Path.cwd().glob("*MagicMock*") if p.is_file()]
+            assert not magicmock_files
+            assert not cwd_magicmock
+
     def test_update_bars_with_limit(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--limit", "5"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
@@ -890,6 +909,7 @@ def test_update_bars_empty_stock_list():
 def test_update_fundamentals_save_error():
     db = MagicMock()
     db.save_fundamentals_batch.side_effect = ValueError("batch save failed")
+    db.count_fundamentals_for_date.return_value = 0
     loader = MagicMock()
     loader.get_market_valuation.return_value = pd.DataFrame({
         "code": ["000001.SZ"], "pe_ttm": [10.0], "pb": [1.5],

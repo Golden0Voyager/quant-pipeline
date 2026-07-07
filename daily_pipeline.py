@@ -19,12 +19,15 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import difflib
+import fcntl
 import json
 import logging
 import os
 import random
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -72,6 +75,66 @@ def _load_env_file(env_path: str | Path = ".env") -> None:
 
 
 _load_env_file()
+
+
+# ── 进程锁：防止多实例同时运行 ──────────────────────────────
+_PIDFILE = Path("/tmp/daily_pipeline.pid")
+_lock_file_fd: int | None = None
+
+
+def _acquire_lock() -> None:
+    """获取文件锁，防止多实例同时运行。失败时打印已有进程信息并退出。"""
+    global _lock_file_fd
+    _lock_file_fd = open(_PIDFILE, "a+", buffering=1)  # noqa: SIM115
+    try:
+        fcntl.flock(_lock_file_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # 锁被占用 → 读取已有 PID
+        _lock_file_fd.seek(0)
+        old_pid = _lock_file_fd.read().strip()
+        # 检查进程是否还活着
+        alive = False
+        if old_pid.isdigit():
+            try:
+                os.kill(int(old_pid), 0)
+                alive = True
+            except OSError:
+                pass
+        if alive:
+            print(f"❌ 管道已在运行 (PID: {old_pid})，请勿重复启动")
+            print(f"   如需强制重启，请先执行: kill {old_pid}")
+        else:
+            print(f"⚠️  检测到残留锁文件（PID {old_pid} 已不存在），自动清理后启动")
+            _release_lock()
+            _acquire_lock()
+        sys.exit(1)
+    _lock_file_fd.truncate(0)
+    _lock_file_fd.seek(0)
+    _lock_file_fd.write(str(os.getpid()))
+    _lock_file_fd.flush()
+    atexit.register(_release_lock)
+
+    def _signal_handler(signum: int, _frame: object) -> None:
+        _release_lock()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+
+def _release_lock() -> None:
+    global _lock_file_fd
+    if _lock_file_fd is not None:
+        try:
+            fcntl.flock(_lock_file_fd, fcntl.LOCK_UN)
+            _lock_file_fd.close()
+        except OSError:
+            pass
+        _lock_file_fd = None
+    _PIDFILE.unlink(missing_ok=True)
+
+
+# ────────────────────────────────────────────────────────────
 
 
 def should_skip_beijing(symbol: str) -> bool:
@@ -303,6 +366,35 @@ class ProgressTracker:
     """
 
     FILE = SHARED_DATA_DIR / "progress.json"
+    LOCK_FILE = SHARED_DATA_DIR / "progress.lock"
+    _ORIGINAL_FILE = FILE
+    _ORIGINAL_LOCK_FILE = LOCK_FILE
+
+    @classmethod
+    def _file(cls) -> Path:
+        if cls.FILE is cls._ORIGINAL_FILE:
+            return SHARED_DATA_DIR / "progress.json"
+        return cls.FILE
+
+    @classmethod
+    def _lock_file(cls) -> Path:
+        if cls.LOCK_FILE is cls._ORIGINAL_LOCK_FILE:
+            return SHARED_DATA_DIR / "progress.lock"
+        return cls.LOCK_FILE
+
+    @classmethod
+    @contextlib.contextmanager
+    def _lock(cls, exclusive: bool = True):
+        """使用文件锁保护进度文件的读写操作。"""
+        lock_path = cls._lock_file()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     @classmethod
     def save(
@@ -323,32 +415,37 @@ class ProgressTracker:
             "total": total,
             "failed_queue": failed_queue,
         }
-        # 原子写入：先写临时文件，再 rename
-        tmp = cls.FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(cls.FILE)
+        file_path = cls._file()
+        with cls._lock(exclusive=True):
+            tmp = file_path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp.replace(file_path)
 
     @classmethod
     def load(cls) -> dict[str, Any] | None:
         """读取进度文件。"""
-        if not cls.FILE.exists():
-            return None
-        try:
-            with open(cls.FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            logger.warning("⚠️  进度文件损坏，将从头开始")
-            return None
+        file_path = cls._file()
+        with cls._lock(exclusive=False):
+            if not file_path.exists():
+                return None
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                logger.warning("⚠️  进度文件损坏，将从头开始")
+                return None
 
     @classmethod
     def clear(cls) -> None:
         """清除进度文件（任务成功完成后调用）。"""
-        if cls.FILE.exists():
-            cls.FILE.unlink()
-            logger.info("🗑️  进度文件已清除")
+        file_path = cls._file()
+        with cls._lock(exclusive=True):
+            if file_path.exists():
+                file_path.unlink()
+                logger.info("🗑️  进度文件已清除")
 
     @classmethod
     def find_resume_index(cls, stock_codes: list[str], last_symbol: str) -> int:
@@ -521,7 +618,7 @@ def update_bars(
             logger.info("ℹ️  未发现进度文件，从头开始")
     else:
         # 非续传模式：如果存在旧进度文件，先清理
-        if ProgressTracker.FILE.exists():
+        if ProgressTracker._file().exists():
             ProgressTracker.clear()
 
     processed_count = progress.get("processed", 0) if progress else 0
@@ -945,26 +1042,39 @@ def update_indicators(
     failed_count = 0
     insufficient_count = 0
 
-    for i, symbol in enumerate(symbols, 1):
-        if i % 100 == 0 or i == total:
-            logger.info(f"  进度: {i}/{total} ({100 * i // total}%)")
+    db_write_lock = threading.Lock()
 
+    def _process_one(symbol: str) -> str:
         try:
             df = db.get_daily_bars(symbol)
             if df.empty or len(df) < 60:
-                insufficient_count += 1
-                continue
+                return "insufficient"
 
             if "trade_date" in df.columns and "date" not in df.columns:
                 df = df.rename(columns={"trade_date": "date"})
 
             df_ind = engine.calculate_all_indicators(df)
-            db.save_indicators(symbol, df_ind)
-            success_count += 1
-
+            with db_write_lock:
+                db.save_indicators(symbol, df_ind)
+            return "success"
         except Exception as e:
             logger.warning(f"  ❌ {symbol} 指标计算失败: {e}")
-            failed_count += 1
+            return "failed"
+
+    workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_one, symbol): symbol for symbol in symbols}
+        for i, future in enumerate(as_completed(futures), 1):
+            status = future.result()
+            if status == "success":
+                success_count += 1
+            elif status == "insufficient":
+                insufficient_count += 1
+            else:
+                failed_count += 1
+
+            if i % 100 == 0 or i == total:
+                logger.info(f"  进度: {i}/{total} ({100 * i // total}%)")
 
     logger.info("\n" + "=" * 60)
     logger.info("📊 技术指标计算完成")
@@ -1000,6 +1110,11 @@ def update_fundamentals(
         d = datetime.now() - timedelta(days=offset)
         if d.weekday() < 5:
             trade_dates.append(d.strftime("%Y-%m-%d"))
+
+    existing_count = db.count_fundamentals_for_date(today)
+    if existing_count >= 5000:
+        logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
+        return {"saved": 0, "total": 0, "skipped": True}
 
     import requests as _req
 
@@ -1081,6 +1196,8 @@ def update_fundamentals(
         logger.error(f"❌ 估值数据批量保存失败: {e}")
         saved = 0
     date_used = str(all_records[0].get("TRADE_DATE", ""))[:10] if all_records else today
+    if saved > 0 and date_used:
+        db.record_task_run("update_fundamentals", date_used)
     logger.info(f"✅ 估值数据保存完成: {saved}/{len(all_records)} 只 (日期: {date_used})")
     return {"saved": saved, "total": len(all_records)}
 
@@ -1115,6 +1232,12 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     conn.close()
     target_date = row[0] if (row and row[0]) else today
 
+    # 增量检测：如果本 target_date 已经跑过 market_snapshot，直接跳过
+    last_run = db.get_last_task_run("update_market_snapshot")
+    if last_run == target_date:
+        logger.info(f"  跳过：target_date={target_date} 的 dividend_yield 已补充过")
+        return {"saved": 0, "total": 0, "updated": 0, "skipped": True}
+
     # 1. 读取全量股票
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
@@ -1128,20 +1251,25 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     rows = [(c, m) for c, m in rows if not should_skip_beijing(c)]
 
+    # 雪球不支持北交所，即使 INCLUDE_BJ=1 也要过滤掉
+    xq_rows = [(c, m) for c, m in rows if not is_beijing_stock(c)]
+    if len(xq_rows) < len(rows):
+        logger.info(f"  过滤北交所: {len(rows)} → {len(xq_rows)} (雪球不支持北交所)")
+
     if xq._get_token() is None:
         logger.warning("⚠️  XUEQIU_TOKEN 未设置，跳过雪球行情快照")
         return {"saved": 0, "total": 0, "skipped": True}
 
-    total = len(rows)
+    total = len(xq_rows)
     include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
     if include_bj:
-        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已包含北交所）")
+        logger.info(f"📊 共 {total} 只股票（排除北交所），准备拉取雪球行情")
     else:
-        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情（已跳过北交所）")
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情")
 
     # 2. 分批调用（每批 50 只，串行 + 小延迟避免风控）
     batch = 50
-    codes = [c for c, _ in rows]
+    codes = [c for c, _ in xq_rows]
     all_quotes: list[dict] = []
 
     for i in range(0, total, batch):
@@ -1176,6 +1304,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         conn.commit()
         conn.close()
         logger.info(f"✅ dividend_yield 补充完成: {updated} 只")
+        db.record_task_run("update_market_snapshot", target_date)
     else:
         logger.warning("⚠️  雪球行情未获取到数据")
 
@@ -1245,6 +1374,20 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
 # 任务 5: 批量获取融资融券数据
 # ===========================================================================
 
+def _safe_fetch_margin_detail(fetcher, date: str, exchange: str) -> pd.DataFrame | None:
+    """安全获取融资融券明细，处理 AkShare 空数据返回时的 pandas Length mismatch 异常。"""
+    try:
+        df = fetcher(date=date)
+        if df is None or df.empty:
+            return None
+        return df
+    except ValueError as e:
+        if "Length mismatch" in str(e) or "Expected axis" in str(e):
+            logger.warning(f"⚠️  {exchange.upper()} 融资融券 {date} 返回空数据")
+            return None
+        raise
+
+
 def update_margin_trading(db: DatabaseInterface) -> dict:
     """批量获取昨日全市场融资融券数据并保存。"""
     logger.info("\n" + "=" * 60)
@@ -1256,37 +1399,49 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
     target_date = _get_expected_latest_trading_day().replace("-", "")
+    previous_date = (datetime.strptime(target_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+    target_dates = [target_date, previous_date]
     batch_records = []
     total = 0
 
     for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
-        try:
-            df = fetcher(date=target_date)
-            if df is None or df.empty:
-                logger.warning(f"⚠️  {exchange.upper()} 融资融券无数据")
-                continue
-            total += len(df)
-            for _, row in df.iterrows():
-                try:
-                    code = str(row.get("标的证券代码" if exchange == "sh" else "证券代码", "")).strip()
-                    if not code:
-                        continue
-                    batch_records.append({
-                        "ts_code": code,
-                        "trade_date": target_date,
-                        "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
-                        "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
-                        "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
-                        "short_balance": row.get("融券余量" if exchange == "sh" else "融券余量"),
-                        "short_sell": row.get("融券卖出量" if exchange == "sh" else "融券卖出量"),
-                        "short_repay": row.get("融券偿还量" if exchange == "sh" else None),
-                        "total_balance": row.get("融资融券余额"),
-                        "data_source": "akshare",
-                    })
-                except Exception:
+        df: pd.DataFrame | None = None
+        actual_date = target_date
+        for date in target_dates:
+            try:
+                df = _safe_fetch_margin_detail(fetcher, date, exchange)
+                if df is not None:
+                    actual_date = date
+                    logger.info(f"  {exchange.upper()} 融资融券使用日期 {date}")
+                    break
+            except Exception as e:
+                logger.warning(f"⚠️  {exchange.upper()} 融资融券 {date} 获取失败: {e}")
+                df = None
+
+        if df is None:
+            logger.warning(f"⚠️  {exchange.upper()} 融资融券无数据")
+            continue
+
+        total += len(df)
+        for _, row in df.iterrows():
+            try:
+                code = str(row.get("标的证券代码" if exchange == "sh" else "证券代码", "")).strip()
+                if not code:
                     continue
-        except Exception as e:
-            logger.error(f"❌ {exchange.upper()} 融资融券获取失败: {e}")
+                batch_records.append({
+                    "ts_code": code,
+                    "trade_date": actual_date,
+                    "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
+                    "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
+                    "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
+                    "short_balance": row.get("融券余量" if exchange == "sh" else "融券余量"),
+                    "short_sell": row.get("融券卖出量" if exchange == "sh" else "融券卖出量"),
+                    "short_repay": row.get("融券偿还量" if exchange == "sh" else None),
+                    "total_balance": row.get("融资融券余额"),
+                    "data_source": "akshare",
+                })
+            except Exception:
+                continue
 
     saved = db.save_margin_trading_batch(batch_records) if batch_records else 0
     logger.info(f"✅ 融资融券保存完成: {saved}/{total}")
@@ -1811,6 +1966,11 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         return {"saved": 0, "failed": 0, "total": 0}
 
     stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+    existing_codes = db.get_distinct_codes("quarterly_financials")
+    filtered_codes = [c for c in stock_codes if c not in existing_codes]
+    if len(filtered_codes) < len(stock_codes):
+        logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
+    stock_codes = filtered_codes
     total = len(stock_codes)
     saved = 0
     failed = 0
@@ -1829,12 +1989,11 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
             pass
         return None
 
-    batch_buffer: list[dict] = []
-    for i, code in enumerate(stock_codes, 1):
+    def _fetch_one(code: str) -> tuple[dict | None, bool]:
         try:
             df = ak.stock_financial_abstract(symbol=code)
             if df is not None and not df.empty and len(df.columns) > 2:
-                batch_buffer.append({
+                record = {
                     "ts_code": code,
                     "report_period": str(df.columns[2]),
                     "revenue": _extract_float(df, "营业总收入"),
@@ -1848,21 +2007,31 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
                     "debt_ratio": _extract_float(df, "资产负债率"),
                     "eps": _extract_float(df, "基本每股收益"),
                     "bps": _extract_float(df, "每股净资产"),
-                })
+                }
+                return record, False
+        except Exception as e:
+            logger.debug(f"  股票 {code} 失败: {e}")
+            return None, True
+        return None, False
+
+    batch_buffer: list[dict] = []
+    workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_code = {executor.submit(_fetch_one, code): code for code in stock_codes}
+        for i, future in enumerate(as_completed(future_to_code), 1):
+            record, is_failed = future.result()
+            if record:
+                batch_buffer.append(record)
                 saved += 1
+            if is_failed:
+                failed += 1
 
             if len(batch_buffer) >= batch_chunk:
                 db.save_quarterly_financials_batch(batch_buffer)
                 batch_buffer.clear()
 
-            time.sleep(0.05)
-
             if i % 500 == 0:
                 logger.info(f"  进度: {i}/{total} (成功: {saved}, 失败: {failed})")
-        except Exception as e:
-            logger.debug(f"  股票 {code} 失败: {e}")
-            failed += 1
-            continue
 
     if batch_buffer:
         db.save_quarterly_financials_batch(batch_buffer)
@@ -1880,11 +2049,10 @@ def update_industry(db: DatabaseInterface) -> dict:
     批量更新 stock_list.industry 列。
 
     策略 A: eastmoney F10 CompanySurvey API (SZ/SH 主板/创业板/科创板)
-    https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code=...
     提取 申万行业 (jbzl.sshy)。
-    策略 B (回退): Sina 财经个股资料页 (覆盖 BJ 及部分新上市股票)
-    http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml
-    使用 ThreadPoolExecutor 并发加速 (~0.1s/只, 5000 只 ≈ 1min 并发)。
+    策略 B (回退): AkShare stock_individual_info_em 接口。
+    策略 C (回退): Sina 财经个股资料页 (覆盖 BJ 及部分新上市股票)
+    使用 ThreadPoolExecutor 并发加速，但控制并发数以避免被限流。
     """
     logger.info("\n" + "=" * 60)
     logger.info("🏢 任务: 更新行业分类 (F10 API)")
@@ -1914,38 +2082,57 @@ def update_industry(db: DatabaseInterface) -> dict:
     # 2. 市场前缀映射
     exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
 
-    # 3. HTTP session（每个线程自建 session 以避免并发问题）
+    # 3. 网络请求策略（依次降级）
     def _fetch_industry(code: str, market: str) -> tuple[str, str | None]:
-        # 策略 A: 尝试 eastmoney F10 API（覆盖 SZ/SH 主板/创业板/科创板）
         prefix = exchange_map.get(market, "SZ")
         api_code = f"{prefix}{code}"
+
         f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
+        for attempt in range(3):
+            session = None
+            try:
+                session = _req.Session()
+                session.proxies = {"http": None, "https": None}
+                session.trust_env = False
+                resp = session.get(
+                    f10_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    jbzl = data.get("jbzl")
+                    if isinstance(jbzl, dict):
+                        industry = jbzl.get("sshy")
+                        if industry and industry != "N/A":
+                            return code, industry
+                if resp.status_code in (403, 429, 503):
+                    time.sleep(2 ** attempt)
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+            finally:
+                if session is not None:
+                    session.close()
+
+        if ak is not None:
+            try:
+                df = ak.stock_individual_info_em(symbol=code)
+                if df is not None and not df.empty:
+                    industry_row = df[df.iloc[:, 0] == "行业"]
+                    if not industry_row.empty:
+                        industry = str(industry_row.iloc[0, 1]).strip()
+                        if industry and industry != "nan":
+                            return code, industry
+            except Exception:
+                pass
+
         try:
+            sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
             session = _req.Session()
             session.proxies = {"http": None, "https": None}
             session.trust_env = False
             resp = session.get(
-                f10_url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                jbzl = data.get("jbzl")
-                if jbzl and isinstance(jbzl, dict):
-                    industry = jbzl.get("sshy")
-                    if industry and industry != "N/A":
-                        return code, industry
-        except Exception:
-            pass
-
-        # 策略 B: F10 失败时降级到 Sina 财经个股资料页 (覆盖 BJ 及新上市股票)
-        try:
-            sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
-            sin_session = _req.Session()
-            sin_session.proxies = {"http": None, "https": None}
-            sin_session.trust_env = False
-            resp = sin_session.get(
                 sin_url,
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=10,
@@ -1963,6 +2150,8 @@ def update_industry(db: DatabaseInterface) -> dict:
                         return code, industry
         except Exception:
             pass
+        finally:
+            session.close()
 
         return code, None
 
@@ -1971,7 +2160,7 @@ def update_industry(db: DatabaseInterface) -> dict:
     fail_list: list[str] = []
     processed = 0
 
-    max_workers = 15
+    max_workers = 4
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         fut_map = {}
         for code, market in rows:
@@ -2035,8 +2224,8 @@ def update_industry(db: DatabaseInterface) -> dict:
             "CREATE INDEX IF NOT EXISTS idx_stock_list_industry ON stock_list(industry)"
         )
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"⚠️ 创建索引失败（可能已存在）: {e}")
 
     return {
         "saved": updated,
@@ -2054,20 +2243,13 @@ def retry_failed(
     db: DatabaseInterface, loader: DataLoaderInterface
 ) -> dict:
     """重试之前失败的股票。"""
-    prog_file = SHARED_DATA_DIR / "progress.json"
-    symbols: list[str] = []
-    if prog_file.exists():
-        try:
-            data = json.loads(prog_file.read_text(encoding="utf-8"))
-            symbols = data.get("failed_queue", [])
-        except Exception:
-            pass
+    data = ProgressTracker.load()
+    symbols: list[str] = data.get("failed_queue", []) if data else []
     symbols = [s for s in symbols if not should_skip_beijing(s)]
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
-        if prog_file.exists():
-            prog_file.unlink()
+        ProgressTracker.clear()
         return {"success": 0, "failed": 0, "total": 0}
 
     logger.info("\n" + "=" * 60)
@@ -2085,24 +2267,16 @@ def retry_failed(
             still_failed.append(symbol)
 
     if still_failed:
-        # 原子写入：先写临时文件，再 rename
-        data = {
-            "task": "retry",
-            "last_symbol": symbols[-1],
-            "processed": success,
-            "total": len(symbols),
-            "failed_queue": still_failed,
-        }
-        tmp = prog_file.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(prog_file)
+        ProgressTracker.save(
+            task="retry",
+            last_symbol=symbols[-1],
+            processed=success,
+            total=len(symbols),
+            failed_queue=still_failed,
+        )
         logger.warning(f"⚠️  仍有 {len(still_failed)} 只失败，保留在重试队列中")
     else:
-        if prog_file.exists():
-            prog_file.unlink()
+        ProgressTracker.clear()
         logger.info(f"✅ 重试完成: {success}/{len(symbols)} 只成功")
 
     return {"success": success, "failed": len(still_failed), "total": len(symbols)}
@@ -2281,18 +2455,22 @@ def run_all(
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
+        db.close()
         return {"status": "skipped", "reason": "非交易日"}
 
     def _safe_task(name: str, fn, *args, **kwargs) -> dict:
         """安全执行单个任务，异常时记录日志不影响后续任务。任务结束后等待 2s 降低系统负载。"""
+        task_start = time.time()
         try:
             logger.info(f"\n{'='*60}\n▶ 开始任务: {name}\n{'='*60}")
             result = fn(*args, **kwargs)
-            logger.info(f"✅ 任务 {name} 完成，等待 2s 释放系统资源...")
+            elapsed = time.time() - task_start
+            logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s，等待 2s 释放系统资源...")
             time.sleep(2.0)
             return result
         except Exception as e:
-            logger.error(f"❌ 任务 {name} 异常终止: {e}", exc_info=True)
+            elapsed = time.time() - task_start
+            logger.error(f"❌ 任务 {name} 异常终止 (耗时 {elapsed:.1f}s): {e}", exc_info=True)
             return {"error": str(e), "status": "crashed"}
 
     results = {}
@@ -2318,6 +2496,7 @@ def run_all(
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
     results["health"] = _safe_task("health_check", health_check, db)
 
+    db.close()
     elapsed = time.time() - start_time
     logger.info("\n" + "=" * 60)
     logger.info("🏁 数据管道全部完成")
@@ -2374,16 +2553,14 @@ def main():
 
     args = parser.parse_args()
 
+    # 进程锁：防止多实例同时运行（health_check 除外）
+    if args.task != "health_check":
+        _acquire_lock()
+
     # 初始化 provider
     ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
     db = ProviderFactory.get_db()
 
-    # 启用 WAL 模式，提升多项目并发读性能
-    conn = sqlite3.connect(str(db.db_path))
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    conn.close()
     loader = ProviderFactory.get_loader()
     engine = ProviderFactory.get_indicator_engine()
 
@@ -2428,6 +2605,8 @@ def main():
         retry_failed(db, loader)
     elif args.task == "health_check":
         health_check(db)
+
+    db.close()
 
 
 if __name__ == "__main__":

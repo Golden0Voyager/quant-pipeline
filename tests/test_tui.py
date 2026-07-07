@@ -1,5 +1,8 @@
 import asyncio
+import os
+import sqlite3
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -39,7 +42,6 @@ def test_get_active_stock_count_empty(tmp_path):
     assert count == 0
 
 def test_get_active_stock_count_with_table(tmp_path):
-    import sqlite3
     db_file = tmp_path / "test_active.db"
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -69,7 +71,6 @@ def test_get_daemon_status_inactive(tmp_path):
     assert pid is None
 
 def test_get_daemon_status_running(tmp_path):
-    import os
     pid_file = tmp_path / "daemon.pid"
     current_pid = os.getpid()
     pid_file.write_text(str(current_pid))
@@ -136,9 +137,100 @@ async def test_key_bindings():
         # Verify action exists
         assert app.check_action("run_pipeline", ()) is True
         assert app.check_action("resume_pipeline", ()) is True
+        assert app.check_action("stop_pipeline", ()) is True
         assert app.check_action("start_daemon", ()) is True
         assert app.check_action("stop_daemon", ()) is True
         assert app.check_action("run_health", ()) is True
+
+
+@pytest.mark.asyncio
+async def test_logs_widget_supports_selection():
+    from tui import LogsWidget, PipelineApp
+    app = PipelineApp()
+    async with app.run_test():
+        logs_widget = app.query_one("#live-logs", LogsWidget)
+        assert logs_widget.ALLOW_SELECT is True
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_tracks_current_process():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.wait = MagicMock(return_value=asyncio.Future())
+    mock_proc.wait.return_value.set_result(0)
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await app._run_in_background("arg1", "arg2")
+        assert app._current_process is None
+        mock_exec.assert_called_once()
+        args, kwargs = mock_exec.call_args
+        assert args == ("arg1", "arg2")
+        assert "env" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_stop_current_process_terminates_running_process():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.pid = 99999  # fake PID, triggers ProcessLookupError → fallback to terminate()
+    wait_future = asyncio.Future()
+    wait_future.set_result(0)
+    mock_proc.wait = MagicMock(return_value=wait_future)
+    mock_proc.returncode = None
+    app._current_process = mock_proc
+
+    await app._stop_current_process()
+
+    mock_proc.terminate.assert_called_once()
+    mock_proc.wait.assert_called_once()
+    assert app._current_process is None
+
+
+@pytest.mark.asyncio
+async def test_stop_current_process_kills_on_timeout():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.pid = 99999
+    pending = asyncio.Future()
+    done = asyncio.Future()
+    done.set_result(0)
+    mock_proc.wait = MagicMock(side_effect=[pending, done])
+    mock_proc.returncode = None
+    app._current_process = mock_proc
+
+    await app._stop_current_process()
+
+    mock_proc.terminate.assert_called_once()
+    mock_proc.kill.assert_called_once()
+    assert app._current_process is None
+
+
+@pytest.mark.asyncio
+async def test_action_stop_pipeline_no_process():
+    app = PipelineApp()
+    mock_logger = MagicMock()
+    with patch("logging.getLogger", return_value=mock_logger):
+        await app.action_stop_pipeline()
+        mock_logger.info.assert_called_once_with("没有正在运行的任务可停止")
+
+
+@pytest.mark.asyncio
+async def test_action_stop_pipeline_stops_process():
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    mock_proc.pid = 99999
+    wait_future = asyncio.Future()
+    wait_future.set_result(0)
+    mock_proc.wait = MagicMock(return_value=wait_future)
+    mock_proc.returncode = None
+    app._current_process = mock_proc
+    mock_logger = MagicMock()
+
+    with patch("logging.getLogger", return_value=mock_logger):
+        await app.action_stop_pipeline()
+        mock_proc.terminate.assert_called_once()
+        mock_logger.info.assert_called_with("已停止当前运行的任务")
 
 
 @pytest.mark.asyncio
@@ -234,6 +326,71 @@ async def test_action_handlers_use_run_in_background():
         )
 
 
+def test_format_chinese_magnitude():
+    from tui import format_chinese_magnitude
+    assert format_chinese_magnitude(123) == "123"
+    assert format_chinese_magnitude(12_345) == "1.2万"
+    assert format_chinese_magnitude(123_456_789) == "1.23亿"
+
+
+def test_get_expected_latest_trading_day_is_weekday():
+    from tui import _get_expected_latest_trading_day
+    result = _get_expected_latest_trading_day()
+    from datetime import datetime
+    dt = datetime.strptime(result, "%Y-%m-%d")
+    assert dt.weekday() < 5
+
+
+def test_date_status():
+    from tui import _date_status
+    assert _date_status("2026-07-07", "2026-07-07") == ("[green]●[/green]", "最新")
+    assert _date_status(None, "2026-07-07") == ("[red]●[/red]", "无数据")
+    assert _date_status("2026-07-06", "2026-07-07") == ("[yellow]●[/yellow]", "略滞后")
+    assert _date_status("2026-07-01", "2026-07-07") == ("[red]●[/red]", "滞后")
+
+
+def test_get_latest_dates(tmp_path):
+    from tui import get_latest_dates
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE daily_bars (trade_date TEXT)")
+    conn.execute("CREATE TABLE indicators (trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars (trade_date) VALUES ('2026-07-07')")
+    conn.execute("INSERT INTO indicators (trade_date) VALUES ('2026-07-06')")
+    conn.commit()
+    conn.close()
+
+    result = get_latest_dates(str(db_file))
+    assert result.get("daily_bars") == "2026-07-07"
+    assert result.get("indicators") == "2026-07-06"
+
+
+@pytest.mark.asyncio
+async def test_data_completeness_shows_freshness_and_dates():
+    from tui import DataCompletenessWidget, PipelineApp
+    app = PipelineApp()
+    async with app.run_test():
+        widget = app.query_one("#data-completeness", DataCompletenessWidget)
+        widget._counts = {
+            "stock_list": 5000,
+            "daily_bars": 7000000,
+            "indicators": 6500000,
+            "fundamentals": 5000,
+        }
+        widget._latest_dates = {
+            "daily_bars": "2026-07-07",
+            "indicators": "2026-07-07",
+            "fundamentals": "2026-07-06",
+        }
+        captured = []
+        with patch.object(widget, "update", side_effect=captured.append):
+            widget._rebuild_content()
+        text = "\n".join(captured)
+        assert "期望最新日期" in text
+        assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
+        assert "2026-07-07" in text
+
+
 def test_parse_progress_valid(tmp_path):
     progress_file = tmp_path / "progress.json"
     progress_file.write_text("""{
@@ -263,8 +420,6 @@ def test_parse_progress_invalid_json(tmp_path):
 
 
 def test_find_latest_log_file(tmp_path):
-    import os
-    import time
     # Create mock log files
     log1 = tmp_path / "smartmoney_20260704.log"
     log1.touch()
