@@ -19,6 +19,7 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import json
 import logging
@@ -164,6 +165,13 @@ PER_STOCK_MIN_SLEEP = 0.3  # 单只股票最小间隔（秒）
 PER_STOCK_MAX_SLEEP = 0.8  # 单只股票最大间隔（秒）
 MAX_RETRY = 3             # 单只股票失败重试次数
 RETRY_DELAY = 5.0         # 重试间隔（秒）
+
+def _lower_process_priority() -> None:
+    with contextlib.suppress(OSError):
+        os.nice(10)
+    with contextlib.suppress(OSError, AttributeError):
+        os.setpriority(os.PRIO_PROCESS, 0, 10)
+
 
 # 极致稳定模式支持（通过环境变量 ULTRA_SAFE=1 触发）
 if os.getenv("ULTRA_SAFE") == "1":
@@ -1038,14 +1046,15 @@ def update_fundamentals(
         logger.warning("⚠️  未获取到估值数据")
         return {"saved": 0, "total": 0}
 
-    saved = 0
+    batch_records = []
     for rec in all_records:
         try:
             code = str(rec.get("SECURITY_CODE", "")).strip()
             if not code:
                 continue
             trade_date = str(rec.get("TRADE_DATE", today))[:10]
-            data = {
+            batch_records.append({
+                "ts_code": code,
                 "trade_date": trade_date,
                 "pe_ttm": rec.get("PE_TTM"),
                 "pb": rec.get("PB_MRQ"),
@@ -1061,13 +1070,16 @@ def update_fundamentals(
                 "eps_growth": None,
                 "peg": rec.get("PEG_CAR"),
                 "market_cap": rec.get("TOTAL_MARKET_CAP"),
-            }
-            db.save_fundamentals(code, data)
-            saved += 1
+            })
         except Exception as e:
             logger.debug(f"  保存估值失败: {e}")
             continue
 
+    try:
+        saved = db.save_fundamentals_batch(batch_records) if batch_records else 0
+    except Exception as e:
+        logger.error(f"❌ 估值数据批量保存失败: {e}")
+        saved = 0
     date_used = str(all_records[0].get("TRADE_DATE", ""))[:10] if all_records else today
     logger.info(f"✅ 估值数据保存完成: {saved}/{len(all_records)} 只 (日期: {date_used})")
     return {"saved": saved, "total": len(all_records)}
@@ -1188,7 +1200,7 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
             logger.warning("⚠️  未获取到资金流向数据")
             return {"saved": 0, "total": 0}
 
-        saved = 0
+        batch_records = []
         for _, row in df.iterrows():
             try:
                 code = str(row.get("code", "")).strip()
@@ -1196,6 +1208,7 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
                     continue
 
                 data = {
+                    "symbol": code,
                     "date": today,
                     "main_net_inflow": row.get("main_net_inflow"),
                     "main_net_inflow_pct": row.get("main_net_inflow_pct"),
@@ -1214,12 +1227,12 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
                 if all(pd.isna(data.get(f)) for f in numeric_fields):
                     logger.debug(f"  跳过全空资金流: {code}")
                     continue
-                db.save_fund_flow(code, data)
-                saved += 1
+                batch_records.append(data)
             except Exception as e:
                 logger.debug(f"  保存资金流失败: {e}")
                 continue
 
+        saved = db.save_fund_flow_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 资金流向保存完成: {saved}/{len(df)} 只")
         return {"saved": saved, "total": len(df)}
 
@@ -1243,7 +1256,7 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
     target_date = _get_expected_latest_trading_day().replace("-", "")
-    saved = 0
+    batch_records = []
     total = 0
 
     for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
@@ -1258,7 +1271,8 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
                     code = str(row.get("标的证券代码" if exchange == "sh" else "证券代码", "")).strip()
                     if not code:
                         continue
-                    data = {
+                    batch_records.append({
+                        "ts_code": code,
                         "trade_date": target_date,
                         "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
                         "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
@@ -1268,14 +1282,13 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
                         "short_repay": row.get("融券偿还量" if exchange == "sh" else None),
                         "total_balance": row.get("融资融券余额"),
                         "data_source": "akshare",
-                    }
-                    db.save_margin_trading(code, data)
-                    saved += 1
+                    })
                 except Exception:
                     continue
         except Exception as e:
             logger.error(f"❌ {exchange.upper()} 融资融券获取失败: {e}")
 
+    saved = db.save_margin_trading_batch(batch_records) if batch_records else 0
     logger.info(f"✅ 融资融券保存完成: {saved}/{total}")
     return {"saved": saved, "total": total}
 
@@ -1301,13 +1314,14 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
             logger.warning("⚠️  龙虎榜无数据")
             return {"saved": 0, "total": 0}
 
-        saved = 0
+        batch_records = []
         for _, row in df.iterrows():
             try:
                 code = str(row.get("代码", "")).strip()
                 if not code:
                     continue
-                data = {
+                batch_records.append({
+                    "ts_code": code,
                     "trade_date": target_date,
                     "close_price": row.get("收盘价"),
                     "pct_change": row.get("涨跌幅"),
@@ -1318,12 +1332,11 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
                     "market_cap": row.get("流通市值"),
                     "reason": row.get("上榜原因", ""),
                     "data_source": "akshare",
-                }
-                db.save_dragon_tiger(code, data)
-                saved += 1
+                })
             except Exception:
                 continue
 
+        saved = db.save_dragon_tiger_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 龙虎榜保存完成: {saved}/{len(df)}")
         return {"saved": saved, "total": len(df)}
     except Exception as e:
@@ -1352,13 +1365,14 @@ def update_block_trade(db: DatabaseInterface) -> dict:
             logger.warning("⚠️  大宗交易无数据")
             return {"saved": 0, "total": 0}
 
-        saved = 0
+        batch_records = []
         for _, row in df.iterrows():
             try:
                 code = str(row.get("证券代码", "")).strip()
                 if not code:
                     continue
-                data = {
+                batch_records.append({
+                    "ts_code": code,
                     "trade_date": target_date,
                     "deal_price": row.get("成交价"),
                     "close_price": row.get("收盘价"),
@@ -1368,12 +1382,11 @@ def update_block_trade(db: DatabaseInterface) -> dict:
                     "buyer_branch": row.get("买方营业部", ""),
                     "seller_branch": row.get("卖方营业部", ""),
                     "data_source": "akshare",
-                }
-                db.save_block_trade(code, data)
-                saved += 1
+                })
             except Exception:
                 continue
 
+        saved = db.save_block_trade_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 大宗交易保存完成: {saved}/{len(df)}")
         return {"saved": saved, "total": len(df)}
     except Exception as e:
@@ -1425,19 +1438,27 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
 
     target_date = _get_expected_latest_trading_day()
 
-    df = _fetch_sector_fund_flow(target_date)
+    try:
+        df = _fetch_sector_fund_flow(target_date)
+    except Exception as e:
+        logger.error(f"❌ 板块资金流向获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
     if df is None or df.empty:
         logger.warning("⚠️  板块资金流向无数据")
         return {"saved": 0, "total": 0}
 
-    saved = 0
+    batch_records = []
     for _, row in df.iterrows():
         try:
-            db.save_sector_fund_flow(row["sector_name"], row.to_dict())
-            saved += 1
+            record = row.to_dict()
+            record["sector_name"] = row["sector_name"]
+            record["trade_date"] = target_date
+            record["data_source"] = "ths"
+            batch_records.append(record)
         except Exception:
             continue
 
+    saved = db.save_sector_fund_flow_batch(batch_records) if batch_records else 0
     logger.info(f"✅ 板块资金流向保存完成: {saved}/{len(df)}")
     return {"saved": saved, "total": len(df), "source": "ths"}
 
@@ -1745,24 +1766,24 @@ def update_shareholder_count(db: DatabaseInterface) -> dict:
             logger.warning(f"⚠️  股东户数无数据 ({period})")
             return {"saved": 0, "total": 0}
 
-        saved = 0
+        batch_records = []
         for _, row in df.iterrows():
             try:
                 code = str(row.get("证券代码", "")).strip()
                 if not code:
                     continue
-                data = {
+                batch_records.append({
+                    "ts_code": code,
                     "report_date": period,
                     "holder_count": row.get("本期股东人数"),
                     "holder_count_change_pct": row.get("股东人数增幅"),
                     "avg_shares_per_holder": row.get("本期人均持股数量"),
                     "data_source": "akshare",
-                }
-                db.save_shareholder_count(code, data)
-                saved += 1
+                })
             except Exception:
                 continue
 
+        saved = db.save_shareholder_count_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 股东户数保存完成: {saved}/{len(df)} ({period})")
         return {"saved": saved, "total": len(df)}
     except Exception as e:
@@ -1793,6 +1814,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
     total = len(stock_codes)
     saved = 0
     failed = 0
+    batch_chunk = 500
 
     import pandas as _pd
 
@@ -1807,11 +1829,13 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
             pass
         return None
 
+    batch_buffer: list[dict] = []
     for i, code in enumerate(stock_codes, 1):
         try:
             df = ak.stock_financial_abstract(symbol=code)
             if df is not None and not df.empty and len(df.columns) > 2:
-                data = {
+                batch_buffer.append({
+                    "ts_code": code,
                     "report_period": str(df.columns[2]),
                     "revenue": _extract_float(df, "营业总收入"),
                     "net_profit": _extract_float(df, "归母净利润"),
@@ -1824,15 +1848,24 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
                     "debt_ratio": _extract_float(df, "资产负债率"),
                     "eps": _extract_float(df, "基本每股收益"),
                     "bps": _extract_float(df, "每股净资产"),
-                }
-                db.save_quarterly_financials(code, data)
+                })
                 saved += 1
-            if i % 200 == 0:
+
+            if len(batch_buffer) >= batch_chunk:
+                db.save_quarterly_financials_batch(batch_buffer)
+                batch_buffer.clear()
+
+            time.sleep(0.05)
+
+            if i % 500 == 0:
                 logger.info(f"  进度: {i}/{total} (成功: {saved}, 失败: {failed})")
         except Exception as e:
             logger.debug(f"  股票 {code} 失败: {e}")
             failed += 1
             continue
+
+    if batch_buffer:
+        db.save_quarterly_financials_batch(batch_buffer)
 
     logger.info(f"✅ 季度财务数据保存完成: {saved}/{total} (失败: {failed})")
     return {"saved": saved, "failed": failed, "total": total}
@@ -2241,6 +2274,7 @@ def run_all(
 ) -> dict:
     """运行完整数据管道。"""
     start_time = time.time()
+    _lower_process_priority()
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
     logger.info(f"⚙️  并行线程: {PARALLEL_WORKERS} (默认 1=串行)")
@@ -2250,10 +2284,13 @@ def run_all(
         return {"status": "skipped", "reason": "非交易日"}
 
     def _safe_task(name: str, fn, *args, **kwargs) -> dict:
-        """安全执行单个任务，异常时记录日志不影响后续任务。"""
+        """安全执行单个任务，异常时记录日志不影响后续任务。任务结束后等待 2s 降低系统负载。"""
         try:
             logger.info(f"\n{'='*60}\n▶ 开始任务: {name}\n{'='*60}")
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            logger.info(f"✅ 任务 {name} 完成，等待 2s 释放系统资源...")
+            time.sleep(2.0)
+            return result
         except Exception as e:
             logger.error(f"❌ 任务 {name} 异常终止: {e}", exc_info=True)
             return {"error": str(e), "status": "crashed"}

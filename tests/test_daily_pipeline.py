@@ -290,6 +290,7 @@ class TestUpdateIndicators:
 class TestUpdateFundamentals:
     def test_normal(self):
         db = MagicMock()
+        db.save_fundamentals_batch.return_value = 2
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -307,6 +308,7 @@ class TestUpdateFundamentals:
                 "count": 2,
             },
         }
+        db.save_fundamentals_batch.return_value = 2
         with (
             patch("daily_pipeline.logger"),
             patch("requests.Session") as mock_session_cls,
@@ -356,6 +358,7 @@ class TestUpdateFundamentals:
 
     def test_empty_code_skipped(self):
         db = MagicMock()
+        db.save_fundamentals_batch.return_value = 1
         loader = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -391,6 +394,7 @@ class TestUpdateFundamentals:
 class TestUpdateFundFlow:
     def test_normal(self):
         db = MagicMock()
+        db.save_fund_flow_batch.return_value = 1
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = pd.DataFrame({"code": ["000001.SZ"], "main_net_inflow": [1e8], "main_net_inflow_pct": [0.05], "super_large_net_inflow": [5e7], "super_large_net_inflow_pct": [0.03], "large_net_inflow": [5e7], "large_net_inflow_pct": [0.02]})
         with patch("daily_pipeline.logger"):
@@ -676,6 +680,7 @@ class TestMain:
 class TestDirectAkShareTasks:
     def test_margin_trading_sse_only(self):
         db = MagicMock()
+        db.save_margin_trading_batch.return_value = 1
         df = pd.DataFrame({"标的证券代码": ["000001.SZ"], "融资余额": [1e9], "融资买入额": [1e8], "融资偿还额": [5e7], "融券余量": [1e5], "融券卖出量": [1e4], "融资融券余额": [1.1e9]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_margin_detail_sse.return_value = df
@@ -697,6 +702,7 @@ class TestDirectAkShareTasks:
 
     def test_dragon_tiger_normal(self):
         db = MagicMock()
+        db.save_dragon_tiger_batch.return_value = 1
         df = pd.DataFrame({"代码": ["000001.SZ"], "收盘价": [10.5], "涨跌幅": [0.02], "龙虎榜净买额": [1e8], "龙虎榜买入额": [2e8], "龙虎榜卖出额": [1e8], "换手率": [0.05], "流通市值": [1e9], "上榜原因": ["连续三日"]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_lhb_detail_em.return_value = df
@@ -724,6 +730,7 @@ class TestDirectAkShareTasks:
 
     def test_block_trade_normal(self):
         db = MagicMock()
+        db.save_block_trade_batch.return_value = 1
         df = pd.DataFrame({"证券代码": ["000001.SZ"], "成交价": [10.0], "收盘价": [10.5], "折溢率": [-0.05], "成交量": [1e6], "成交额": [1e7], "买方营业部": ["A"], "卖方营业部": ["B"]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_dzjy_mrmx.return_value = df
@@ -751,9 +758,10 @@ class TestDirectAkShareTasks:
 
     def test_sector_fund_flow_normal(self):
         db = MagicMock()
-        df = pd.DataFrame({"行业": ["银行"], "主力净流入-净额": [1e9], "主力净流入-净占比": [0.02], "超大单净流入-净额": [5e8], "大单净流入-净额": [5e8], "中单净流入-净额": [-3e8], "小单净流入-净额": [-7e8]})
+        db.save_sector_fund_flow_batch.return_value = 1
+        df = pd.DataFrame({"行业": ["银行"], "主力净流入-净额": [1e9], "主力净流入-净占比": [0.02], "超大单净流入-净额": [5e8], "流入资金": [5e8], "流出资金": [-3e8]})
         with patch.object(daily_pipeline, "ak") as ak:
-            ak.stock_sector_fund_flow_hist.return_value = df
+            ak.stock_fund_flow_industry.return_value = df
             with patch("daily_pipeline.datetime") as m:
                 m.now.return_value = datetime(2024, 6, 21)
                 m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -765,6 +773,7 @@ class TestDirectAkShareTasks:
 
     def test_shareholder_count_normal(self):
         db = MagicMock()
+        db.save_shareholder_count_batch.return_value = 1
         df = pd.DataFrame({"证券代码": ["000001.SZ"], "本期股东人数": [50000], "股东人数增幅": [-0.05], "本期人均持股数量": [20000]})
         with patch.object(daily_pipeline, "ak") as ak:
             ak.stock_hold_num_cninfo.return_value = df
@@ -880,7 +889,7 @@ def test_update_bars_empty_stock_list():
 
 def test_update_fundamentals_save_error():
     db = MagicMock()
-    db.save_fundamentals.side_effect = ValueError("save failed")
+    db.save_fundamentals_batch.side_effect = ValueError("batch save failed")
     loader = MagicMock()
     loader.get_market_valuation.return_value = pd.DataFrame({
         "code": ["000001.SZ"], "pe_ttm": [10.0], "pb": [1.5],
@@ -893,7 +902,7 @@ def test_update_fundamentals_save_error():
 
 def test_update_fund_flow_save_error():
     db = MagicMock()
-    db.save_fund_flow.side_effect = ValueError("save failed")
+    db.save_fund_flow_batch.side_effect = ValueError("batch save failed")
     loader = MagicMock()
     loader.get_market_fund_flow.return_value = pd.DataFrame({
         "code": ["000001.SZ"], "main_net_inflow": [1e8],
@@ -963,98 +972,63 @@ def test_update_sector_industry():
 # ===========================================================================
 
 @patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_primary(mock_ak: MagicMock):
+def test_fetch_sector_fund_flow(mock_ak: MagicMock):
     mock_df = pd.DataFrame({
         "行业": ["银行", "医药"],
         "主力净流入-净额": [1e8, 5e7],
         "主力净流入-净占比": [0.5, 0.3],
         "超大单净流入-净额": [5e7, 2e7],
-        "大单净流入-净额": [3e7, 1e7],
-        "中单净流入-净额": [-2e7, -1e7],
-        "小单净流入-净额": [-1e7, -5e6],
+        "流入资金": [3e7, 1e7],
+        "流出资金": [-2e7, -1e7],
     })
-    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
-    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
+    mock_ak.stock_fund_flow_industry.return_value = mock_df
+    result = daily_pipeline._fetch_sector_fund_flow("2026-07-01")
     assert result is not None
     assert len(result) == 2
     assert result.iloc[0]["sector_name"] == "银行"
 
 
 @patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_primary_empty(mock_ak: MagicMock):
-    mock_ak.stock_sector_fund_flow_hist.return_value = pd.DataFrame()
-    result = daily_pipeline._fetch_sector_fund_flow_primary("2026-07-01")
-    assert result is None
-
-
-@patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_fallback(mock_ak: MagicMock):
-    mock_df = pd.DataFrame({
-        "行业": ["银行", "医药"],
-        "净额": [1e8, 5e7],
-        "行业-涨跌幅": [0.5, -0.3],
-        "流入资金": [2e8, 1e8],
-        "流出资金": [1e8, 5e7],
-    })
-    mock_ak.stock_fund_flow_industry.return_value = mock_df
-    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
-    assert result is not None
-    assert len(result) == 2
-    assert result.iloc[0]["data_source"] == "akshare_fallback"
-
-
-@patch("daily_pipeline.ak")
-def test_fetch_sector_fund_flow_fallback_empty(mock_ak: MagicMock):
+def test_fetch_sector_fund_flow_empty(mock_ak: MagicMock):
     mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
-    result = daily_pipeline._fetch_sector_fund_flow_fallback("2026-07-01")
+    result = daily_pipeline._fetch_sector_fund_flow("2026-07-01")
     assert result is None
 
 
 @patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_primary(mock_ak: MagicMock):
+def test_update_sector_fund_flow_success(mock_ak: MagicMock):
     db = MagicMock()
+    db.save_sector_fund_flow_batch.return_value = 1
     mock_df = pd.DataFrame({
         "行业": ["银行"],
         "主力净流入-净额": [1e8],
         "主力净流入-净占比": [0.5],
         "超大单净流入-净额": [5e7],
-        "大单净流入-净额": [3e7],
-        "中单净流入-净额": [-2e7],
-        "小单净流入-净额": [-1e7],
-    })
-    mock_ak.stock_sector_fund_flow_hist.return_value = mock_df
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_sector_fund_flow(db)
-    assert r["saved"] == 1
-    assert r["source"] == "primary"
-
-
-@patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_fallback(mock_ak: MagicMock):
-    """When primary fails, should fall back to secondary source."""
-    db = MagicMock()
-    # Primary fails
-    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
-    # Fallback succeeds
-    mock_df = pd.DataFrame({
-        "行业": ["银行"],
-        "净额": [1e8],
-        "行业-涨跌幅": [0.5],
-        "流入资金": [2e8],
-        "流出资金": [1e8],
+        "流入资金": [3e7],
+        "流出资金": [-2e7],
     })
     mock_ak.stock_fund_flow_industry.return_value = mock_df
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_fund_flow(db)
     assert r["saved"] == 1
-    assert r["source"] == "fallback"
+    assert r["source"] == "ths"
 
 
 @patch("daily_pipeline.ak")
-def test_update_sector_fund_flow_both_fail(mock_ak: MagicMock):
-    """When both sources fail, should return empty result."""
+def test_update_sector_fund_flow_empty_df(mock_ak: MagicMock):
+    """When the single source returns empty, should return zero saved."""
     db = MagicMock()
-    mock_ak.stock_sector_fund_flow_hist.side_effect = Exception("东财被墙")
+    mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_sector_fund_flow(db)
+    assert r["saved"] == 0
+    assert r["total"] == 0
+
+
+@patch("daily_pipeline.ak")
+def test_update_sector_fund_flow_akshare_error(mock_ak: MagicMock):
+    """When the single source raises, should return error dict."""
+    db = MagicMock()
     mock_ak.stock_fund_flow_industry.side_effect = Exception("新浪也挂了")
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_fund_flow(db)
