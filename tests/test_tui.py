@@ -173,6 +173,7 @@ async def test_run_in_background_tracks_current_process():
 async def test_stop_current_process_terminates_running_process():
     app = PipelineApp()
     mock_proc = MagicMock()
+    mock_proc.pid = 99999  # fake PID, triggers ProcessLookupError → fallback to terminate()
     wait_future = asyncio.Future()
     wait_future.set_result(0)
     mock_proc.wait = MagicMock(return_value=wait_future)
@@ -190,6 +191,7 @@ async def test_stop_current_process_terminates_running_process():
 async def test_stop_current_process_kills_on_timeout():
     app = PipelineApp()
     mock_proc = MagicMock()
+    mock_proc.pid = 99999
     pending = asyncio.Future()
     done = asyncio.Future()
     done.set_result(0)
@@ -217,6 +219,7 @@ async def test_action_stop_pipeline_no_process():
 async def test_action_stop_pipeline_stops_process():
     app = PipelineApp()
     mock_proc = MagicMock()
+    mock_proc.pid = 99999
     wait_future = asyncio.Future()
     wait_future.set_result(0)
     mock_proc.wait = MagicMock(return_value=wait_future)
