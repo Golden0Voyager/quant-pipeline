@@ -578,6 +578,22 @@ class LogsWidget(RichLog):
                 self.file_handle.close()
             self.file_handle = None
 
+    def copy_recent_logs(self, line_count: int = 500) -> str:
+        """返回最近 N 行原始日志文本；优先从当前绑定的日志文件读取。"""
+        if self.active_log and Path(self.active_log).exists():
+            try:
+                with open(self.active_log, encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+                return "".join(lines[-line_count:])
+            except Exception:
+                pass
+        # 兜底：读取控件中已渲染的文本
+        try:
+            texts = [str(line) for line in self.lines[-line_count:]]
+            return "\n".join(texts)
+        except Exception:
+            return ""
+
     def colorize_line(self, line: str) -> str:
         line = line.strip()
         parts = line.split("|", 2)
@@ -636,50 +652,14 @@ class PipelineApp(App):
         Binding("d", "start_daemon", "Start Daemon"),
         Binding("z", "stop_daemon", "Stop Daemon"),
         Binding("h", "run_health", "Health Check"),
-        Binding("t", "toggle_theme", "Theme"),
         Binding("c", "copy_logs", "Copy Logs"),
         Binding("q", "quit", "Quit"),
     ]
-
-    THEMES = {
-        "dark": {
-            "bg-screen": "#030712",
-            "bg-panel": "#111827",
-            "blue-normal": "#1d4ed8",
-            "blue-hover": "#3b82f6",
-            "blue-focus": "#60a5fa",
-            "rose-normal": "#be123c",
-            "rose-hover": "#e11d48",
-            "rose-focus": "#fb7185",
-        },
-        "light": {
-            "bg-screen": "#f8fafc",
-            "bg-panel": "#ffffff",
-            "blue-normal": "#2563eb",
-            "blue-hover": "#3b82f6",
-            "blue-focus": "#60a5fa",
-            "rose-normal": "#e11d48",
-            "rose-hover": "#f43f5e",
-            "rose-focus": "#fb7185",
-        },
-        "green": {
-            "bg-screen": "#022c22",
-            "bg-panel": "#064e3b",
-            "blue-normal": "#047857",
-            "blue-hover": "#059669",
-            "blue-focus": "#34d399",
-            "rose-normal": "#b91c1c",
-            "rose-hover": "#dc2626",
-            "rose-focus": "#f87171",
-        },
-    }
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._background_tasks: set[asyncio.Task] = set()
         self._current_process: asyncio.subprocess.Process | None = None
-        self._theme_names = list(self.THEMES.keys())
-        self._theme_index = 0
 
     async def on_mount(self) -> None:
         """启动时检测后台进程，询问用户是否终止。"""
@@ -864,14 +844,6 @@ class PipelineApp(App):
                 sys.executable, pipeline_path, "--task", "health_check", "--force"
             )
         )
-
-    def action_toggle_theme(self) -> None:
-        self._theme_index = (self._theme_index + 1) % len(self._theme_names)
-        theme_name = self._theme_names[self._theme_index]
-        theme = self.THEMES[theme_name]
-        for var, color in theme.items():
-            self.styles.setvar(var, color)
-        self.notify(f"Theme: {theme_name}", severity="information", timeout=2.0)
 
     def action_copy_logs(self) -> None:
         logs_widget = self.query_one("#live-logs", LogsWidget)
