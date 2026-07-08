@@ -67,12 +67,24 @@ class DatabaseInterface(Protocol):
         """保存基本面/估值数据。"""
         ...
 
+    def save_fundamentals_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存基本面/估值数据，返回实际保存条数。"""
+        ...
+
     def save_fund_flow(self, symbol: str, data: dict[str, Any]) -> None:
         """保存资金流向数据。"""
         ...
 
+    def save_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存资金流向数据，返回实际保存条数。"""
+        ...
+
     def save_margin_trading(self, symbol: str, data: dict[str, Any]) -> None:
         """保存融资融券数据。"""
+        ...
+
+    def save_margin_trading_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存融资融券数据，返回实际保存条数。"""
         ...
 
     def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
@@ -83,6 +95,10 @@ class DatabaseInterface(Protocol):
         """保存龙虎榜数据。"""
         ...
 
+    def save_dragon_tiger_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存龙虎榜数据，返回实际保存条数。"""
+        ...
+
     def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         """获取龙虎榜数据。"""
         ...
@@ -91,12 +107,24 @@ class DatabaseInterface(Protocol):
         """保存股东户数数据。"""
         ...
 
+    def save_shareholder_count_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股东户数数据，返回实际保存条数。"""
+        ...
+
     def save_quarterly_financials(self, symbol: str, data: dict[str, Any]) -> None:
         """保存季度财务指标数据。"""
         ...
 
+    def save_quarterly_financials_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存季度财务指标数据，返回实际保存条数。"""
+        ...
+
     def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         """保存大宗交易数据。"""
+        ...
+
+    def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存大宗交易数据，返回实际保存条数。"""
         ...
 
     def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
@@ -105,6 +133,10 @@ class DatabaseInterface(Protocol):
 
     def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
         """保存板块资金流向数据。"""
+        ...
+
+    def save_sector_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存板块资金流向数据，返回实际保存条数。"""
         ...
 
     def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:

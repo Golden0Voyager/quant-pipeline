@@ -23,6 +23,7 @@ import atexit
 import contextlib
 import difflib
 import fcntl
+import io
 import json
 import logging
 import os
@@ -79,7 +80,10 @@ _load_env_file()
 
 # ── 进程锁：防止多实例同时运行 ──────────────────────────────
 _PIDFILE = Path("/tmp/daily_pipeline.pid")
-_lock_file_fd: int | None = None
+_lock_file_fd: io.TextIOWrapper | None = None
+
+# 当 fundamentals 表某日记录数达到该阈值时，视为已完成并跳过
+MIN_FUNDAMENTALS_STOCK_COUNT = 5000
 
 
 def _acquire_lock() -> None:
@@ -388,7 +392,7 @@ class ProgressTracker:
         """使用文件锁保护进度文件的读写操作。"""
         lock_path = cls._lock_file()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o666)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             yield
@@ -1112,7 +1116,7 @@ def update_fundamentals(
             trade_dates.append(d.strftime("%Y-%m-%d"))
 
     existing_count = db.count_fundamentals_for_date(today)
-    if existing_count >= 5000:
+    if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
         logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
         return {"saved": 0, "total": 0, "skipped": True}
 
@@ -1991,6 +1995,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
 
     def _fetch_one(code: str) -> tuple[dict | None, bool]:
         try:
+            time.sleep(0.03)  # 控制请求频率，降低被限流风险
             df = ak.stock_financial_abstract(symbol=code)
             if df is not None and not df.empty and len(df.columns) > 2:
                 record = {

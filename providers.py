@@ -8,6 +8,8 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -24,6 +26,21 @@ class SmartMoneyDBProvider:
 
     def __init__(self, db_path: str | None = None):
         self._db = DatabaseManager(db_path=db_path)
+        self._ensure_wal_mode()
+
+    def _ensure_wal_mode(self) -> None:
+        """启用 WAL 模式以提升并发读写性能。"""
+        db_path = self._db.db_path
+        if not db_path or not Path(db_path).parent.exists():
+            return
+        try:
+            with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            # WAL 启用失败不应阻塞正常流程
+            pass
 
     @property
     def db_path(self) -> str:
