@@ -414,10 +414,40 @@ async def test_confirm_run_screen_dismiss():
     for btn_id in ("run-now", "run-later", "cancel"):
         mock_dismiss = MagicMock()
         screen.dismiss = mock_dismiss
-        # Simulate the button press like Textual does
         btn = Button(id=btn_id)
         screen.on_button_pressed(Button.Pressed(btn))
         mock_dismiss.assert_called_once_with(btn_id)
+
+
+def test_seconds_until_safe_after_sixteen():
+    from datetime import datetime, timedelta
+
+    from tui import _seconds_until_safe
+    after = datetime(2026, 7, 10, 17, 30, 0)
+    with patch("tui.datetime") as m:
+        m.now.return_value = after
+        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        result = _seconds_until_safe()
+        target = after.replace(hour=16, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        expected = int((target - after).total_seconds())
+        assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_run_or_schedule_run_later():
+    from tui import PipelineApp
+    app = PipelineApp()
+    async with app.run_test():
+        args = ("python", "test_script.py")
+        with patch.object(app, "push_screen") as mock_push_screen:
+            app._run_or_schedule("测试任务", *args)
+            assert mock_push_screen.call_count == 1
+            _, callback = mock_push_screen.call_args[0]
+            with patch.object(app, "_background_tasks", new_callable=set), \
+                 patch("tui._seconds_until_safe", return_value=1), \
+                 patch("asyncio.create_task") as mock_create_task:
+                callback("run-later")
+                mock_create_task.assert_called_once()
 
 
 def test_get_latest_dates(tmp_path):

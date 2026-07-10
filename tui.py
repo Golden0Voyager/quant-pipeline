@@ -507,23 +507,6 @@ class DashboardWidget(Static):
         self.update(text)
 
 
-class OperationsWidget(Static):
-    def on_mount(self) -> None:
-        self.border_title = "⚙️ Controls"
-        text = (
-            " [bold #f1f5f9 on #334155] S [/]  Full Update\n"
-            " [bold #f1f5f9 on #334155] R [/]  Resume (Checkpoint)\n"
-            " [bold #f1f5f9 on #334155] X [/]  Stop Running Task\n"
-            " [bold #f1f5f9 on #334155] D [/]  Start Daemon\n"
-            " [bold #f1f5f9 on #334155] Z [/]  Stop Daemon\n"
-            " [bold #f1f5f9 on #334155] H [/]  Health Check\n"
-            " [bold #f1f5f9 on #334155] T [/]  Toggle Theme\n"
-            " [bold #f1f5f9 on #334155] C [/]  Copy Logs\n"
-            " [bold #f1f5f9 on #334155] Ctrl+C [/]  Quit"
-        )
-        self.update(text)
-
-
 class SingleTaskWidget(Static):
     """Single task selector with a dropdown."""
 
