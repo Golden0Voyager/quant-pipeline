@@ -898,6 +898,8 @@ class PipelineApp(App):
     Select > .select-list {
         background: #1e293b;
         border: round #1d4ed8;
+        max-height: 14;
+        overflow-y: auto;
     }
     Select > .select-list > .select-list-item:hover {
         background: #1d4ed8;
