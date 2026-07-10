@@ -31,7 +31,7 @@ async def test_widgets_present():
     app = PipelineApp()
     async with app.run_test():
         assert app.query_one("#status-dashboard") is not None
-        assert app.query_one("#operations") is not None
+        assert app.query_one("#single-task") is not None
         assert app.query_one("#scraping-progress") is not None
         assert app.query_one("#live-logs") is not None
 
@@ -230,7 +230,7 @@ async def test_action_stop_pipeline_stops_process():
     with patch("logging.getLogger", return_value=mock_logger):
         await app.action_stop_pipeline()
         mock_proc.terminate.assert_called_once()
-        mock_logger.info.assert_called_with("已停止当前运行的任务")
+        mock_logger.info.assert_called_with("已停止进程: %s", [99999])
 
 
 @pytest.mark.asyncio
@@ -285,9 +285,13 @@ async def test_action_handlers_use_run_in_background():
     expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
-         patch("asyncio.create_task") as mock_create_task:
+         patch("asyncio.create_task") as mock_create_task, \
+         patch.object(app, "push_screen") as mock_push_screen:
 
         await app.action_run_pipeline()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "all", "--force"
@@ -295,7 +299,11 @@ async def test_action_handlers_use_run_in_background():
 
         mock_run_bg.reset_mock()
         mock_create_task.reset_mock()
+        mock_push_screen.reset_mock()
         await app.action_resume_pipeline()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
@@ -319,7 +327,11 @@ async def test_action_handlers_use_run_in_background():
 
         mock_run_bg.reset_mock()
         mock_create_task.reset_mock()
+        mock_push_screen.reset_mock()
         await app.action_run_health()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "health_check", "--force"
@@ -378,17 +390,17 @@ async def test_data_completeness_shows_freshness_and_dates():
             "fundamentals": 5000,
         }
         widget._latest_dates = {
-            "daily_bars": "2026-07-07",
-            "indicators": "2026-07-07",
-            "fundamentals": "2026-07-06",
+            "daily_bars": "2026-07-09",
+            "indicators": "2026-07-09",
+            "fundamentals": "2026-07-08",
         }
         captured = []
-        with patch.object(widget, "update", side_effect=captured.append):
+        with patch.object(widget._content, "update", side_effect=captured.append):
             widget._rebuild_content()
         text = "\n".join(captured)
         assert "期望最新日期" in text
         assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
-        assert "2026-07-07" in text
+        assert "2026-07-09" in text
 
 
 def test_parse_progress_valid(tmp_path):

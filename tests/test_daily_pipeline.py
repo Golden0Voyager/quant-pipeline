@@ -604,6 +604,7 @@ class TestRunAll:
         conn.close()
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), \
              patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
+             patch("daily_pipeline._should_update", return_value=True), \
              patch.object(daily_pipeline, "_update_single_bar", return_value="success"), \
              patch.object(daily_pipeline, "update_margin_trading", return_value={"saved": 0, "total": 0}), \
              patch.object(daily_pipeline, "update_dragon_tiger", return_value={"saved": 0, "total": 0}), \
