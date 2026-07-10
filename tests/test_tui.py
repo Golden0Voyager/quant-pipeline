@@ -393,21 +393,23 @@ def test_get_daily_bars_coverage(tmp_path):
 
 
 def test_seconds_until_safe():
+    from datetime import datetime
+
     from tui import _seconds_until_safe
-    from datetime import datetime, timedelta
-    # Patch to 14:59 → 61 seconds until 16:00
     before = datetime(2026, 7, 10, 14, 59, 0)
     with patch("tui.datetime") as m:
         m.now.return_value = before
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        assert _seconds_until_safe() == 3660  # (16:00 - 14:59) = 61 min = 3660s
+        assert _seconds_until_safe() == 3660
 
 
 @pytest.mark.asyncio
 async def test_confirm_run_screen_dismiss():
-    from tui import ConfirmRunScreen
     from unittest.mock import MagicMock
+
     from textual.widgets import Button
+
+    from tui import ConfirmRunScreen
     screen = ConfirmRunScreen("全量更新")
     for btn_id in ("run-now", "run-later", "cancel"):
         mock_dismiss = MagicMock()
