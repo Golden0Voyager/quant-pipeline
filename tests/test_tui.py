@@ -361,6 +361,63 @@ def test_date_status():
     assert _date_status("2026-07-01", "2026-07-07") == ("[red]●[/red]", "滞后")
 
 
+def test_normalize_date():
+    from tui import _normalize_date
+    assert _normalize_date(None) is None
+    assert _normalize_date("2026-07-07") == "2026-07-07"
+    assert _normalize_date("20260630") == "2026-06-30"
+    assert _normalize_date("20260331") == "2026-03-31"
+    assert _normalize_date("not-a-date") == "not-a-date"
+
+
+def test_get_daily_bars_coverage(tmp_path):
+    from tui import get_daily_bars_coverage
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars VALUES ('000001.SZ', '2026-07-09')")
+    conn.execute("INSERT INTO daily_bars VALUES ('600000.SH', '2026-07-08')")
+    conn.execute("INSERT INTO daily_bars VALUES ('000002.SZ', '2026-07-01')")
+    conn.commit()
+    conn.close()
+
+    up_to_date, total = get_daily_bars_coverage(str(db_file), "2026-07-10")
+    assert total == 3
+    # 2026-07-09 >= 2026-07-08 (expect -2) → up to date
+    # 2026-07-08 >= 2026-07-08 → up to date
+    # 2026-07-01 <  2026-07-08 → lagging
+    assert up_to_date == 2
+
+    # non-existent DB
+    assert get_daily_bars_coverage("/nonexistent/test.db", "2026-07-10") == (0, 0)
+
+
+def test_seconds_until_safe():
+    from tui import _seconds_until_safe
+    from datetime import datetime, timedelta
+    # Patch to 14:59 → 61 seconds until 16:00
+    before = datetime(2026, 7, 10, 14, 59, 0)
+    with patch("tui.datetime") as m:
+        m.now.return_value = before
+        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _seconds_until_safe() == 3660  # (16:00 - 14:59) = 61 min = 3660s
+
+
+@pytest.mark.asyncio
+async def test_confirm_run_screen_dismiss():
+    from tui import ConfirmRunScreen
+    from unittest.mock import MagicMock
+    from textual.widgets import Button
+    screen = ConfirmRunScreen("全量更新")
+    for btn_id in ("run-now", "run-later", "cancel"):
+        mock_dismiss = MagicMock()
+        screen.dismiss = mock_dismiss
+        # Simulate the button press like Textual does
+        btn = Button(id=btn_id)
+        screen.on_button_pressed(Button.Pressed(btn))
+        mock_dismiss.assert_called_once_with(btn_id)
+
+
 def test_get_latest_dates(tmp_path):
     from tui import get_latest_dates
     db_file = tmp_path / "test.db"
