@@ -331,6 +331,8 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "shareholder_count": "report_date",
     "quarterly_financials": "report_period",
     "historical_valuation": "trade_date",
+    "sector_industry": "trade_date",
+    "institutional_holdings": "report_date",
 }
 
 
@@ -350,8 +352,26 @@ def _get_expected_latest_trading_day() -> str:
     return target.strftime("%Y-%m-%d")
 
 
+def _normalize_date(value: object) -> str | None:
+    """将日期/报告期归一化为 YYYY-MM-DD。
+
+    部分表（margin_trading、dragon_tiger、block_trade、shareholder_count、
+    quarterly_financials）的日期列以 YYYYMMDD 无横线格式存储，需归一化后
+    才能与期望日做新鲜度比较，否则会被 _date_status 误判为滞后。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
+
 def get_latest_dates(db_path: str) -> dict[str, str | None]:
-    """查询每个表最新日期/报告期。"""
+    """查询每个表最新日期/报告期（已归一化为 YYYY-MM-DD）。"""
     p = Path(db_path)
     if not p.exists():
         return {}
@@ -364,12 +384,44 @@ def get_latest_dates(db_path: str) -> dict[str, str | None]:
             try:
                 cur.execute(f"SELECT MAX({col}) FROM {tbl}")
                 value = cur.fetchone()[0]
-                result[tbl] = str(value) if value is not None else None
+                result[tbl] = _normalize_date(value)
             except Exception:
                 result[tbl] = None
         return result
     except Exception:
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]:
+    """返回 (已更新到期望交易日的股票数, 有日线数据的股票总数)。
+
+    用「各股最新交易日是否达到期望日」衡量覆盖率，比按行数对比更符合实际
+    （新股历史不足、节假日等会导致行数天然少于理想值）。
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return 0, 0
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        # 容忍期望日前 2 个自然日（周末/节假日），视为已更新
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN max_date >= date(?, '-2 days') THEN 1 ELSE 0 END) AS up_to_date
+            FROM (SELECT ts_code, MAX(trade_date) AS max_date FROM daily_bars GROUP BY ts_code)
+            """,
+            (expected_date,),
+        )
+        total, up_to_date = cur.fetchone()
+        return int(up_to_date or 0), int(total or 0)
+    except Exception:
+        return 0, 0
     finally:
         if conn is not None:
             conn.close()
@@ -551,33 +603,42 @@ class DataCompletenessWidget(VerticalScroll):
         self.border_title = "📀 Data Completeness"
         self._counts: dict[str, int] = {}
         self._latest_dates: dict[str, str | None] = {}
+        self._daily_coverage: tuple[int, int] = (0, 0)
         self._bg_tasks: set[asyncio.Task] = set()
         # 挂载内容子组件
         self._content = Static(id="dc-content")
         await self.mount(self._content)
-        self.set_interval(30.0, self.update_completeness)
+        # 轻量计时器：仅用缓存重建显示（读 progress.json 判断更新中，无 DB 查询）
+        self.set_interval(30.0, self._rebuild_from_cache)
+        # 重量计时器：后台并行重算行数/最新日期/覆盖率（查询较重，低频执行）
+        self.set_interval(90.0, self._refresh_exact)
         # 先快速加载（瞬间完成），再后台精确更新
         self._counts = await asyncio.to_thread(
             get_all_table_counts, str(DEFAULT_DB_PATH), fast=True
         )
         self._rebuild_content()
-        task = asyncio.create_task(self._refresh_exact_counts())
+        task = asyncio.create_task(self._refresh_exact())
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    async def _refresh_exact_counts(self) -> None:
-        """后台精确更新行数与最新日期（不阻塞界面）。"""
-        exact = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
+    async def _refresh_exact(self) -> None:
+        """后台重算行数、最新日期与覆盖率（查询较重，低频执行）。
+
+        串行执行以避免多查询同时抢占同一块磁盘 I/O 导致争用变慢。
+        """
+        expected = _get_expected_latest_trading_day()
+        counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
         latest = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
-        if exact:
-            self._counts = exact
+        cov = await asyncio.to_thread(get_daily_bars_coverage, str(DEFAULT_DB_PATH), expected)
+        if counts:
+            self._counts = counts
         if latest:
             self._latest_dates = latest
+        self._daily_coverage = cov
         self._rebuild_content()
 
-    async def update_completeness(self) -> None:
-        self._counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH))
-        self._latest_dates = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
+    def _rebuild_from_cache(self) -> None:
+        """仅用已缓存数据重建显示（无 DB 查询，轻量）。"""
         self._rebuild_content()
 
     @staticmethod
@@ -619,9 +680,9 @@ class DataCompletenessWidget(VerticalScroll):
             self._content.update("\n".join(lines))
             return
 
-        stock_count = counts.get("stock_list", 0) or 5527
         daily_bars = counts.get("daily_bars", 0) or 1
         expected_date = _get_expected_latest_trading_day()
+        daily_up_to_date, daily_total = self._daily_coverage
 
         total_rows = sum(v for k, v in counts.items() if not k.startswith("_"))
         db_size = get_db_size(str(DEFAULT_DB_PATH))
@@ -645,8 +706,7 @@ class DataCompletenessWidget(VerticalScroll):
             status_str = f"{emoji} [bold]{status}[/bold]"
 
             if tbl == "daily_bars":
-                expected = stock_count * 1500
-                pct = min(n / expected * 100, 100) if expected else 0
+                pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
                 bar, pct_int = self._mini_bar(pct)
                 lines.append(
                     f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
@@ -893,7 +953,14 @@ class PipelineApp(App):
     }
     #single-task Select {
         width: 100%;
-        height: 3;
+    }
+    #single-task Select > SelectCurrent {
+        border: round #334155;
+        background: transparent;
+    }
+    #single-task Select:focus > SelectCurrent {
+        border: round #3b82f6;
+        background: transparent;
     }
     Select > .select-list {
         background: #1e293b;
@@ -913,6 +980,7 @@ class PipelineApp(App):
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
+        height: 1fr;
     }
     #data-completeness {
         border: round $blue-normal;
@@ -921,6 +989,7 @@ class PipelineApp(App):
         border-title-align: left;
         border-title-color: #60a5fa;
         scrollbar-color: #475569 #1e293b;
+        height: 1fr;
     }
     #dc-content {
         width: 100%;

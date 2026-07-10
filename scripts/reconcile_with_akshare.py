@@ -89,6 +89,9 @@ SMART_REPAIR_THRESHOLD = 10  # 差异行数 <= 此值时用 UPDATE，否则 DELE
 SMART_REPAIR_PCT = 0.05      # 差异比例 <= 此值时也用 UPDATE
 AKSHARE_SOCKET_TIMEOUT = 15  # AkShare HTTP 请求超时（秒）
 
+# 运行时可变的模块级状态
+_eastmoney_available: bool = True  # 东财可用标记，启动时探测设置
+
 # ---------------------------------------------------------------------------
 # 日志
 # ---------------------------------------------------------------------------
@@ -104,10 +107,85 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# AkShare 数据获取（带 socket 超时保护）
+# AkShare 数据获取（带 socket 超时保护 + 新浪 fallback）
 # ---------------------------------------------------------------------------
+def _sina_symbol(code: str) -> str:
+    """将纯数字代码转换为新浪接口所需的 sh/sz/bj 前缀格式。"""
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    elif code.startswith(("0", "2", "3")):
+        return f"sz{code}"
+    else:
+        return f"bj{code}"
+
+
+def _to_sina_df(df: pd.DataFrame) -> pd.DataFrame:
+    """标准化新浪接口返回的 DataFrame，保持与东财输出一致的列名和格式。"""
+    if df.empty:
+        return df
+
+    # 统一列名
+    df = df.rename(columns={"turnover": "turnover_rate"})
+
+    # 新浪换手率是小数比率（如 0.005），统一乘以 100 转成百分数
+    if "turnover_rate" in df.columns:
+        df["turnover_rate"] = pd.to_numeric(df["turnover_rate"], errors="coerce")
+        if not df["turnover_rate"].empty and df["turnover_rate"].max() < 1.0:
+            df["turnover_rate"] = df["turnover_rate"] * 100
+
+    # 新浪不返回 pct_change 和 amplitude，手动计算
+    close_prev = df["close"].shift(1)
+    df["pct_change"] = ((df["close"] - close_prev) / close_prev * 100).round(2)
+    df["amplitude"] = (((df["high"] - df["low"]) / close_prev) * 100).round(2)
+    df["pct_change"] = df["pct_change"].fillna(0.0)
+    df["amplitude"] = df["amplitude"].fillna(0.0)
+
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df["data_source"] = "sina"
+    return df
+
+
+def _probe_data_source() -> bool:
+    """探测东财可用性，设置全局 _eastmoney_available。"""
+    global _eastmoney_available
+    if ak is None:
+        _eastmoney_available = False
+        return False
+
+    logger.info("🔍 探测 AkShare 数据源可用性...")
+    original_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
+        with no_proxy():
+            df = ak.stock_zh_a_hist(
+                symbol="000001",
+                start_date="20250101",
+                end_date="20250110",
+                adjust="",
+            )
+        if not df.empty:
+            logger.info("🇨🇳 东财 (stock_zh_a_hist) 可用，作为首选数据源")
+            _eastmoney_available = True
+            return True
+    except Exception as e:
+        logger.warning(f"⚠️ 东财探测失败: {e}")
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+    logger.info("🇨🇳 东财不可用，本次运行全程使用新浪备用接口")
+    _eastmoney_available = False
+    return False
+
+
 def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """从 AkShare 获取股票历史数据（带指数退避重试 + socket 超时）。"""
+    """
+    从 AkShare 获取股票历史数据。
+
+    根据 _eastmoney_available 全局标记决定使用东财还是新浪：
+    - 东财可用 → 尝试东财（3 次退避重试），失败后切新浪并永久标记不可用
+    - 东财不可用 → 直接走新浪，不浪费时间重试
+    """
+    global _eastmoney_available
     if ak is None:
         logger.error("akshare 未安装")
         return pd.DataFrame()
@@ -115,54 +193,79 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     code = symbol.split(".")[0]
     original_timeout = socket.getdefaulttimeout()
 
-    for attempt in range(3):
-        try:
-            # 设置 socket 超时，防止 AkShare 无限挂起
-            socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
-            with no_proxy():
-                df = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",
-                )
-        except Exception as e:
-            socket.setdefaulttimeout(original_timeout)
-            if attempt < 2:
-                delay = 3.0 * (2 ** attempt)
-                logger.warning(
-                    f"  {symbol} AkShare 第 {attempt + 1} 次失败，{delay:.0f}s 后重试: {e}"
-                )
-                time.sleep(delay)
-                continue
-            else:
-                logger.error(f"  {symbol} AkShare 连续失败: {e}")
-                return pd.DataFrame()
-        finally:
-            socket.setdefaulttimeout(original_timeout)
+    # --- 如果东财可用，尝试东财 (stock_zh_a_hist) ---
+    if _eastmoney_available:
+        df = pd.DataFrame()
+        for attempt in range(3):
+            try:
+                socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
+                with no_proxy():
+                    df = ak.stock_zh_a_hist(
+                        symbol=code,
+                        period="daily",
+                        start_date=start_date.replace("-", ""),
+                        end_date=end_date.replace("-", ""),
+                        adjust="qfq",
+                    )
+                break
+            except Exception as e:
+                socket.setdefaulttimeout(original_timeout)
+                if attempt < 2:
+                    delay = 3.0 * (2**attempt)
+                    logger.warning(
+                        f"  {symbol} 东财第 {attempt + 1} 次失败，{delay:.0f}s 后重试: {e}"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.warning(f"  {symbol} 东财连续 3 次失败，切新浪并永久禁用东财")
+                    _eastmoney_available = False
+            finally:
+                socket.setdefaulttimeout(original_timeout)
 
-        if df.empty:
-            return pd.DataFrame()
+        if not df.empty:
+            df = df.rename(
+                columns={
+                    "日期": "date",
+                    "开盘": "open",
+                    "收盘": "close",
+                    "最高": "high",
+                    "最低": "low",
+                    "成交量": "volume",
+                    "成交额": "amount",
+                    "换手率": "turnover_rate",
+                    "涨跌幅": "pct_change",
+                    "振幅": "amplitude",
+                }
+            )
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            df["data_source"] = "eastmoney"
+            return df
 
-        df = df.rename(
-            columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-                "换手率": "turnover_rate",
-                "涨跌幅": "pct_change",
-                "振幅": "amplitude",
-            }
-        )
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-        return df
+    # --- 东财不可用或已失败：直走新浪 (stock_zh_a_daily) ---
+    logger.info(f"  {symbol} 使用新浪接口...")
+    try:
+        socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
+        with no_proxy():
+            sina_sym = _sina_symbol(code)
+            df = ak.stock_zh_a_daily(
+                symbol=sina_sym,
+                start_date=start_date.replace("-", ""),
+                end_date=end_date.replace("-", ""),
+                adjust="qfq",
+            )
+    except Exception as e:
+        logger.error(f"  {symbol} 新浪接口失败: {e}")
+        return pd.DataFrame()
+    finally:
+        socket.setdefaulttimeout(original_timeout)
 
-    return pd.DataFrame()
+    if df.empty:
+        logger.warning(f"  {symbol} 新浪接口无数据")
+        return pd.DataFrame()
+
+    df = _to_sina_df(df)
+    logger.debug(f"  ✅ {symbol} 新浪接口成功 ({len(df)} 行)")
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +354,15 @@ def compare_and_repair(
                 elapsed = time.time() - t0
                 backfilled = 0
                 if backfill_source and has_null_source and not dry_run:
+                    src = ak_df["data_source"].iloc[0] if "data_source" in ak_df.columns else "eastmoney"
                     cursor = conn.cursor()
                     cursor.execute(
-                        "UPDATE daily_bars SET data_source = 'akshare', updated_at = ? WHERE ts_code = ? AND data_source IS NULL",
-                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol)
+                        "UPDATE daily_bars SET data_source = ?, updated_at = ? WHERE ts_code = ? AND data_source IS NULL",
+                        (src, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol)
                     )
                     backfilled = cursor.rowcount
                     conn.commit()
-                    logger.info(f"  {symbol}: 已成功回填 {backfilled} 行 data_source 为 'akshare'")
+                    logger.info(f"  {symbol}: 已成功回填 {backfilled} 行 data_source 为 '{src}'")
 
                 return {
                     "total": len(db_df),
@@ -334,6 +438,7 @@ def compare_and_repair(
         """
         update_rows: list[tuple] = []
         for _, row in diff_rows.iterrows():
+            src = row.get("data_source_ak", "eastmoney")
             update_rows.append(
                 (
                     float(row["open_ak"]),
@@ -345,7 +450,7 @@ def compare_and_repair(
                     float(row["turnover_rate_ak"]) if pd.notna(row.get("turnover_rate_ak")) else None,
                     float(row["pct_change_ak"]) if pd.notna(row.get("pct_change_ak")) else None,
                     float(row["amplitude_ak"]) if pd.notna(row.get("amplitude_ak")) else None,
-                    "akshare",
+                    src,
                     now_str,
                     symbol,
                     row["trade_date"],
@@ -364,6 +469,7 @@ def compare_and_repair(
 
         insert_rows: list[tuple] = []
         for _, row in ak_df.iterrows():
+            src = row.get("data_source", "eastmoney")
             insert_rows.append(
                 (
                     symbol,
@@ -377,7 +483,7 @@ def compare_and_repair(
                     float(row["turnover_rate"]) if pd.notna(row.get("turnover_rate")) else None,
                     float(row["pct_change"]) if pd.notna(row.get("pct_change")) else None,
                     float(row["amplitude"]) if pd.notna(row.get("amplitude")) else None,
-                    "akshare",
+                    src,
                     now_str,
                 )
             )
@@ -394,8 +500,9 @@ def compare_and_repair(
         )
         conn.commit()
         result["fixed"] = deleted
+        insert_src = ak_df["data_source"].iloc[0] if "data_source" in ak_df.columns else "eastmoney"
         logger.info(
-            f"  {symbol}: 已修复 — 删除 {deleted} 行旧数据，插入 {len(insert_rows)} 行 AkShare 数据"
+            f"  {symbol}: 已修复 — 删除 {deleted} 行旧数据，插入 {len(insert_rows)} 行 {insert_src} 数据"
         )
 
     result["elapsed"] = time.time() - t0
@@ -507,6 +614,131 @@ def format_eta(seconds: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 并行处理
+# ---------------------------------------------------------------------------
+def _worker_task(
+    symbol: str,
+    db_path: str,
+    since: str | None,
+    dry_run: bool,
+    smart_repair: bool,
+    full_check: bool,
+    backfill_source: bool,
+    sleep_sec: float,
+    eastmoney_available: bool,
+) -> dict:
+    """
+    单只股票处理（独立进程专用，模块级函数确保可 pickle）。
+
+    子进程是 spawn 全新解释器，不继承父进程的模块级状态，
+    需要显式传入探测结果，否则每个子进程都会重新试用东财。
+    """
+    global _eastmoney_available
+    _eastmoney_available = eastmoney_available
+
+    conn = sqlite3.connect(db_path)
+    try:
+        result = compare_and_repair(
+            conn,
+            symbol,
+            since=since,
+            dry_run=dry_run,
+            smart_repair=smart_repair,
+            full_check=full_check,
+            backfill_source=backfill_source,
+        )
+        time.sleep(sleep_sec + random.uniform(0, 0.5))
+        return {"symbol": symbol, **result}
+    finally:
+        conn.close()
+
+
+def _run_parallel(
+    symbols: list[str],
+    start_idx: int,
+    db_path: str,
+    args: argparse.Namespace,
+    stats: dict[str, int],
+    repaired_symbols: set[str],
+    report_rows: list[dict],
+    total: int,
+    start_time: float,
+) -> None:
+    """多进程并发处理股票（AkShare 的 mini_racer V8 引擎非线程安全，必须用进程）。"""
+    import concurrent.futures
+    import multiprocessing
+
+    # macOS 需要 spawn 模式避免 fork 安全问题
+    mp_ctx = multiprocessing.get_context("spawn")
+    done_count = 0
+
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=args.workers,
+        mp_context=mp_ctx,
+    ) as pool:
+        eastmoney_available = _eastmoney_available
+        futures = {
+            pool.submit(
+                _worker_task,
+                symbol,
+                db_path,
+                args.since,
+                args.dry_run,
+                args.smart_repair,
+                args.full_check,
+                args.backfill_source,
+                args.sleep,
+                eastmoney_available,
+            ): symbol
+            for symbol in symbols
+        }
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                data = future.result()
+                symbol = data.pop("symbol")
+            except Exception as e:
+                logger.error(f"  {futures[future]} 处理异常: {e}")
+                continue
+
+            done_count += 1
+            for k, v in data.items():
+                if k in stats:
+                    stats[k] += v
+
+            if data["failed"]:
+                save_retry_symbol(symbol)
+            elif data["fixed"] > 0 and not args.dry_run:
+                repaired_symbols.add(symbol)
+
+            report_rows.append({
+                "symbol": symbol,
+                "total_rows": data["total"],
+                "matched": data["matched"],
+                "diff_rows": data["diff"],
+                "diff_start_date": data.get("diff_start", ""),
+                "diff_end_date": data.get("diff_end", ""),
+                "fixed_rows": data["fixed"],
+                "skipped": data["skipped"],
+                "failed": data["failed"],
+                "elapsed_sec": round(data["elapsed"], 2),
+            })
+
+            if done_count % 50 == 0 or done_count == len(symbols):
+                elapsed = time.time() - start_time
+                rate = done_count / elapsed if elapsed > 0 else 0
+                remaining = total - (start_idx + done_count)
+                eta_sec = remaining / rate if rate > 0 else 999999
+                logger.info(
+                    f"📊 进度 {start_idx + done_count}/{total} "
+                    f"({100 * (start_idx + done_count) // total}%) | "
+                    f"diff={stats['diff']} fixed={stats['fixed']} "
+                    f"skipped={stats['skipped']} failed={stats['failed']} | "
+                    f"ETA {format_eta(eta_sec)}"
+                )
+
+
+# ---------------------------------------------------------------------------
 # 主控
 # ---------------------------------------------------------------------------
 def main():
@@ -576,7 +808,7 @@ def main():
     parser.add_argument(
         "--backfill-source",
         action="store_true",
-        help="对无差异但 data_source 为 NULL 的历史数据，回填 data_source='akshare'",
+        help="对无差异但 data_source 为 NULL 的历史数据，回填 data_source（eastmoney/sina）",
     )
     parser.add_argument(
         "--symbols",
@@ -590,7 +822,16 @@ def main():
         default=0,
         help="每 N 只强制做一次全量对比（忽略快速跳过），防止早期污染漏检。0=关闭 (默认)",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=1,
+        help="并发工作数 (默认: 1，建议 3-4 避免被 API 封)",
+    )
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers 必须 >= 1")
     os.nice(10)
 
     conn = sqlite3.connect(args.db_path)
@@ -625,6 +866,9 @@ def main():
 
     cursor.close()
 
+    # 探测数据源可用性（东财/新浪）
+    _probe_data_source()
+
     if args.limit:
         symbols = symbols[: args.limit]
 
@@ -633,6 +877,7 @@ def main():
     logger.info("🧹 AkShare 数据清洗开始")
     logger.info(f"   数据库: {args.db_path}")
     logger.info(f"   股票数: {total}")
+    logger.info(f"   东财可用: {_eastmoney_available}")
     if args.since:
         logger.info(f"   起始日期: {args.since}")
     logger.info(f"   模式: {'dry-run' if args.dry_run else '修复'}")
@@ -659,65 +904,74 @@ def main():
 
     start_time = time.time()
 
-    for i, symbol in enumerate(symbols[start_idx:], start=start_idx + 1):
-        time.time()
-        result = compare_and_repair(
-            conn,
-            symbol,
-            since=args.since,
-            dry_run=args.dry_run,
-            smart_repair=args.smart_repair,
-            full_check=args.full_check,
-            backfill_source=args.backfill_source,
+    # 并行处理模式
+    if args.workers > 1:
+        _run_parallel(
+            symbols=symbols[start_idx:],
+            start_idx=start_idx,
+            db_path=args.db_path,
+            args=args,
+            stats=stats,
+            repaired_symbols=repaired_symbols,
+            report_rows=report_rows,
+            total=total,
+            start_time=start_time,
         )
-        for k, v in result.items():
-            if k in stats:
-                stats[k] += v
-
-        per_symbol_times.append(result["elapsed"])
-
-        if result["failed"]:
-            save_retry_symbol(symbol)
-        elif result["fixed"] > 0 and not args.dry_run:
-            repaired_symbols.add(symbol)
-
-        # 生成报告行
-        report_rows.append({
-            "symbol": symbol,
-            "total_rows": result["total"],
-            "matched": result["matched"],
-            "diff_rows": result["diff"],
-            "diff_start_date": result.get("diff_start", ""),
-            "diff_end_date": result.get("diff_end", ""),
-            "fixed_rows": result["fixed"],
-            "skipped": result["skipped"],
-            "failed": result["failed"],
-            "elapsed_sec": round(result["elapsed"], 2),
-        })
-
-        # 进度刷新 + ETA
-        if i % 50 == 0 or i == total:
-            time.time() - start_time
-            avg_time = sum(per_symbol_times) / len(per_symbol_times)
-            remaining = total - i
-            eta_sec = avg_time * remaining + (remaining / args.batch_rest) * 10 + remaining * args.sleep
-            logger.info(
-                f"📊 进度 {i}/{total} ({100 * i // total}%) | "
-                f"diff={stats['diff']} fixed={stats['fixed']} skipped={stats['skipped']} failed={stats['failed']} | "
-                f"ETA {format_eta(eta_sec)}"
+    else:
+        # 顺序处理模式（原逻辑）
+        for i, symbol in enumerate(symbols[start_idx:], start=start_idx + 1):
+            result = compare_and_repair(
+                conn,
+                symbol,
+                since=args.since,
+                dry_run=args.dry_run,
+                smart_repair=args.smart_repair,
+                full_check=args.full_check,
+                backfill_source=args.backfill_source,
             )
+            for k, v in result.items():
+                if k in stats:
+                    stats[k] += v
 
-        if i % 10 == 0:
-            ReconcileProgress.save(i, symbol)
+            per_symbol_times.append(result["elapsed"])
 
-        # 限流
-        time.sleep(args.sleep + random.uniform(0, 0.5))
+            if result["failed"]:
+                save_retry_symbol(symbol)
+            elif result["fixed"] > 0 and not args.dry_run:
+                repaired_symbols.add(symbol)
 
-        # 批次间额外休息
-        if i % args.batch_rest == 0 and i < total:
-            rest = 10
-            logger.info(f"⏳ 批次休息 {rest}s...")
-            time.sleep(rest)
+            report_rows.append({
+                "symbol": symbol,
+                "total_rows": result["total"],
+                "matched": result["matched"],
+                "diff_rows": result["diff"],
+                "diff_start_date": result.get("diff_start", ""),
+                "diff_end_date": result.get("diff_end", ""),
+                "fixed_rows": result["fixed"],
+                "skipped": result["skipped"],
+                "failed": result["failed"],
+                "elapsed_sec": round(result["elapsed"], 2),
+            })
+
+            if i % 50 == 0 or i == total:
+                avg_time = sum(per_symbol_times) / len(per_symbol_times)
+                remaining = total - i
+                eta_sec = avg_time * remaining + (remaining / args.batch_rest) * 10 + remaining * args.sleep
+                logger.info(
+                    f"📊 进度 {i}/{total} ({100 * i // total}%) | "
+                    f"diff={stats['diff']} fixed={stats['fixed']} "
+                    f"skipped={stats['skipped']} failed={stats['failed']} | "
+                    f"ETA {format_eta(eta_sec)}"
+                )
+
+            if i % 10 == 0:
+                ReconcileProgress.save(i, symbol)
+
+            time.sleep(args.sleep + random.uniform(0, 0.5))
+
+            if i % args.batch_rest == 0 and i < total:
+                logger.info("⏳ 批次休息 10s...")
+                time.sleep(10)
 
     conn.close()
 
@@ -745,7 +999,7 @@ def main():
     logger.info(f"   差异行: {stats['diff']}")
     logger.info(f"   修复行: {stats['fixed']}")
     logger.info(f"   跳过(无数据): {stats['skipped']}")
-    logger.info(f"   AkShare 失败: {stats['failed']}")
+    logger.info(f"   抓取失败: {stats['failed']}")
     logger.info(f"   耗时: {format_eta(total_elapsed)}")
     if stats["failed"] > 0:
         logger.info(f"   失败队列: {RETRY_FILE} ({stats['failed']} 只)")
