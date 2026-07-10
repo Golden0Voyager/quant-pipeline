@@ -14,7 +14,7 @@ from pathlib import Path
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Label, RichLog, Select, Static
 
@@ -511,7 +511,25 @@ class SingleTaskWidget(Static):
             self.query_one("#task-select", Select).clear()
 
 
-class DataCompletenessWidget(Static):
+class DataCompletenessWidget(VerticalScroll):
+    # 任务名 → 表名的映射（用于判断哪个表正在更新）
+    TASK_TO_TABLE: dict[str, str] = {
+        "update_stock_list": "stock_list",
+        "update_bars": "daily_bars",
+        "update_indicators": "indicators",
+        "update_fundamentals": "fundamentals",
+        "update_fund_flow": "fund_flow",
+        "update_margin_trading": "margin_trading",
+        "update_dragon_tiger": "dragon_tiger",
+        "update_block_trade": "block_trade",
+        "update_sector_fund_flow": "sector_fund_flow",
+        "update_shareholder_count": "shareholder_count",
+        "update_quarterly_financials": "quarterly_financials",
+        "update_historical_valuation": "historical_valuation",
+        "update_sector_industry": "sector_industry",
+        "update_institutional_holdings": "institutional_holdings",
+    }
+
     TABLE_LABELS: dict[str, str] = {
         "daily_bars": "Daily Bars",
         "indicators": "Indicators",
@@ -534,6 +552,9 @@ class DataCompletenessWidget(Static):
         self._counts: dict[str, int] = {}
         self._latest_dates: dict[str, str | None] = {}
         self._bg_tasks: set[asyncio.Task] = set()
+        # 挂载内容子组件
+        self._content = Static(id="dc-content")
+        await self.mount(self._content)
         self.set_interval(30.0, self.update_completeness)
         # 先快速加载（瞬间完成），再后台精确更新
         self._counts = await asyncio.to_thread(
@@ -559,11 +580,30 @@ class DataCompletenessWidget(Static):
         self._latest_dates = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
         self._rebuild_content()
 
+    @staticmethod
+    def _get_updating_table() -> str | None:
+        """读取 progress.json，返回当前正在更新的表名，若无活跃任务则返回 None。"""
+        import os
+        import time
+        try:
+            mtime = os.path.getmtime(str(PROGRESS_JSON_PATH))
+            # 如果 progress.json 超过 90 秒未更新，认为已无活跃任务
+            if time.time() - mtime > 90:
+                return None
+            progress = parse_progress(str(PROGRESS_JSON_PATH))
+            if not progress:
+                return None
+            task = progress.get("task", "")
+            return DataCompletenessWidget.TASK_TO_TABLE.get(task)
+        except OSError:
+            return None
+
     def _rebuild_content(self) -> None:
         counts = self._counts
         latest_dates = self._latest_dates
+        updating_table = self._get_updating_table()
         if not counts:
-            self.update(" 等待数据库连接...")
+            self._content.update(" 等待数据库连接...")
             return
 
         # 快速模式：显示估算值，等待后台精确更新
@@ -576,7 +616,7 @@ class DataCompletenessWidget(Static):
             ]
             for _tbl, label in self.TABLE_LABELS.items():
                 lines.append(f" • [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
-            self.update("\n".join(lines))
+            self._content.update("\n".join(lines))
             return
 
         stock_count = counts.get("stock_list", 0) or 5527
@@ -597,7 +637,10 @@ class DataCompletenessWidget(Static):
             formatted = format_count(n)
             cn_formatted = format_chinese_magnitude(n)
             latest = latest_dates.get(tbl)
-            emoji, status = _date_status(latest, expected_date)
+            if tbl == updating_table:
+                emoji, status = "[cyan]●[/cyan]", "更新中"
+            else:
+                emoji, status = _date_status(latest, expected_date)
             date_str = f"[gray]{latest or '—'}[/gray]"
             status_str = f"{emoji} [bold]{status}[/bold]"
 
@@ -624,7 +667,7 @@ class DataCompletenessWidget(Static):
                     f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]"
                 )
 
-        self.update("\n".join(lines))
+        self._content.update("\n".join(lines))
 
     @staticmethod
     def _mini_bar(pct: float) -> tuple[str, int]:
@@ -832,8 +875,8 @@ class PipelineApp(App):
     }
     #main-grid {
         layout: grid;
-        grid-size: 2 3;
-        grid-rows: auto 1fr 1fr;
+        grid-size: 2 4;
+        grid-rows: auto auto 1fr 2fr;
         grid-columns: 35fr 65fr;
         height: 100%;
         padding: 1 2;
@@ -862,18 +905,38 @@ class PipelineApp(App):
     Select > .select-list > .select-list-item.button {
         background: #2563eb;
     }
-    #status-dashboard, #data-completeness, #scraping-progress {
+    #status-dashboard, #scraping-progress {
         border: round $blue-normal;
         background: $bg-panel;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
     }
-    #status-dashboard:hover, #data-completeness:hover, #scraping-progress:hover {
+    #data-completeness {
+        border: round $blue-normal;
+        background: $bg-panel;
+        padding: 1 2;
+        border-title-align: left;
+        border-title-color: #60a5fa;
+        scrollbar-color: #475569 #1e293b;
+    }
+    #dc-content {
+        width: 100%;
+        height: auto;
+    }
+    #status-dashboard:hover, #scraping-progress:hover {
         border: round $blue-hover;
         border-title-color: #93c5fd;
     }
-    #status-dashboard:focus, #data-completeness:focus, #scraping-progress:focus {
+    #data-completeness:hover {
+        border: round $blue-hover;
+        border-title-color: #93c5fd;
+    }
+    #status-dashboard:focus, #scraping-progress:focus {
+        border: round $blue-focus;
+        border-title-color: #3b82f6;
+    }
+    #data-completeness:focus {
         border: round $blue-focus;
         border-title-color: #3b82f6;
     }
@@ -910,8 +973,8 @@ class PipelineApp(App):
             yield DashboardWidget(id="status-dashboard")
             yield LogsWidget(id="live-logs")
             yield SingleTaskWidget(id="single-task")
-            yield DataCompletenessWidget(id="data-completeness")
             yield ProgressWidget(id="scraping-progress")
+            yield DataCompletenessWidget(id="data-completeness")
         yield Static(
             " S:全量更新  R:续传  X:停止  D:启动守护  Z:停止守护  H:健康检查  F:数据修复  Ctrl+C:退出",
             id="key-bindings",
