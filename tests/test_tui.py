@@ -31,7 +31,7 @@ async def test_widgets_present():
     app = PipelineApp()
     async with app.run_test():
         assert app.query_one("#status-dashboard") is not None
-        assert app.query_one("#operations") is not None
+        assert app.query_one("#single-task") is not None
         assert app.query_one("#scraping-progress") is not None
         assert app.query_one("#live-logs") is not None
 
@@ -230,7 +230,7 @@ async def test_action_stop_pipeline_stops_process():
     with patch("logging.getLogger", return_value=mock_logger):
         await app.action_stop_pipeline()
         mock_proc.terminate.assert_called_once()
-        mock_logger.info.assert_called_with("已停止当前运行的任务")
+        mock_logger.info.assert_called_with("已停止进程: %s", [99999])
 
 
 @pytest.mark.asyncio
@@ -285,9 +285,13 @@ async def test_action_handlers_use_run_in_background():
     expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
-         patch("asyncio.create_task") as mock_create_task:
+         patch("asyncio.create_task") as mock_create_task, \
+         patch.object(app, "push_screen") as mock_push_screen:
 
         await app.action_run_pipeline()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "all", "--force"
@@ -295,7 +299,11 @@ async def test_action_handlers_use_run_in_background():
 
         mock_run_bg.reset_mock()
         mock_create_task.reset_mock()
+        mock_push_screen.reset_mock()
         await app.action_resume_pipeline()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
@@ -319,7 +327,11 @@ async def test_action_handlers_use_run_in_background():
 
         mock_run_bg.reset_mock()
         mock_create_task.reset_mock()
+        mock_push_screen.reset_mock()
         await app.action_run_health()
+        assert mock_push_screen.call_count == 1
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_bg.assert_called_once_with(
             sys.executable, expected_pipeline_path, "--task", "health_check", "--force"
@@ -347,6 +359,95 @@ def test_date_status():
     assert _date_status(None, "2026-07-07") == ("[red]●[/red]", "无数据")
     assert _date_status("2026-07-06", "2026-07-07") == ("[yellow]●[/yellow]", "略滞后")
     assert _date_status("2026-07-01", "2026-07-07") == ("[red]●[/red]", "滞后")
+
+
+def test_normalize_date():
+    from tui import _normalize_date
+    assert _normalize_date(None) is None
+    assert _normalize_date("2026-07-07") == "2026-07-07"
+    assert _normalize_date("20260630") == "2026-06-30"
+    assert _normalize_date("20260331") == "2026-03-31"
+    assert _normalize_date("not-a-date") == "not-a-date"
+
+
+def test_get_daily_bars_coverage(tmp_path):
+    from tui import get_daily_bars_coverage
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars VALUES ('000001.SZ', '2026-07-09')")
+    conn.execute("INSERT INTO daily_bars VALUES ('600000.SH', '2026-07-08')")
+    conn.execute("INSERT INTO daily_bars VALUES ('000002.SZ', '2026-07-01')")
+    conn.commit()
+    conn.close()
+
+    up_to_date, total = get_daily_bars_coverage(str(db_file), "2026-07-10")
+    assert total == 3
+    # 2026-07-09 >= 2026-07-08 (expect -2) → up to date
+    # 2026-07-08 >= 2026-07-08 → up to date
+    # 2026-07-01 <  2026-07-08 → lagging
+    assert up_to_date == 2
+
+    # non-existent DB
+    assert get_daily_bars_coverage("/nonexistent/test.db", "2026-07-10") == (0, 0)
+
+
+def test_seconds_until_safe():
+    from datetime import datetime
+
+    from tui import _seconds_until_safe
+    before = datetime(2026, 7, 10, 14, 59, 0)
+    with patch("tui.datetime") as m:
+        m.now.return_value = before
+        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert _seconds_until_safe() == 3660
+
+
+@pytest.mark.asyncio
+async def test_confirm_run_screen_dismiss():
+    from unittest.mock import MagicMock
+
+    from textual.widgets import Button
+
+    from tui import ConfirmRunScreen
+    screen = ConfirmRunScreen("全量更新")
+    for btn_id in ("run-now", "run-later", "cancel"):
+        mock_dismiss = MagicMock()
+        screen.dismiss = mock_dismiss
+        btn = Button(id=btn_id)
+        screen.on_button_pressed(Button.Pressed(btn))
+        mock_dismiss.assert_called_once_with(btn_id)
+
+
+def test_seconds_until_safe_after_sixteen():
+    from datetime import datetime, timedelta
+
+    from tui import _seconds_until_safe
+    after = datetime(2026, 7, 10, 17, 30, 0)
+    with patch("tui.datetime") as m:
+        m.now.return_value = after
+        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        result = _seconds_until_safe()
+        target = after.replace(hour=16, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        expected = int((target - after).total_seconds())
+        assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_run_or_schedule_run_later():
+    from tui import PipelineApp
+    app = PipelineApp()
+    async with app.run_test():
+        args = ("python", "test_script.py")
+        with patch.object(app, "push_screen") as mock_push_screen:
+            app._run_or_schedule("测试任务", *args)
+            assert mock_push_screen.call_count == 1
+            _, callback = mock_push_screen.call_args[0]
+            with patch.object(app, "_background_tasks", new_callable=set), \
+                 patch("tui._seconds_until_safe", return_value=1), \
+                 patch("asyncio.create_task") as mock_create_task:
+                callback("run-later")
+                mock_create_task.assert_called_once()
 
 
 def test_get_latest_dates(tmp_path):
@@ -378,17 +479,17 @@ async def test_data_completeness_shows_freshness_and_dates():
             "fundamentals": 5000,
         }
         widget._latest_dates = {
-            "daily_bars": "2026-07-07",
-            "indicators": "2026-07-07",
-            "fundamentals": "2026-07-06",
+            "daily_bars": "2026-07-09",
+            "indicators": "2026-07-09",
+            "fundamentals": "2026-07-08",
         }
         captured = []
-        with patch.object(widget, "update", side_effect=captured.append):
+        with patch.object(widget._content, "update", side_effect=captured.append):
             widget._rebuild_content()
         text = "\n".join(captured)
         assert "期望最新日期" in text
         assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
-        assert "2026-07-07" in text
+        assert "2026-07-09" in text
 
 
 def test_parse_progress_valid(tmp_path):

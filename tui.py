@@ -8,14 +8,15 @@ import signal
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Label, RichLog, Static
+from textual.widgets import Button, Header, Label, RichLog, Select, Static
 
 DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
@@ -66,8 +67,14 @@ def get_daemon_status(pid_path: str) -> tuple[str, int | None]:
         return "Stopped", None
 
 
-def find_running_pipeline_processes() -> list[dict[str, str | int]]:
-    """查找所有正在运行的 daily_pipeline.py 进程（非 daemon）。"""
+def find_running_pipeline_processes(
+    skip_ppid_check: bool = False,
+) -> list[dict[str, str | int]]:
+    """查找所有正在运行的 daily_pipeline.py 进程（非 daemon）。
+
+    Args:
+        skip_ppid_check: 为 True 时不过滤 TUI 子进程（用于 X 键停止场景）。
+    """
     processes = []
     # 1. 检查 pidfile
     pidfile = Path(PIPELINE_PID_PATH)
@@ -97,20 +104,22 @@ def find_running_pipeline_processes() -> list[dict[str, str | int]]:
         )
         for line in res.stdout.strip().splitlines():
             pid = int(line.strip())
-            # 跳过已在列表中的
+            # 跳过已在列表中的进程
             if any(p["pid"] == pid for p in processes):
                 continue
             # 跳过 TUI 自身的子进程（ppid 是 TUI）
-            try:
-                ppid_res = subprocess.run(
-                    ["ps", "-p", str(pid), "-o", "ppid="],
-                    capture_output=True, text=True, timeout=2.0,
-                )
-                ppid = int(ppid_res.stdout.strip())
-                if ppid == os.getpid():
+            # X 键停止场景（skip_ppid_check=True）不过滤，确保能杀 TUI 子进程
+            if not skip_ppid_check:
+                try:
+                    ppid_res = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "ppid="],
+                        capture_output=True, text=True, timeout=2.0,
+                    )
+                    ppid = int(ppid_res.stdout.strip())
+                    if ppid == os.getpid():
+                        continue
+                except Exception:
                     continue
-            except Exception:
-                continue
             res2 = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "pid,etime,command="],
                 capture_output=True, text=True, timeout=2.0,
@@ -177,6 +186,67 @@ class ConfirmStopScreen(ModalScreen[bool]):
             self.dismiss(True)
         elif event.key.lower() == "n":
             self.dismiss(False)
+
+
+class ConfirmRunScreen(ModalScreen[str]):
+    """弹窗：确认是否启动任务，可选择立即、稍后或取消。"""
+
+    CSS = """
+    ConfirmRunScreen {
+        align: center middle;
+    }
+    #confirm-dialog {
+        width: 66;
+        height: auto;
+        max-height: 14;
+        background: #1e293b;
+        border: round #1d4ed8;
+        padding: 1 2;
+    }
+    #confirm-dialog Label {
+        width: 100%;
+    }
+    #confirm-buttons {
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+    Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, action_name: str) -> None:
+        super().__init__()
+        self._action_name = action_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label("[bold]确认运行[/bold]")
+            yield Label("")
+            yield Label(f"[yellow]{self._action_name}[/yellow]")
+            yield Label("")
+            with Horizontal(id="confirm-buttons"):
+                yield Button("立即运行", variant="primary", id="run-now")
+                yield Button("稍后自动运行", variant="default", id="run-later")
+                yield Button("取消", variant="error", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+
+def _seconds_until_safe() -> int:
+    """计算到下一个安全运行时间（16:00）的秒数。"""
+    now = datetime.now()
+    target = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    seconds = (target - now).total_seconds()
+    if seconds <= 0:
+        # 已过 16:00，次日 16:00
+        target += timedelta(days=1)
+        seconds = (target - now).total_seconds()
+    return int(seconds)
+
 
 def get_subprocess_env() -> dict:
     env = os.environ.copy()
@@ -261,6 +331,8 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "shareholder_count": "report_date",
     "quarterly_financials": "report_period",
     "historical_valuation": "trade_date",
+    "sector_industry": "trade_date",
+    "institutional_holdings": "report_date",
 }
 
 
@@ -280,8 +352,26 @@ def _get_expected_latest_trading_day() -> str:
     return target.strftime("%Y-%m-%d")
 
 
+def _normalize_date(value: object) -> str | None:
+    """将日期/报告期归一化为 YYYY-MM-DD。
+
+    部分表（margin_trading、dragon_tiger、block_trade、shareholder_count、
+    quarterly_financials）的日期列以 YYYYMMDD 无横线格式存储，需归一化后
+    才能与期望日做新鲜度比较，否则会被 _date_status 误判为滞后。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
+
 def get_latest_dates(db_path: str) -> dict[str, str | None]:
-    """查询每个表最新日期/报告期。"""
+    """查询每个表最新日期/报告期（已归一化为 YYYY-MM-DD）。"""
     p = Path(db_path)
     if not p.exists():
         return {}
@@ -294,12 +384,44 @@ def get_latest_dates(db_path: str) -> dict[str, str | None]:
             try:
                 cur.execute(f"SELECT MAX({col}) FROM {tbl}")
                 value = cur.fetchone()[0]
-                result[tbl] = str(value) if value is not None else None
+                result[tbl] = _normalize_date(value)
             except Exception:
                 result[tbl] = None
         return result
     except Exception:
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]:
+    """返回 (已更新到期望交易日的股票数, 有日线数据的股票总数)。
+
+    用「各股最新交易日是否达到期望日」衡量覆盖率，比按行数对比更符合实际
+    （新股历史不足、节假日等会导致行数天然少于理想值）。
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return 0, 0
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        # 容忍期望日前 2 个自然日（周末/节假日），视为已更新
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN max_date >= date(?, '-2 days') THEN 1 ELSE 0 END) AS up_to_date
+            FROM (SELECT ts_code, MAX(trade_date) AS max_date FROM daily_bars GROUP BY ts_code)
+            """,
+            (expected_date,),
+        )
+        total, up_to_date = cur.fetchone()
+        return int(up_to_date or 0), int(total or 0)
+    except Exception:
+        return 0, 0
     finally:
         if conn is not None:
             conn.close()
@@ -385,24 +507,64 @@ class DashboardWidget(Static):
         self.update(text)
 
 
-class OperationsWidget(Static):
+class SingleTaskWidget(Static):
+    """Single task selector with a dropdown."""
+
+    SINGLE_TASKS: list[tuple[str, str]] = [
+        ("Full Update (All)", "all"),
+        ("Daily Bars", "update_bars"),
+        ("Indicators", "update_indicators"),
+        ("Fundamentals", "update_fundamentals"),
+        ("Market Snapshot (雪球)", "update_market_snapshot"),
+        ("Fund Flow", "update_fund_flow"),
+        ("Margin Trading", "update_margin_trading"),
+        ("Dragon Tiger", "update_dragon_tiger"),
+        ("Block Trade", "update_block_trade"),
+        ("Sector Fund Flow", "update_sector_fund_flow"),
+        ("Shareholder Count", "update_shareholder_count"),
+        ("Quarterly Financials", "update_quarterly_financials"),
+        ("Historical Valuation", "update_historical_valuation"),
+        ("Sector Industry", "update_sector_industry"),
+        ("Industry", "update_industry"),
+    ]
+
     def on_mount(self) -> None:
-        self.border_title = "⚙️ Controls"
-        text = (
-            " [bold #f1f5f9 on #334155] S [/]  Full Update\n"
-            " [bold #f1f5f9 on #334155] R [/]  Resume (Checkpoint)\n"
-            " [bold #f1f5f9 on #334155] X [/]  Stop Running Task\n"
-            " [bold #f1f5f9 on #334155] D [/]  Start Daemon\n"
-            " [bold #f1f5f9 on #334155] Z [/]  Stop Daemon\n"
-            " [bold #f1f5f9 on #334155] H [/]  Health Check\n"
-            " [bold #f1f5f9 on #334155] T [/]  Toggle Theme\n"
-            " [bold #f1f5f9 on #334155] C [/]  Copy Logs\n"
-            " [bold #f1f5f9 on #334155] Q [/]  Quit"
+        self.border_title = "Single Task"
+        select = Select(
+            options=self.SINGLE_TASKS,
+            prompt="选择一项任务...",
+            id="task-select",
         )
-        self.update(text)
+        self.mount(select)
+
+    async def on_select_changed(self, event: Select.Changed) -> None:
+        # event.value 在 clear() 后为 Select.NULL（NoSelection 对象），
+        # 只有 str 类型才是真实任务名，避免误触发导致杀进程
+        if isinstance(event.value, str) and event.value:
+            await self.app.action_run_single_task(event.value)
+            # 重置回提示状态（会触发新的 Select.Changed 但被上面过滤掉）
+            self.query_one("#task-select", Select).clear()
 
 
-class DataCompletenessWidget(Static):
+class DataCompletenessWidget(VerticalScroll):
+    # 任务名 → 表名的映射（用于判断哪个表正在更新）
+    TASK_TO_TABLE: dict[str, str] = {
+        "update_stock_list": "stock_list",
+        "update_bars": "daily_bars",
+        "update_indicators": "indicators",
+        "update_fundamentals": "fundamentals",
+        "update_fund_flow": "fund_flow",
+        "update_margin_trading": "margin_trading",
+        "update_dragon_tiger": "dragon_tiger",
+        "update_block_trade": "block_trade",
+        "update_sector_fund_flow": "sector_fund_flow",
+        "update_shareholder_count": "shareholder_count",
+        "update_quarterly_financials": "quarterly_financials",
+        "update_historical_valuation": "historical_valuation",
+        "update_sector_industry": "sector_industry",
+        "update_institutional_holdings": "institutional_holdings",
+    }
+
     TABLE_LABELS: dict[str, str] = {
         "daily_bars": "Daily Bars",
         "indicators": "Indicators",
@@ -416,6 +578,7 @@ class DataCompletenessWidget(Static):
         "shareholder_count": "Shareholders",
         "quarterly_financials": "Quarterly Fin.",
         "sector_industry": "Industry",
+        "institutional_holdings": "Inst. Holdings",
         "stock_list": "Stock List",
     }
 
@@ -423,37 +586,68 @@ class DataCompletenessWidget(Static):
         self.border_title = "📀 Data Completeness"
         self._counts: dict[str, int] = {}
         self._latest_dates: dict[str, str | None] = {}
+        self._daily_coverage: tuple[int, int] = (0, 0)
         self._bg_tasks: set[asyncio.Task] = set()
-        self.set_interval(30.0, self.update_completeness)
+        # 挂载内容子组件
+        self._content = Static(id="dc-content")
+        await self.mount(self._content)
+        # 轻量计时器：仅用缓存重建显示（读 progress.json 判断更新中，无 DB 查询）
+        self.set_interval(30.0, self._rebuild_from_cache)
+        # 重量计时器：后台并行重算行数/最新日期/覆盖率（查询较重，低频执行）
+        self.set_interval(90.0, self._refresh_exact)
         # 先快速加载（瞬间完成），再后台精确更新
         self._counts = await asyncio.to_thread(
             get_all_table_counts, str(DEFAULT_DB_PATH), fast=True
         )
         self._rebuild_content()
-        task = asyncio.create_task(self._refresh_exact_counts())
+        task = asyncio.create_task(self._refresh_exact())
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    async def _refresh_exact_counts(self) -> None:
-        """后台精确更新行数与最新日期（不阻塞界面）。"""
-        exact = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
+    async def _refresh_exact(self) -> None:
+        """后台重算行数、最新日期与覆盖率（查询较重，低频执行）。
+
+        串行执行以避免多查询同时抢占同一块磁盘 I/O 导致争用变慢。
+        """
+        expected = _get_expected_latest_trading_day()
+        counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
         latest = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
-        if exact:
-            self._counts = exact
+        cov = await asyncio.to_thread(get_daily_bars_coverage, str(DEFAULT_DB_PATH), expected)
+        if counts:
+            self._counts = counts
         if latest:
             self._latest_dates = latest
+        self._daily_coverage = cov
         self._rebuild_content()
 
-    async def update_completeness(self) -> None:
-        self._counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH))
-        self._latest_dates = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
+    def _rebuild_from_cache(self) -> None:
+        """仅用已缓存数据重建显示（无 DB 查询，轻量）。"""
         self._rebuild_content()
+
+    @staticmethod
+    def _get_updating_table() -> str | None:
+        """读取 progress.json，返回当前正在更新的表名，若无活跃任务则返回 None。"""
+        import os
+        import time
+        try:
+            mtime = os.path.getmtime(str(PROGRESS_JSON_PATH))
+            # 如果 progress.json 超过 90 秒未更新，认为已无活跃任务
+            if time.time() - mtime > 90:
+                return None
+            progress = parse_progress(str(PROGRESS_JSON_PATH))
+            if not progress:
+                return None
+            task = progress.get("task", "")
+            return DataCompletenessWidget.TASK_TO_TABLE.get(task)
+        except OSError:
+            return None
 
     def _rebuild_content(self) -> None:
         counts = self._counts
         latest_dates = self._latest_dates
+        updating_table = self._get_updating_table()
         if not counts:
-            self.update(" 等待数据库连接...")
+            self._content.update(" 等待数据库连接...")
             return
 
         # 快速模式：显示估算值，等待后台精确更新
@@ -466,12 +660,12 @@ class DataCompletenessWidget(Static):
             ]
             for _tbl, label in self.TABLE_LABELS.items():
                 lines.append(f" • [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
-            self.update("\n".join(lines))
+            self._content.update("\n".join(lines))
             return
 
-        stock_count = counts.get("stock_list", 0) or 5527
         daily_bars = counts.get("daily_bars", 0) or 1
         expected_date = _get_expected_latest_trading_day()
+        daily_up_to_date, daily_total = self._daily_coverage
 
         total_rows = sum(v for k, v in counts.items() if not k.startswith("_"))
         db_size = get_db_size(str(DEFAULT_DB_PATH))
@@ -487,13 +681,15 @@ class DataCompletenessWidget(Static):
             formatted = format_count(n)
             cn_formatted = format_chinese_magnitude(n)
             latest = latest_dates.get(tbl)
-            emoji, status = _date_status(latest, expected_date)
+            if tbl == updating_table:
+                emoji, status = "[cyan]●[/cyan]", "更新中"
+            else:
+                emoji, status = _date_status(latest, expected_date)
             date_str = f"[gray]{latest or '—'}[/gray]"
             status_str = f"{emoji} [bold]{status}[/bold]"
 
             if tbl == "daily_bars":
-                expected = stock_count * 1500
-                pct = min(n / expected * 100, 100) if expected else 0
+                pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
                 bar, pct_int = self._mini_bar(pct)
                 lines.append(
                     f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
@@ -514,7 +710,7 @@ class DataCompletenessWidget(Static):
                     f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]"
                 )
 
-        self.update("\n".join(lines))
+        self._content.update("\n".join(lines))
 
     @staticmethod
     def _mini_bar(pct: float) -> tuple[str, int]:
@@ -653,7 +849,9 @@ class PipelineApp(App):
         Binding("z", "stop_daemon", "Stop Daemon"),
         Binding("h", "run_health", "Health Check"),
         Binding("c", "copy_logs", "Copy Logs"),
-        Binding("q", "quit", "Quit"),
+        Binding("f", "run_reconcile", "Data Repair", show=True),
+        Binding("ctrl+c", "quit", "Quit", priority=True),
+        Binding("q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -684,6 +882,25 @@ class PipelineApp(App):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def _run_or_schedule(self, action_name: str, *args: str) -> None:
+        """弹窗：立即运行、稍后调度到 16:00 或取消。"""
+
+        def _on_dismiss(choice: str | None) -> None:
+            if choice == "run-now":
+                self._create_background_task(self._run_in_background(*args))
+            elif choice == "run-later":
+                delay = _seconds_until_safe()
+                self.notify(
+                    f"「{action_name}」已调度到安全时间后自动运行（剩余 {delay//60} 分钟）",
+                    timeout=6.0,
+                )
+                async def _delayed():
+                    await asyncio.sleep(delay)
+                    self._create_background_task(self._run_in_background(*args))
+                self._background_tasks.add(asyncio.create_task(_delayed()))
+
+        self.push_screen(ConfirmRunScreen(action_name), _on_dismiss)
+
     CSS = """
     $bg-panel: #111827;
     $bg-screen: #030712;
@@ -702,23 +919,78 @@ class PipelineApp(App):
     #main-grid {
         layout: grid;
         grid-size: 2 4;
-        grid-rows: 1fr 1fr 1fr 1fr;
+        grid-rows: auto auto 1fr 2fr;
         grid-columns: 35fr 65fr;
         height: 100%;
         padding: 1 2;
     }
-    #status-dashboard, #operations, #data-completeness, #scraping-progress {
+    #single-task {
+        border: round $blue-normal;
+        background: $bg-panel;
+        padding: 0 2;
+        border-title-align: left;
+        border-title-color: #60a5fa;
+    }
+    #single-task:hover {
+        border: round $blue-hover;
+    }
+    #single-task Select {
+        width: 100%;
+    }
+    #single-task Select > SelectCurrent {
+        border: round #334155;
+        background: transparent;
+    }
+    #single-task Select:focus > SelectCurrent {
+        border: round #3b82f6;
+        background: transparent;
+    }
+    Select > .select-list {
+        background: #1e293b;
+        border: round #1d4ed8;
+        max-height: 14;
+        overflow-y: auto;
+    }
+    Select > .select-list > .select-list-item:hover {
+        background: #1d4ed8;
+    }
+    Select > .select-list > .select-list-item.button {
+        background: #2563eb;
+    }
+    #status-dashboard, #scraping-progress {
         border: round $blue-normal;
         background: $bg-panel;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
+        height: 1fr;
     }
-    #status-dashboard:hover, #operations:hover, #data-completeness:hover, #scraping-progress:hover {
+    #data-completeness {
+        border: round $blue-normal;
+        background: $bg-panel;
+        padding: 1 2;
+        border-title-align: left;
+        border-title-color: #60a5fa;
+        scrollbar-color: #475569 #1e293b;
+        height: 1fr;
+    }
+    #dc-content {
+        width: 100%;
+        height: auto;
+    }
+    #status-dashboard:hover, #scraping-progress:hover {
         border: round $blue-hover;
         border-title-color: #93c5fd;
     }
-    #status-dashboard:focus, #operations:focus, #data-completeness:focus, #scraping-progress:focus {
+    #data-completeness:hover {
+        border: round $blue-hover;
+        border-title-color: #93c5fd;
+    }
+    #status-dashboard:focus, #scraping-progress:focus {
+        border: round $blue-focus;
+        border-title-color: #3b82f6;
+    }
+    #data-completeness:focus {
         border: round $blue-focus;
         border-title-color: #3b82f6;
     }
@@ -739,6 +1011,14 @@ class PipelineApp(App):
         border: round $rose-focus;
         border-title-color: #e11d48;
     }
+    #key-bindings {
+        dock: bottom;
+        height: 1;
+        background: #1e293b;
+        color: #94a3b8;
+        padding: 0 2;
+        text-align: center;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -746,10 +1026,13 @@ class PipelineApp(App):
         with Grid(id="main-grid"):
             yield DashboardWidget(id="status-dashboard")
             yield LogsWidget(id="live-logs")
-            yield OperationsWidget(id="operations")
-            yield DataCompletenessWidget(id="data-completeness")
+            yield SingleTaskWidget(id="single-task")
             yield ProgressWidget(id="scraping-progress")
-        yield Footer()
+            yield DataCompletenessWidget(id="data-completeness")
+        yield Static(
+            " S:全量更新  R:续传  X:停止  D:启动守护  Z:停止守护  H:健康检查  F:数据修复  Ctrl+C:退出",
+            id="key-bindings",
+        )
 
     async def _stop_current_process(self) -> None:
         """终止当前正在运行的子进程及其整个进程组。"""
@@ -800,20 +1083,39 @@ class PipelineApp(App):
         finally:
             self._current_process = None
 
+    async def _stop_daemon_process(self) -> None:
+        """调用 daemon.py stop 干净地停止守护进程（不破坏 _stop_current_process 的副作用）。"""
+        daemon_path = str(Path(__file__).parent / "scripts" / "daemon.py")
+        env = get_subprocess_env()
+        logger = logging.getLogger("quant_pipeline.tui")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, daemon_path, "stop",
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            if proc.returncode != 0:
+                output = stdout.decode("utf-8", errors="replace").strip()
+                logger.warning("停止守护进程失败 (code=%s): %s", proc.returncode, output)
+        except TimeoutError:
+            logger.warning("停止守护进程超时")
+        except Exception:
+            logger.exception("停止守护进程异常")
+
     async def action_run_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
-        self._create_background_task(
-            self._run_in_background(
-                sys.executable, pipeline_path, "--task", "all", "--force"
-            )
+        self._run_or_schedule(
+            "全量更新",
+            sys.executable, pipeline_path, "--task", "all", "--force",
         )
 
     async def action_resume_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
-        self._create_background_task(
-            self._run_in_background(
-                sys.executable, pipeline_path, "--task", "update_bars", "--resume", "--force"
-            )
+        self._run_or_schedule(
+            "断点续传",
+            sys.executable, pipeline_path, "--task", "update_bars", "--resume", "--force",
         )
 
     async def action_start_daemon(self) -> None:
@@ -829,20 +1131,68 @@ class PipelineApp(App):
         )
 
     async def action_stop_pipeline(self) -> None:
-        """停止当前正在运行的 pipeline / resume / health 子进程。"""
+        """停止当前正在运行的 pipeline / resume / health 子进程，
+        以及任何后台（含 daemon 启动、或在其它终端启动）正在运行的 daily_pipeline.py 进程。
+        若守护进程正在运行，也会一并停止，避免任务被重新拉起。"""
         logger = logging.getLogger("quant_pipeline.tui")
-        if self._current_process is None:
+        stopped_pids: list[int] = []
+
+        # 1. 停止 TUI 直接启动的子进程（R / S / H 键启动的任务）
+        if self._current_process is not None and self._current_process.returncode is None:
+            proc_pid = self._current_process.pid
+            await self._stop_current_process()
+            stopped_pids.append(proc_pid)
+
+        # 2. 停止通过 pgrep 发现的其它后台 daily_pipeline.py 进程
+        #    （含 daemon 启动的孙进程、TUI 子进程、在其它终端启动的进程）
+        for p in find_running_pipeline_processes(skip_ppid_check=True):
+            pid = int(p["pid"])
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped_pids.append(pid)
+            except OSError:
+                pass
+
+        # 3. 若守护进程仍在运行，一并停止（否则会重新拉起任务）
+        daemon_status, daemon_pid = get_daemon_status(DAEMON_PID_PATH)
+        if daemon_status == "Running" and daemon_pid is not None:
+            self._create_background_task(self._stop_daemon_process())
+            stopped_pids.append(daemon_pid)
+
+        if stopped_pids:
+            self.notify(
+                f"已发送停止信号给 {len(set(stopped_pids))} 个进程",
+                severity="information",
+                timeout=3.0,
+            )
+            logger.info("已停止进程: %s", stopped_pids)
+        else:
+            self.notify("没有正在运行的任务可停止", severity="warning", timeout=3.0)
             logger.info("没有正在运行的任务可停止")
-            return
-        await self._stop_current_process()
-        logger.info("已停止当前运行的任务")
 
     async def action_run_health(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            "健康检查",
+            sys.executable, pipeline_path, "--task", "health_check", "--force",
+        )
+
+    async def action_run_reconcile(self) -> None:
+        """全量清洗：对比 AkShare 并修复差异。"""
+        reconcile_path = str(Path(__file__).parent / "scripts" / "reconcile_with_akshare.py")
+        self.notify("全量数据清洗启动（对比 AkShare 并修复差异）", timeout=5.0)
         self._create_background_task(
             self._run_in_background(
-                sys.executable, pipeline_path, "--task", "health_check", "--force"
+                sys.executable, reconcile_path, "--workers", "3"
             )
+        )
+
+    async def action_run_single_task(self, task: str) -> None:
+        """运行单个数据拉取任务。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            f"单任务: {task}",
+            sys.executable, pipeline_path, "--task", task, "--force",
         )
 
     def action_copy_logs(self) -> None:

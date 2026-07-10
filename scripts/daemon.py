@@ -59,7 +59,7 @@ def start(resume: bool = False) -> None:
     # ── 子进程：守护循环 ──
     PIDFILE.write_text(str(os.getpid()))
 
-    task_args = ["--task", "update_bars", "--force"]
+    task_args = ["--task", "update_bars"]
     if resume:
         task_args.append("--resume")
 

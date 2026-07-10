@@ -228,8 +228,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 100          # 每批处理的股票数（从200降到100，降低单批压力）
 BATCH_SLEEP = 5.0         # 批次间休息（秒），AkShare 需防限流
-PER_STOCK_MIN_SLEEP = 0.3  # 单只股票最小间隔（秒）
-PER_STOCK_MAX_SLEEP = 0.8  # 单只股票最大间隔（秒）
+PER_STOCK_MIN_SLEEP = 0.5  # 单只股票最小间隔（秒），从 0.3 上调
+PER_STOCK_MAX_SLEEP = 1.2  # 单只股票最大间隔（秒），从 0.8 上调
 MAX_RETRY = 3             # 单只股票失败重试次数
 RETRY_DELAY = 5.0         # 重试间隔（秒）
 
@@ -479,13 +479,19 @@ def _is_trading_day() -> bool:
 
 
 def _should_update() -> bool:
-    """判断是否需要更新（交易日且已收盘）。"""
+    """判断是否需要更新：周末跳过、盘中跳过、15:00~16:00 结算窗口跳过。"""
     now = datetime.now()
     if now.weekday() >= 5:
         logger.info("今天是周末，跳过更新")
         return False
     if 9 <= now.hour < 15:
         logger.info(f"当前时间 {now.hour}:{now.minute:02d}，盘中不执行（15:00 收盘后自动允许）")
+        return False
+    if now.hour == 15:
+        logger.warning(
+            f"当前时间 {now.hour}:{now.minute:02d}，收盘结算窗口（15:00~16:00），"
+            "数据源可能不稳定。等到 16:00 后再运行，或使用 --force 跳过此检查"
+        )
         return False
     return True
 
@@ -580,6 +586,13 @@ def update_bars(
     logger.info("=" * 60)
     logger.info("📈 任务: 更新日线数据")
     logger.info("=" * 60)
+
+    now = datetime.now()
+    if now.hour == 15:
+        logger.warning(
+            f"当前时间 {now.hour}:{now.minute:02d}，处于收盘结算窗口（15:00~16:00），"
+            "东财接口可能返回 RemoteDisconnected，建议等到 16:00 后再运行"
+        )
 
     stocks = db.get_stock_list()
     if stocks.empty:
@@ -2581,7 +2594,14 @@ def main():
     elif args.task == "update_bars":
         update_bars(db, loader, limit=args.limit, resume=args.resume)
     elif args.task == "update_indicators":
-        update_indicators(db, engine)
+        if args.force:
+            conn_kw = sqlite3.connect(str(db.db_path))
+            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            conn_kw.close()
+            logger.info(f"🔁 --force 模式：强制全量重算 {len(all_symbols)} 只股票的技术指标")
+            update_indicators(db, engine, symbols_to_update=all_symbols)
+        else:
+            update_indicators(db, engine)
     elif args.task == "update_fundamentals":
         update_fundamentals(db, loader)
     elif args.task == "update_market_snapshot":
