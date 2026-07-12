@@ -16,6 +16,16 @@ import daily_pipeline
 
 
 # ===========================================================================
+# Fixtures
+# ===========================================================================
+@pytest.fixture(autouse=True)
+def mock_pipeline_lock():
+    """Bypass flock logic so tests don't fail when the daemon is running."""
+    with patch("daily_pipeline._acquire_lock"), patch("daily_pipeline._release_lock"):
+        yield
+
+
+# ===========================================================================
 # Helpers
 # ===========================================================================
 def _bars_df(dates: list[str]) -> pd.DataFrame:
@@ -1135,3 +1145,465 @@ def test_update_bars_includes_bj_when_configured():
     # Should process all 3 stocks (include the BJ one)
     assert r["total"] == 3
     assert r["success"] + r["failed"] + r["skipped"] == 3
+
+
+# ===========================================================================
+# 国际数据维度 (v3.1): gold_price / crude_oil / fx_rate / global_index / us_treasury
+# ===========================================================================
+
+@patch("daily_pipeline.ak")
+def test_update_gold_price_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_gold_price_batch.return_value = 2
+    mock_ak.spot_golden_benchmark_sge.return_value = pd.DataFrame({
+        "交易时间": ["2026-07-11 早盘", "2026-07-10 晚盘"],
+        "晚盘价": [897.58, 895.0],
+        "早盘价": [891.66, 890.0],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_gold_price(db)
+    assert r["saved"] == 2
+    db.save_gold_price_batch.assert_called_once()
+    rec = db.save_gold_price_batch.call_args[0][0][0]
+    assert rec["evening_price"] == 897.58
+    assert rec["trading_time"] == "2026-07-11 早盘"
+
+
+@patch("daily_pipeline.ak")
+def test_update_gold_price_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.spot_golden_benchmark_sge.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_gold_price(db)
+    assert r["saved"] == 0
+    db.save_gold_price_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_crude_oil_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_crude_oil_batch.return_value = 2
+
+    def _oil(symbol: str) -> pd.DataFrame:
+        is_cl = symbol == "CL"
+        return pd.DataFrame({
+            "名称": ["WTI原油" if is_cl else "Brent原油"],
+            "最新价": [73.5 if is_cl else 75.2],
+            "人民币报价": [3600.0 if is_cl else 3720.0],
+            "涨跌额": [-1.0], "涨跌幅": [-1.3], "开盘价": [74.0],
+            "最高价": [75.0], "最低价": [73.0], "昨日结算价": [74.5],
+        })
+
+    mock_ak.futures_foreign_commodity_realtime.side_effect = _oil
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_crude_oil(db)
+    assert r["saved"] == 2
+    db.save_crude_oil_batch.assert_called_once()
+    recs = db.save_crude_oil_batch.call_args[0][0]
+    assert {x["contract"] for x in recs} == {"CL", "OIL"}
+    # 验证真实映射：昨结价 -> pre_settle，涨跌额/涨跌幅来自 API 实际列
+    cl = next(x for x in recs if x["contract"] == "CL")
+    assert cl["pre_settle"] == 74.5
+    assert cl["change"] == -1.0
+    assert cl["change_pct"] == -1.3
+    assert cl["latest_price"] == 73.5
+
+
+@patch("daily_pipeline.ak")
+def test_update_crude_oil_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.futures_foreign_commodity_realtime.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_crude_oil(db)
+    assert r["saved"] == 0
+    db.save_crude_oil_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_usd_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_usd_batch.return_value = 1
+    mock_ak.currency_boc_sina.return_value = pd.DataFrame({
+        "日期": ["2026-07-10"],
+        "中行汇买价": [676.44], "中行钞买价": [676.44],
+        "中行钞卖价/汇卖价": [679.29], "央行中间价": [679.89], "中行折算价": [679.89],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_usd(db)
+    assert r["saved"] == 1
+    rec = db.save_usd_batch.call_args[0][0][0]
+    assert rec["currency"] == "美元"
+    assert rec["cash_sell_price"] == 679.29  # 真实列名: 中行钞卖价/汇卖价
+
+
+@patch("daily_pipeline.ak")
+def test_update_usd_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.currency_boc_sina.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_usd(db)
+    assert r["saved"] == 0
+    db.save_usd_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_global_index_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_global_index_batch.return_value = 3
+    mock_ak.index_global_spot_em.return_value = pd.DataFrame({
+        "代码": ["KS11", "BVSP", "N225"],
+        "名称": ["韩国KOSPI", "巴西BOVESPA", "日经225"],
+        "最新价": [7475.94, 177866.38, 39000.0],
+        "涨跌额": [184.03, 5124.26, 100.0], "涨跌幅": [2.52, 2.97, 0.3],
+        "开盘价": [7552.49, 172760.66, 38900.0], "最高价": [7704.93, 177866.38, 39100.0],
+        "最低价": [7429.51, 172760.66, 38800.0], "昨收价": [7291.91, 172742.12, 38900.0],
+        "振幅": [3.78, 2.96, 0.5],
+        "最新行情时间": ["2026-07-10 14:29:59", "2026-07-11 04:08:30", "2026-07-10 14:00:00"],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_global_index(db)
+    assert r["saved"] == 3
+    rec = db.save_global_index_batch.call_args[0][0][0]
+    assert rec["index_code"] == "KS11"
+    assert rec["quote_time"] == "2026-07-10 14:29:59"  # 真实列名: 最新行情时间
+
+
+@patch("daily_pipeline.ak")
+def test_update_global_index_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.index_global_spot_em.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_global_index(db)
+    assert r["saved"] == 0
+    db.save_global_index_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_us_treasury_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_us_treasury_batch.return_value = 1
+    mock_ak.bond_zh_us_rate.return_value = pd.DataFrame({
+        "日期": ["2026-07-10"],
+        "中国国债收益率2年": [1.26], "中国国债收益率5年": [1.44],
+        "中国国债收益率10年": [1.74], "中国国债收益率30年": [2.25],
+        "中国国债收益率10年-2年": [0.48],
+        "美国国债收益率2年": [4.21], "美国国债收益率5年": [4.30],
+        "美国国债收益率10年": [4.56], "美国国债收益率30年": [5.06],
+        "美国国债收益率10年-2年": [0.35],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_us_treasury(db)
+    assert r["saved"] == 1
+    rec = db.save_us_treasury_batch.call_args[0][0][0]
+    assert rec["us_10y"] == 4.56
+    assert rec["cn_10y"] == 1.74
+    assert rec["spread_10y_2y"] == 0.35  # 真实列名: 美国国债收益率10年-2年
+
+
+@patch("daily_pipeline.ak")
+def test_update_us_treasury_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.bond_zh_us_rate.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_us_treasury(db)
+    assert r["saved"] == 0
+    db.save_us_treasury_batch.assert_not_called()
+
+
+# ===========================================================================
+# A股补充数据 (v3.1): north_flow / index_daily / limit_up_down / dividend_summary
+# ===========================================================================
+
+@patch("daily_pipeline.ak")
+def test_update_north_flow_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_north_flow_batch.return_value = 2
+    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame({
+        "交易日": ["2026-07-10", "2026-07-10"],
+        "板块": ["沪股通", "深股通"],
+        "资金方向": ["北向", "北向"],
+        "成交净买额": [1.5, -0.8],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_flow(db)
+    assert r["saved"] == 2
+    db.save_north_flow_batch.assert_called_once()
+    rec = db.save_north_flow_batch.call_args[0][0][0]
+    assert rec["market"] == "沪股通"
+    assert rec["net_buy_amount"] == 1.5
+
+
+@patch("daily_pipeline.ak")
+def test_update_north_flow_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_flow(db)
+    assert r["saved"] == 0
+    db.save_north_flow_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_north_flow_filters_south(mock_ak: MagicMock):
+    """确认方向='南向'的行被过滤掉。"""
+    db = MagicMock()
+    db.save_north_flow_batch.return_value = 1
+    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame({
+        "交易日": ["2026-07-10", "2026-07-10"],
+        "板块": ["沪股通", "港股通(沪)"],
+        "资金方向": ["北向", "南向"],
+        "成交净买额": [1.5, -33.4],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_flow(db)
+    assert r["saved"] == 1  # 只有北向那行
+    recs = db.save_north_flow_batch.call_args[0][0]
+    assert len(recs) == 1
+    assert recs[0]["market"] == "沪股通"
+
+
+@patch("daily_pipeline.ak")
+def test_update_index_daily_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_index_daily_batch.return_value = 4
+
+    sample_df = pd.DataFrame({
+        "date": ["2026-07-10"],
+        "open": [3400.0], "high": [3420.0], "low": [3390.0],
+        "close": [3410.0], "volume": [500000.0],
+    })
+
+    def _index(symbol: str) -> pd.DataFrame:
+        return sample_df
+
+    mock_ak.stock_zh_index_daily_tx.side_effect = _index
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_index_daily(db)
+    assert r["saved"] == 4
+    rec = db.save_index_daily_batch.call_args[0][0][0]
+    assert rec["index_code"] == "sh000001"
+    assert rec["close"] == 3410.0
+
+
+@patch("daily_pipeline.ak")
+def test_update_index_daily_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.stock_zh_index_daily_tx.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_index_daily(db)
+    assert r["saved"] == 0
+    db.save_index_daily_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_limit_up_down_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_limit_up_down_batch.return_value = 3
+    mock_ak.stock_zt_pool_em.return_value = pd.DataFrame({
+        "代码": ["600519", "000858"],
+        "名称": ["贵州茅台", "五粮液"],
+        "涨跌幅": [10.0, 9.98],
+        "最新价": [1500.0, 120.0],
+        "换手率": [0.5, 0.8],
+        "连板数": [1, 2],
+        "所属行业": ["白酒", "白酒"],
+    })
+    mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame({
+        "代码": ["300750"],
+        "名称": ["宁德时代"],
+        "涨跌幅": [-9.99],
+        "最新价": [180.0],
+        "换手率": [2.5],
+        "所属行业": ["电池"],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db)
+    assert r["saved"] == 3
+    recs = db.save_limit_up_down_batch.call_args[0][0]
+    up = [x for x in recs if x["limit_type"] == "涨停"]
+    down = [x for x in recs if x["limit_type"] == "跌停"]
+    assert len(up) == 2
+    assert len(down) == 1
+    assert up[0]["board_count"] == 1
+    assert down[0]["ts_code"] == "300750"
+
+
+@patch("daily_pipeline.ak")
+def test_update_limit_up_down_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.stock_zt_pool_em.return_value = pd.DataFrame()
+    mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db)
+    assert r["saved"] == 0
+    db.save_limit_up_down_batch.assert_not_called()
+
+
+@patch("daily_pipeline.ak")
+def test_update_dividend_summary_success(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_dividend_summary_batch.return_value = 2
+    mock_ak.stock_history_dividend.return_value = pd.DataFrame({
+        "代码": ["000001", "000002"],
+        "名称": ["平安银行", "万科A"],
+        "上市日期": [datetime(1991, 4, 3).date(), datetime(1991, 1, 29).date()],
+        "累计股息": [150.0, 220.0],
+        "年均股息": [4.5, 6.8],
+        "分红次数": [30, 35],
+        "融资总额": [0.0, 0.0],
+        "融资次数": [0, 0],
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_dividend_summary(db)
+    assert r["saved"] == 2
+    rec = db.save_dividend_summary_batch.call_args[0][0][0]
+    assert rec["ts_code"] == "000001"
+    assert rec["dividend_count"] == 30
+
+
+@patch("daily_pipeline.ak")
+def test_update_dividend_summary_empty(mock_ak: MagicMock):
+    db = MagicMock()
+    mock_ak.stock_history_dividend.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_dividend_summary(db)
+    assert r["saved"] == 0
+    db.save_dividend_summary_batch.assert_not_called()
+
+
+# ===========================================================================
+# Global macro: CLI branch coverage (Category 1)
+# ===========================================================================
+
+class TestGlobalMacroCli:
+    @pytest.mark.parametrize(
+        "task_name,func_name",
+        [
+            ("update_north_flow", "update_north_flow"),
+            ("update_index_daily", "update_index_daily"),
+            ("update_limit_up_down", "update_limit_up_down"),
+            ("update_dividend_summary", "update_dividend_summary"),
+            ("update_gold_price", "update_gold_price"),
+            ("update_crude_oil", "update_crude_oil"),
+            ("update_usd", "update_usd"),
+            ("update_global_index", "update_global_index"),
+            ("update_us_treasury", "update_us_treasury"),
+        ],
+    )
+    def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", task_name]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch(f"daily_pipeline.{func_name}") as fn:
+            f.configure.return_value = None
+            f.get_db.return_value = db = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+            fn.assert_called_once_with(db)
+
+
+# ===========================================================================
+# Global macro: ak=None early-return (Category 2)
+# ===========================================================================
+
+class TestGlobalMacroAkNone:
+    def test_global_macro_ak_none(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak", None), patch("daily_pipeline.logger"):
+            for fn in [
+                daily_pipeline.update_north_flow,
+                daily_pipeline.update_index_daily,
+                daily_pipeline.update_limit_up_down,
+                daily_pipeline.update_dividend_summary,
+                daily_pipeline.update_gold_price,
+                daily_pipeline.update_crude_oil,
+                daily_pipeline.update_usd,
+                daily_pipeline.update_global_index,
+                daily_pipeline.update_us_treasury,
+            ]:
+                r = fn(db)
+                assert r["saved"] == 0
+                assert "error" in r
+
+
+# ===========================================================================
+# Global macro: exception handling (Category 3)
+# ===========================================================================
+
+class TestGlobalMacroFetchException:
+    def test_north_flow_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_hsgt_fund_flow_summary_em.side_effect = ValueError("API error")
+            r = daily_pipeline.update_north_flow(db)
+        assert r["saved"] == 0
+
+    def test_index_daily_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zh_index_daily_tx.side_effect = RuntimeError("index fetch failed")
+            r = daily_pipeline.update_index_daily(db)
+        assert r["saved"] == 0
+
+    def test_limit_up_down_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zt_pool_em.side_effect = ValueError("zt_pool error")
+            r = daily_pipeline.update_limit_up_down(db)
+        assert r["saved"] == 0
+
+    def test_limit_down_fetch_exception(self):
+        db = MagicMock()
+        db.save_limit_up_down_batch.return_value = 1
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zt_pool_em.return_value = pd.DataFrame({
+                "代码": ["000001"], "名称": ["平安银行"], "涨跌幅": [10.0],
+                "最新价": [10.0], "换手率": [0.5], "连板数": [1], "所属行业": ["银行"],
+            })
+            mock_ak.stock_zt_pool_dtgc_em.side_effect = RuntimeError("zt_pool_dtgc error")
+            r = daily_pipeline.update_limit_up_down(db)
+        # limit_up succeeded (1 record) but limit_down failed internally; update returns non-zero saved, no crash
+        assert r["saved"] == 1
+
+    def test_dividend_summary_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_history_dividend.side_effect = ValueError("dividend error")
+            r = daily_pipeline.update_dividend_summary(db)
+        assert r["saved"] == 0
+
+    def test_gold_price_fetch_exception(self):
+        db = MagicMock()
+        db.save_gold_price_batch.return_value = 0
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.spot_golden_benchmark_sge.side_effect = ValueError("gold API error")
+            r = daily_pipeline.update_gold_price(db)
+        assert r["saved"] == 0
+
+    def test_crude_oil_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.futures_foreign_commodity_realtime.side_effect = RuntimeError("oil fetch failed")
+            r = daily_pipeline.update_crude_oil(db)
+        assert r["saved"] == 0
+
+    def test_usd_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.currency_boc_sina.side_effect = ValueError("fx error")
+            r = daily_pipeline.update_usd(db)
+        assert r["saved"] == 0
+
+    def test_global_index_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.index_global_spot_em.side_effect = RuntimeError("global index error")
+            r = daily_pipeline.update_global_index(db)
+        assert r["saved"] == 0
+
+    def test_us_treasury_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.bond_zh_us_rate.side_effect = ValueError("treasury error")
+            r = daily_pipeline.update_us_treasury(db)
+        assert r["saved"] == 0

@@ -55,7 +55,7 @@ quant_pipeline/
 
 | 命令 | 说明 |
 |------|------|
-| `quant-data` / `pipe-data` | 启动 TUI 面板 |
+| `quant-data` / `pipe-tui` | 启动 TUI 面板 |
 | `pipe-run` | 完整更新 |
 | `pipe-resume` | 断点续传 |
 | `pipe-daemon` | 守护进程 |

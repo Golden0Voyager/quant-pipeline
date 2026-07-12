@@ -2077,7 +2077,7 @@ def update_industry(db: DatabaseInterface) -> dict:
     logger.info("=" * 60)
 
     import sqlite3
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     import requests as _req
 
@@ -2101,37 +2101,45 @@ def update_industry(db: DatabaseInterface) -> dict:
     exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
 
     # 3. 网络请求策略（依次降级）
+    # F10 限流探测标志：连续限流时整轮跳过 F10 API，避免浪费时间
+    _f10_blocked = threading.Event()
+
     def _fetch_industry(code: str, market: str) -> tuple[str, str | None]:
         prefix = exchange_map.get(market, "SZ")
         api_code = f"{prefix}{code}"
 
-        f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
-        for attempt in range(3):
-            session = None
-            try:
-                session = _req.Session()
-                session.proxies = {"http": None, "https": None}
-                session.trust_env = False
-                resp = session.get(
-                    f10_url,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    jbzl = data.get("jbzl")
-                    if isinstance(jbzl, dict):
-                        industry = jbzl.get("sshy")
-                        if industry and industry != "N/A":
-                            return code, industry
-                if resp.status_code in (403, 429, 503):
-                    time.sleep(2 ** attempt)
-            except Exception:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-            finally:
-                if session is not None:
-                    session.close()
+        if not _f10_blocked.is_set():
+            f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
+            for attempt in range(3):
+                session = None
+                try:
+                    session = _req.Session()
+                    session.proxies = {"http": None, "https": None}
+                    session.trust_env = False
+                    resp = session.get(
+                        f10_url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        jbzl = data.get("jbzl")
+                        if isinstance(jbzl, dict):
+                            industry = jbzl.get("sshy")
+                            if industry and industry != "N/A":
+                                return code, industry
+                    if resp.status_code in (403, 429, 503):
+                        time.sleep(2 ** attempt)
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                finally:
+                    if session is not None:
+                        session.close()
+            # 3 次重试全部失败 → 判定被限流，后续跳过
+            _f10_blocked.set()
+        else:
+            logger.debug(f"  F10 API 已被限流，{code} 跳过直接走备用源")
 
         if ak is not None:
             try:
@@ -2173,32 +2181,54 @@ def update_industry(db: DatabaseInterface) -> dict:
 
         return code, None
 
-    # 4. 并发执行
+    # 4. 分批并发执行（防止单线程挂死导致整体卡住）
     success_map: dict[str, str] = {}
     fail_list: list[str] = []
     processed = 0
+    batch_size = 50        # 减小批次，避免限流时损失过多
+    batch_timeout = 600    # 每批最多等 10 分钟（给重试留足时间）
+    batch_cooldown = 30    # 批间冷却 30s，降低被限流概率
 
     max_workers = 4
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        fut_map = {}
-        for code, market in rows:
-            fut = pool.submit(_fetch_industry, code, market)
-            fut_map[fut] = code
+        for batch_start in range(0, len(rows), batch_size):
+            batch = rows[batch_start:batch_start + batch_size]
+            fut_map = {}
+            for code, market in batch:
+                fut = pool.submit(_fetch_industry, code, market)
+                fut_map[fut] = code
 
-        for fut in as_completed(fut_map):
-            code = fut_map[fut]
-            result = fut.result()
-            if result and result[1]:
-                success_map[code] = result[1]
-            else:
+            # 等待本批完成或超时
+            done_set, pending_set = wait(fut_map, timeout=batch_timeout)
+
+            # 处理已完成的任务
+            for fut in done_set:
+                code = fut_map[fut]
+                try:
+                    result = fut.result(timeout=5)
+                    if result and result[1]:
+                        success_map[code] = result[1]
+                    else:
+                        fail_list.append(code)
+                except Exception:
+                    fail_list.append(code)
+
+            # 超时未完成的视为失败，尝试取消
+            for fut in pending_set:
+                code = fut_map[fut]
+                fut.cancel()
                 fail_list.append(code)
 
-            processed += 1
+            processed += len(batch)
             if processed % 500 == 0 or processed == total:
                 logger.info(
                     f"  进度: {processed}/{total} "
                     f"(成功: {len(success_map)}, 失败: {len(fail_list)})"
                 )
+
+            # 批间冷却，降低限流概率
+            if batch_start + batch_size < len(rows):
+                time.sleep(batch_cooldown)
 
     logger.info(
         f"📊 接口请求完成: 成功 {len(success_map)}, 失败 {len(fail_list)}"
@@ -2251,6 +2281,550 @@ def update_industry(db: DatabaseInterface) -> dict:
         "failed": len(fail_list),
         "coverage_pct": round(100 * updated / total, 1) if total else 0,
     }
+
+
+# ===========================================================================
+# 任务 13: 北向资金
+# ===========================================================================
+
+def _fetch_north_flow(trade_date: str) -> list[dict]:
+    """获取北向资金流向数据（沪深港通）。"""
+    if ak is None:
+        return []
+    try:
+        df = ak.stock_hsgt_fund_flow_summary_em()
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            direction = str(row.get("资金方向", "")).strip()
+            if direction != "北向":
+                continue
+            records.append({
+                "trade_date": str(row.get("交易日", trade_date))[:10],
+                "market": str(row.get("板块", "")).strip(),
+                "net_buy_amount": row.get("成交净买额"),
+                "buy_amount": None,
+                "sell_amount": None,
+                "cumulative_net_buy": None,
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 北向资金获取失败: {e}")
+        return []
+
+
+def update_north_flow(db: DatabaseInterface) -> dict:
+    """获取北向资金流向数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🌐 任务: 更新北向资金流向")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_north_flow(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 北向资金无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_north_flow_batch(records)
+        logger.info(f"✅ 北向资金保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 北向资金更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 14: 指数日线
+# ===========================================================================
+
+def _fetch_index_daily(trade_date: str) -> list[dict]:
+    """获取主要指数日线行情（上证、深证、创业板、科创50）。"""
+    if ak is None:
+        return []
+    records = []
+    indices = {
+        "sh000001": "上证指数",
+        "sz399001": "深证成指",
+        "sz399006": "创业板指",
+        "sh000688": "科创50",
+    }
+    for index_code, index_name in indices.items():
+        try:
+            df = ak.stock_zh_index_daily_tx(symbol=index_code)
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                records.append({
+                    "index_code": index_code,
+                    "index_name": index_name,
+                    "trade_date": str(latest.get("date", trade_date))[:10],
+                    "open": float(latest.get("open", 0)),
+                    "high": float(latest.get("high", 0)),
+                    "low": float(latest.get("low", 0)),
+                    "close": float(latest.get("close", 0)),
+                    "volume": float(latest.get("volume", 0)),
+                    "data_source": "akshare",
+                })
+        except Exception as e:
+            logger.warning(f"⚠️ 指数 {index_name}({index_code}) 获取失败: {e}")
+    return records
+
+
+def update_index_daily(db: DatabaseInterface) -> dict:
+    """获取主要指数日线行情并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📊 任务: 更新指数日线行情")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_index_daily(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 指数日线无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_index_daily_batch(records)
+        logger.info(f"✅ 指数日线保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 指数日线更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 15: 涨停跌停统计
+# ===========================================================================
+
+def _fetch_limit_up_down(trade_date: str) -> list[dict]:
+    """获取涨停跌停统计。"""
+    if ak is None:
+        return []
+    date_compact = trade_date.replace("-", "")
+    try:
+        df = ak.stock_zt_pool_em(date=date_compact)
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "ts_code": str(row.get("代码", "")).strip(),
+                "name": str(row.get("名称", "")).strip(),
+                "pct_change": row.get("涨跌幅"),
+                "close_price": row.get("最新价"),
+                "turnover_rate": row.get("换手率"),
+                "limit_type": "涨停",
+                "board_count": row.get("连板数"),
+                "industry": str(row.get("所属行业", "")).strip(),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 涨停数据获取失败: {e}")
+        return []
+
+
+def _fetch_limit_down(trade_date: str) -> list[dict]:
+    """获取跌停统计。"""
+    if ak is None:
+        return []
+    date_compact = trade_date.replace("-", "")
+    try:
+        df = ak.stock_zt_pool_dtgc_em(date=date_compact)
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "ts_code": str(row.get("代码", "")).strip(),
+                "name": str(row.get("名称", "")).strip(),
+                "pct_change": row.get("涨跌幅"),
+                "close_price": row.get("最新价"),
+                "turnover_rate": row.get("换手率"),
+                "limit_type": "跌停",
+                "board_count": None,
+                "industry": str(row.get("所属行业", "")).strip(),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 跌停数据获取失败: {e}")
+        return []
+
+
+def update_limit_up_down(db: DatabaseInterface) -> dict:
+    """获取涨停跌停统计并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🚀 任务: 更新涨停跌停统计")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    trade_date = _get_expected_latest_trading_day()
+    try:
+        limit_up = _fetch_limit_up_down(trade_date)
+        limit_down = _fetch_limit_down(trade_date)
+        all_records = limit_up + limit_down
+        if not all_records:
+            logger.warning("⚠️ 涨停跌停无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_limit_up_down_batch(all_records)
+        logger.info(f"✅ 涨停跌停保存完成: {saved} 条 (涨停 {len(limit_up)}, 跌停 {len(limit_down)})")
+        return {"saved": saved, "total": len(all_records)}
+    except Exception as e:
+        logger.error(f"❌ 涨停跌停更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 16: 分红送转
+# ===========================================================================
+
+def _fetch_dividend_summary() -> list[dict]:
+    """获取全市场分红送转汇总。"""
+    if ak is None:
+        return []
+    try:
+        df = ak.stock_history_dividend()
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "ts_code": str(row.get("代码", "")).strip(),
+                "name": str(row.get("名称", "")).strip(),
+                "list_date": str(row.get("上市日期", ""))[:10],
+                "cumulative_dividend": row.get("累计股息"),
+                "avg_annual_dividend": row.get("年均股息"),
+                "dividend_count": row.get("分红次数"),
+                "total_raise_amount": row.get("融资总额"),
+                "raise_count": row.get("融资次数"),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 分红送转数据获取失败: {e}")
+        return []
+
+
+def update_dividend_summary(db: DatabaseInterface) -> dict:
+    """获取全市场分红送转汇总并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("💰 任务: 更新分红送转汇总")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_dividend_summary()
+        if not records:
+            logger.warning("⚠️ 分红送转无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_dividend_summary_batch(records)
+        logger.info(f"✅ 分红送转保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 分红送转更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 17: 国际金价
+# ===========================================================================
+
+def _fetch_gold_price(trade_date: str) -> list[dict]:
+    """获取上海金交所基准金价（早盘价/晚盘价）。"""
+    if ak is None:
+        return []
+    try:
+        df = ak.spot_golden_benchmark_sge()
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "trading_time": str(row.get("交易时间", "")).strip(),
+                "evening_price": row.get("晚盘价"),
+                "morning_price": row.get("早盘价"),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 国际金价获取失败: {e}")
+        return []
+
+
+def update_gold_price(db: DatabaseInterface) -> dict:
+    """获取上海金交所基准金价并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🥇 任务: 更新国际金价")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_gold_price(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 国际金价无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_gold_price_batch(records)
+        logger.info(f"✅ 国际金价保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 国际金价更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 18: 国际原油
+# ===========================================================================
+
+def _fetch_crude_oil(trade_date: str) -> list[dict]:
+    """获取国际原油实时行情（WTI=CL, Brent=OIL）。"""
+    if ak is None:
+        return []
+    contracts = {"CL": "WTI原油", "OIL": "Brent原油"}
+    records = []
+    for contract, name in contracts.items():
+        try:
+            df = ak.futures_foreign_commodity_realtime(symbol=contract)
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                records.append({
+                    "trade_date": trade_date,
+                    "contract": contract,
+                    "name": name,
+                    "latest_price": row.get("最新价"),
+                    "cny_price": row.get("人民币报价"),
+                    "change": row.get("涨跌额"),
+                    "change_pct": row.get("涨跌幅"),
+                    "open": row.get("开盘价"),
+                    "high": row.get("最高价"),
+                    "low": row.get("最低价"),
+                    "pre_settle": row.get("昨日结算价"),
+                    "data_source": "akshare",
+                })
+        except Exception as e:
+            logger.warning(f"⚠️ 原油 {name}({contract}) 获取失败: {e}")
+    return records
+
+
+def update_crude_oil(db: DatabaseInterface) -> dict:
+    """获取国际原油实时行情并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🛢️ 任务: 更新国际原油")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_crude_oil(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 国际原油无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_crude_oil_batch(records)
+        logger.info(f"✅ 国际原油保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 国际原油更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 19: 外汇汇率（美元兑人民币）
+# ===========================================================================
+
+def _fetch_usd(trade_date: str) -> list[dict]:
+    """获取美元兑人民币外汇牌价（中国银行）。
+
+    currency_boc_sina 的日期参数为紧凑格式 YYYYMMDD（无横线），
+    且单日查询常返回空，故用一个向后回溯的小窗口取一段时间内的有效记录。
+    INSERT OR REPLACE 写入保证不会产生重复。
+    """
+    if ak is None:
+        return []
+    start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y%m%d")
+    end = trade_date.replace("-", "")
+    try:
+        df = ak.currency_boc_sina(symbol="美元", start_date=start, end_date=end)
+        if df is None or df.empty:
+            return []
+        records: list[dict] = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": str(row.get("日期", trade_date))[:10],
+                "currency": "美元",
+                "bank_buy_price": row.get("中行汇买价"),
+                "cash_buy_price": row.get("中行钞买价"),
+                "cash_sell_price": row.get("中行钞卖价/汇卖价"),
+                "central_parity_rate": row.get("央行中间价"),
+                "boc_convert_price": row.get("中行折算价"),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 美元汇率获取失败: {e}")
+        return []
+
+
+def update_usd(db: DatabaseInterface) -> dict:
+    """获取美元兑人民币外汇牌价并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("💱 任务: 更新外汇汇率")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_usd(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 外汇汇率无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_usd_batch(records)
+        logger.info(f"✅ 外汇汇率保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 外汇汇率更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 20: 全球指数
+# ===========================================================================
+
+def _fetch_global_index(trade_date: str) -> list[dict]:
+    """获取全球主要指数实时行情。"""
+    if ak is None:
+        return []
+    try:
+        df = ak.index_global_spot_em()
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "index_code": str(row.get("代码", "")).strip(),
+                "index_name": str(row.get("名称", "")).strip(),
+                "latest_price": row.get("最新价"),
+                "change_amount": row.get("涨跌额"),
+                "change_pct": row.get("涨跌幅"),
+                "open": row.get("开盘价"),
+                "high": row.get("最高价"),
+                "low": row.get("最低价"),
+                "pre_close": row.get("昨收价"),
+                "amplitude": row.get("振幅"),
+                "quote_time": str(row.get("最新行情时间", "")).strip(),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 全球指数获取失败: {e}")
+        return []
+
+
+def update_global_index(db: DatabaseInterface) -> dict:
+    """获取全球主要指数实时行情并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🌍 任务: 更新全球指数")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_global_index(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 全球指数无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_global_index_batch(records)
+        logger.info(f"✅ 全球指数保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 全球指数更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 21: 中美国债收益率
+# ===========================================================================
+
+def _fetch_us_treasury(trade_date: str) -> list[dict]:
+    """获取中美国债收益率曲线。
+
+    bond_zh_us_rate 的 start_date 为紧凑格式 YYYYMMDD，且当日收益率通常尚未
+    发布，故回溯一个月取一段时间内的有效记录。
+    INSERT OR REPLACE 写入保证不会产生重复。
+    """
+    if ak is None:
+        return []
+    start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y%m%d")
+    try:
+        df = ak.bond_zh_us_rate(start_date=start)
+        if df is None or df.empty:
+            return []
+        records: list[dict] = []
+        for _, row in df.iterrows():
+            records.append({
+                "trade_date": str(row.get("日期", trade_date))[:10],
+                "us_2y": row.get("美国国债收益率2年"),
+                "us_5y": row.get("美国国债收益率5年"),
+                "us_10y": row.get("美国国债收益率10年"),
+                "us_30y": row.get("美国国债收益率30年"),
+                "cn_2y": row.get("中国国债收益率2年"),
+                "cn_5y": row.get("中国国债收益率5年"),
+                "cn_10y": row.get("中国国债收益率10年"),
+                "cn_30y": row.get("中国国债收益率30年"),
+                "spread_10y_2y": row.get("美国国债收益率10年-2年"),
+                "data_source": "akshare",
+            })
+        return records
+    except Exception as e:
+        logger.warning(f"⚠️ 中美国债收益率获取失败: {e}")
+        return []
+
+
+def update_us_treasury(db: DatabaseInterface) -> dict:
+    """获取中美国债收益率曲线并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📈 任务: 更新中美国债收益率")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "error": "akshare not installed"}
+
+    try:
+        records = _fetch_us_treasury(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 中美国债收益率无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_us_treasury_batch(records)
+        logger.info(f"✅ 中美国债收益率保存完成: {saved} 条")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 中美国债收益率更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
 
 
 # ===========================================================================
@@ -2511,6 +3085,15 @@ def run_all(
     results["historical_valuation"] = _safe_task("update_historical_valuation", update_historical_valuation, db)
     results["sector_industry"] = _safe_task("update_sector_industry", update_sector_industry, db)
     results["industry"] = _safe_task("update_industry", update_industry, db)
+    results["north_flow"] = _safe_task("update_north_flow", update_north_flow, db)
+    results["index_daily"] = _safe_task("update_index_daily", update_index_daily, db)
+    results["limit_up_down"] = _safe_task("update_limit_up_down", update_limit_up_down, db)
+    results["dividend_summary"] = _safe_task("update_dividend_summary", update_dividend_summary, db)
+    results["gold_price"] = _safe_task("update_gold_price", update_gold_price, db)
+    results["crude_oil"] = _safe_task("update_crude_oil", update_crude_oil, db)
+    results["fx_rate"] = _safe_task("update_usd", update_usd, db)
+    results["global_index"] = _safe_task("update_global_index", update_global_index, db)
+    results["us_treasury"] = _safe_task("update_us_treasury", update_us_treasury, db)
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
     results["health"] = _safe_task("health_check", health_check, db)
 
@@ -2549,6 +3132,15 @@ def main():
             "update_historical_valuation",
             "update_sector_industry",
             "update_industry",
+            "update_north_flow",
+            "update_index_daily",
+            "update_limit_up_down",
+            "update_dividend_summary",
+            "update_gold_price",
+            "update_crude_oil",
+            "update_usd",
+            "update_global_index",
+            "update_us_treasury",
             "retry",
             "health_check",
         ],
@@ -2626,6 +3218,24 @@ def main():
         update_sector_industry(db)
     elif args.task == "update_industry":
         update_industry(db)
+    elif args.task == "update_north_flow":
+        update_north_flow(db)
+    elif args.task == "update_index_daily":
+        update_index_daily(db)
+    elif args.task == "update_limit_up_down":
+        update_limit_up_down(db)
+    elif args.task == "update_dividend_summary":
+        update_dividend_summary(db)
+    elif args.task == "update_gold_price":
+        update_gold_price(db)
+    elif args.task == "update_crude_oil":
+        update_crude_oil(db)
+    elif args.task == "update_usd":
+        update_usd(db)
+    elif args.task == "update_global_index":
+        update_global_index(db)
+    elif args.task == "update_us_treasury":
+        update_us_treasury(db)
     elif args.task == "retry":
         retry_failed(db, loader)
     elif args.task == "health_check":
