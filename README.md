@@ -146,13 +146,24 @@ XUEQIU_USER_ID=xxx        # 雪球用户 ID
 
 ---
 
-## 数据库与缓存
+## 🔌 数据中台与项目协同 (Data Hub & Project Integration)
 
-- **主数据库**：`~/Code/quant_data/quant_core.db`
-- **缓存数据库**：`~/Code/quant_data/quant_cache.db`
-- **日志目录**：`~/Code/quant_data/logs/`
+本项目在整个量化系统中扮演着**数据提供者与维护者**的角色，主要与 `quant_data` 中台和 `quant_agents` 进行协同：
+
+### 1. 核心写入中台
+* 本项目通过 [providers.py](file:///Users/hainingyu/Code/quant_pipeline/providers.py) 模块作为 Adapter 依赖 `quant_hunter` 的数据库 Schema 定义，向 `~/Code/quant_data/quant_core.db` 核心库中写入 20+ 个表的数据。
+* 每天下午 **18:00** 启动全量或增量抓取，同时负责对 `quant_core.db` 中的错误、重影数据进行清洗与 reconcile 修复 (`reconcile_with_akshare.py`)。
+
+### 2. 跨项目 Watchlist 同步
+* 本项目内置了自动同步模块，可通过 TUI 运行或在后台将位于 `~/Code/quant_agents/watchlists/` 目录下的所有自选股 `.txt` 文本文件中的股票代码自动提取、格式化（添加 `.SH`/`.SZ`/`.BJ` 后缀）并导入到共享数据库的 `watchlist` 表中，以此实现多 Agent 决策标的与数据管道的无缝结合。
+
+### 3. 数据与日志目录
+* **主数据库**：`~/Code/quant_data/quant_core.db` (行情、衍生因子、宏观数据)
+* **缓存数据库**：`~/Code/quant_data/quant_cache.db` (网络 API 响应缓存)
+* **系统运行日志**：`~/Code/quant_data/logs/` (守护进程日志、错误日志)
 
 ---
+
 
 ## 注意事项
 
