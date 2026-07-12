@@ -47,4 +47,4 @@ ignore = ["E501"]
 "__init__.py" = ["N999"]
 
 [tool.coverage.report]
-fail_under = 84
+fail_under = 85
