@@ -159,6 +159,42 @@ class DatabaseInterface(Protocol):
         """批量获取基本面数据。"""
         ...
 
+    def save_north_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存北向资金数据，返回实际保存条数。"""
+        ...
+
+    def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存指数日线数据，返回实际保存条数。"""
+        ...
+
+    def save_limit_up_down_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存涨停跌停数据，返回实际保存条数。"""
+        ...
+
+    def save_dividend_summary_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存分红送转汇总数据，返回实际保存条数。"""
+        ...
+
+    def save_gold_price_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存国际金价数据，返回实际保存条数。"""
+        ...
+
+    def save_crude_oil_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存国际原油数据，返回实际保存条数。"""
+        ...
+
+    def save_usd_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存外汇汇率数据，返回实际保存条数。"""
+        ...
+
+    def save_global_index_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存全球指数数据，返回实际保存条数。"""
+        ...
+
+    def save_us_treasury_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存中美国债收益率数据，返回实际保存条数。"""
+        ...
+
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         """获取所有自选股列表。"""
         ...
