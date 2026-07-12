@@ -148,6 +148,33 @@ class SmartMoneyDBProvider:
     def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
         return self._db.get_fundamentals_batch(trade_date)
 
+    def save_north_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_north_flow_batch(records)
+
+    def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_index_daily_batch(records)
+
+    def save_limit_up_down_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_limit_up_down_batch(records)
+
+    def save_dividend_summary_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_dividend_summary_batch(records)
+
+    def save_gold_price_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_gold_price_batch(records)
+
+    def save_crude_oil_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_crude_oil_batch(records)
+
+    def save_usd_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_usd_batch(records)
+
+    def save_global_index_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_global_index_batch(records)
+
+    def save_us_treasury_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_us_treasury_batch(records)
+
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
 
