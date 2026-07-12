@@ -16,6 +16,16 @@ import daily_pipeline
 
 
 # ===========================================================================
+# Fixtures
+# ===========================================================================
+@pytest.fixture(autouse=True)
+def mock_pipeline_lock():
+    """Bypass flock logic so tests don't fail when the daemon is running."""
+    with patch("daily_pipeline._acquire_lock"), patch("daily_pipeline._release_lock"):
+        yield
+
+
+# ===========================================================================
 # Helpers
 # ===========================================================================
 def _bars_df(dates: list[str]) -> pd.DataFrame:
