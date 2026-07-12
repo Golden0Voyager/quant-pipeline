@@ -23,6 +23,7 @@ DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
 PIPELINE_PID_PATH = "/tmp/daily_pipeline.pid"
 PROGRESS_JSON_PATH = Path.home() / "Code/quant_data/progress.json"
 LOGS_DIR_PATH = Path.home() / "Code/quant_data/logs"
+WATCHLIST_DIR = Path.home() / "Code/quant_agents/watchlists"
 
 
 def find_latest_log_file(logs_dir: str) -> str | None:
@@ -289,6 +290,9 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "block_trade", "sector_fund_flow", "shareholder_count",
             "quarterly_financials", "historical_valuation",
             "sector_industry", "stock_list",
+            "institutional_holdings",
+            "north_flow", "index_daily", "limit_up_down", "dividend_summary",
+            "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
         ]
         result = {}
         if fast:
@@ -333,6 +337,36 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "historical_valuation": "trade_date",
     "sector_industry": "trade_date",
     "institutional_holdings": "report_date",
+    "north_flow": "trade_date",
+    "index_daily": "trade_date",
+    "limit_up_down": "trade_date",
+    "gold_price": "trade_date",
+    "crude_oil": "trade_date",
+    "fx_rate": "trade_date",
+    "global_index": "trade_date",
+    "us_treasury": "trade_date",
+}
+
+# 按月度更新的表（不按交易日衡量新鲜度）
+MONTHLY_TABLES: set[str] = {
+    "institutional_holdings",
+}
+
+# 随季报更新的表（使用 report_date/report_period，不按交易日衡量新鲜度）
+QUARTERLY_TABLES: set[str] = {
+    "shareholder_count",
+    "quarterly_financials",
+}
+
+# 延迟发布的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
+DELAYED_PUBLISH_TABLES: set[str] = {
+    "fx_rate",
+    "us_treasury",
+}
+
+# 无有意义日期列的表（不显示新鲜度标记，只显示行数）
+NO_DATE_TABLES: set[str] = {
+    "dividend_summary",
 }
 
 
@@ -483,6 +517,77 @@ def get_active_stock_count(db_path: str) -> int:
         if conn is not None:
             conn.close()
 
+def _code_to_ts_code(code: str) -> str | None:
+    """将纯数字股票代码转为 ts_code 格式（加交易所后缀）。"""
+    code = code.strip()
+    if not code.isdigit():
+        return None
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    if code.startswith(("0", "2", "3")):
+        return f"{code}.SZ"
+    if code.startswith(("4", "8")) or code.startswith("920"):
+        return f"{code}.BJ"
+    return None
+
+
+def sync_watchlists_from_files(db_path: str) -> tuple[int, int]:
+    """从文本文件同步自选股到数据库，返回 (新增数, 总文件数)。"""
+    watch_dir = Path(WATCHLIST_DIR)
+    if not watch_dir.is_dir():
+        logger.warning(f"自选股目录不存在: {watch_dir}")
+        return 0, 0
+
+    txt_files = sorted(watch_dir.glob("*.txt"))
+    if not txt_files:
+        return 0, 0
+
+    new_codes: list[str] = []
+    for fpath in txt_files:
+        text = fpath.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 格式: "603893  # 瑞芯微" 或 "603893"
+            code = line.split("#")[0].split()[0].strip()
+            ts_code = _code_to_ts_code(code)
+            if ts_code:
+                new_codes.append(ts_code)
+
+    if not new_codes:
+        return 0, len(txt_files)
+
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        added = 0
+        for ts_code in new_codes:
+            try:
+                cur.execute(
+                    """INSERT OR IGNORE INTO watchlist
+                       (ts_code, added_date, source_scan, status)
+                       VALUES (?, ?, 'watchlist_sync', 'tracking')""",
+                    (ts_code, today),
+                )
+                if cur.rowcount > 0:
+                    added += 1
+            except Exception:
+                continue
+        conn.commit()
+        if added:
+            logger.info(f"✅ 自选股同步完成: 新增 {added} 只, 来源 {len(txt_files)} 个文件")
+        return added, len(txt_files)
+    except Exception as e:
+        logger.warning(f"自选股同步失败: {e}")
+        return 0, len(txt_files)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 class DashboardWidget(Static):
     async def on_mount(self) -> None:
         self.border_title = "📊 Dashboard"
@@ -526,6 +631,15 @@ class SingleTaskWidget(Static):
         ("Historical Valuation", "update_historical_valuation"),
         ("Sector Industry", "update_sector_industry"),
         ("Industry", "update_industry"),
+        ("North Flow", "update_north_flow"),
+        ("Index Daily", "update_index_daily"),
+        ("Limit U/D", "update_limit_up_down"),
+        ("Dividends", "update_dividend_summary"),
+        ("Gold Price", "update_gold_price"),
+        ("Crude Oil", "update_crude_oil"),
+        ("USD/CNY", "update_usd"),
+        ("Global Index", "update_global_index"),
+        ("US Treasury", "update_us_treasury"),
     ]
 
     def on_mount(self) -> None:
@@ -563,6 +677,15 @@ class DataCompletenessWidget(VerticalScroll):
         "update_historical_valuation": "historical_valuation",
         "update_sector_industry": "sector_industry",
         "update_institutional_holdings": "institutional_holdings",
+        "update_north_flow": "north_flow",
+        "update_index_daily": "index_daily",
+        "update_limit_up_down": "limit_up_down",
+        "update_dividend_summary": "dividend_summary",
+        "update_gold_price": "gold_price",
+        "update_crude_oil": "crude_oil",
+        "update_usd": "fx_rate",
+        "update_global_index": "global_index",
+        "update_us_treasury": "us_treasury",
     }
 
     TABLE_LABELS: dict[str, str] = {
@@ -575,10 +698,19 @@ class DataCompletenessWidget(VerticalScroll):
         "dragon_tiger": "Dragon Tiger",
         "block_trade": "Block Trade",
         "sector_fund_flow": "Sector Flow",
+        "sector_industry": "Industry",
+        "north_flow": "North Flow",
+        "index_daily": "Index Daily",
+        "limit_up_down": "Limit U/D",
+        "dividend_summary": "Dividends",
+        "gold_price": "Gold Price",
+        "crude_oil": "Crude Oil",
+        "fx_rate": "USD/CNY",
+        "global_index": "Global Index",
+        "us_treasury": "US Treasury",
+        "institutional_holdings": "Inst. Holdings",
         "shareholder_count": "Shareholders",
         "quarterly_financials": "Quarterly Fin.",
-        "sector_industry": "Industry",
-        "institutional_holdings": "Inst. Holdings",
         "stock_list": "Stock List",
     }
 
@@ -683,10 +815,16 @@ class DataCompletenessWidget(VerticalScroll):
             latest = latest_dates.get(tbl)
             if tbl == updating_table:
                 emoji, status = "[cyan]●[/cyan]", "更新中"
+            elif tbl in MONTHLY_TABLES and latest:
+                emoji, status = "[yellow]●[/yellow]", "按月更新"
+            elif tbl in QUARTERLY_TABLES and latest:
+                emoji, status = "[dark_orange]●[/dark_orange]", "按季更新"
+            elif tbl in DELAYED_PUBLISH_TABLES and latest:
+                emoji, status = "[green]●[/green]", "延迟发布"
             else:
                 emoji, status = _date_status(latest, expected_date)
             date_str = f"[gray]{latest or '—'}[/gray]"
-            status_str = f"{emoji} [bold]{status}[/bold]"
+            status_str = f"{emoji} [bold]{status}[/bold]".strip()
 
             if tbl == "daily_bars":
                 pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
@@ -702,6 +840,8 @@ class DataCompletenessWidget(VerticalScroll):
                     f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
                     f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray] {bar} [dim]{pct_int}%[/dim]"
                 )
+            elif tbl in NO_DATE_TABLES:
+                lines.append(f" • [bold gray]{label}[/bold gray]: [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]")
             elif tbl == "stock_list":
                 lines.append(f" • [bold gray]{label}[/bold gray]: [cyan]{formatted}[/cyan] 只")
             else:
@@ -848,8 +988,8 @@ class PipelineApp(App):
         Binding("d", "start_daemon", "Start Daemon"),
         Binding("z", "stop_daemon", "Stop Daemon"),
         Binding("h", "run_health", "Health Check"),
-        Binding("c", "copy_logs", "Copy Logs"),
         Binding("f", "run_reconcile", "Data Repair", show=True),
+        Binding("c", "copy_panel", "Copy Panel", show=True),
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("q", "quit", "Quit", show=False),
     ]
@@ -860,7 +1000,7 @@ class PipelineApp(App):
         self._current_process: asyncio.subprocess.Process | None = None
 
     async def on_mount(self) -> None:
-        """启动时检测后台进程，询问用户是否终止。"""
+        """启动时检测后台进程，询问用户是否终止，并同步自选股。"""
         processes = find_running_pipeline_processes()
         if not processes:
             return
@@ -876,6 +1016,19 @@ class PipelineApp(App):
             )
         else:
             self.notify("Background processes kept running", severity="information", timeout=3.0)
+
+        # 后台同步自选股
+        self._create_background_task(self._sync_watchlists())
+
+    async def _sync_watchlists(self) -> None:
+        with contextlib.suppress(Exception):
+            added, files = sync_watchlists_from_files(str(DEFAULT_DB_PATH))
+            if files:
+                self.notify(
+                    f"同步自选股完成: 新增 {added} 只, 来源 {files} 个文件" if added
+                    else f"自选股扫描完成: {files} 个文件, 无新增",
+                    timeout=3.0,
+                )
 
     def _create_background_task(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -1030,7 +1183,7 @@ class PipelineApp(App):
             yield ProgressWidget(id="scraping-progress")
             yield DataCompletenessWidget(id="data-completeness")
         yield Static(
-            " S:全量更新  R:续传  X:停止  D:启动守护  Z:停止守护  H:健康检查  F:数据修复  Ctrl+C:退出",
+            " S:全量更新  R:续传  X:停止  D:启动守护  Z:停止守护  H:健康检查  F:数据修复  C:复制面板  Ctrl+C:退出",
             id="key-bindings",
         )
 
@@ -1195,14 +1348,47 @@ class PipelineApp(App):
             sys.executable, pipeline_path, "--task", task, "--force",
         )
 
-    def action_copy_logs(self) -> None:
-        logs_widget = self.query_one("#live-logs", LogsWidget)
-        text = logs_widget.copy_recent_logs(line_count=500)
+    def action_copy_panel(self) -> None:
+        from rich.text import Text
+
+        def _static_plain(w: Static) -> str:
+            raw = str(getattr(w, "_Static__content", ""))
+            return Text.from_markup(raw).plain if raw else ""
+
+        dc = self.query_one("#data-completeness", DataCompletenessWidget)
+        dc_plain = _static_plain(dc._content)
+
+        dash = self.query_one("#status-dashboard", DashboardWidget)
+        dash_plain = _static_plain(dash)
+
+        prog = self.query_one("#scraping-progress", ProgressWidget)
+        prog_plain = _static_plain(prog)
+
+        logs = self.query_one("#live-logs", LogsWidget)
+        logs_text = logs.copy_recent_logs(line_count=500)
+
+        sources = [
+            ("📀 Data Completeness", dc_plain.strip()),
+            ("📊 Dashboard", dash_plain.strip()),
+            ("📈 Progress", prog_plain.strip()),
+            ("📋 Live Logs", logs_text.strip() if logs_text else ""),
+        ]
+
+        idx = getattr(self, "_copy_panel_index", 0)
+        self._copy_panel_index = (idx + 1) % len(sources)
+        label, text = sources[idx]
+
         if not text:
-            self.notify("No logs to copy", severity="warning", timeout=2.0)
+            self.notify(f"{label} — 内容为空", timeout=2.0)
             return
-        self.copy_to_clipboard(text)
-        self.notify("Logs copied to clipboard", severity="information", timeout=2.0)
+
+        full = f"=== {label} ===\n{text}"
+        self.copy_to_clipboard(full)
+        remaining = [s[0] for i, s in enumerate(sources) if i != self._copy_panel_index]
+        self.notify(
+            f"✓ {label} 已复制 | 下次 C: {remaining[0]}",
+            timeout=3.0,
+        )
 
 if __name__ == "__main__":
     app = PipelineApp()
