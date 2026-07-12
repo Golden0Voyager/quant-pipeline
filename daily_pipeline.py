@@ -2077,7 +2077,7 @@ def update_industry(db: DatabaseInterface) -> dict:
     logger.info("=" * 60)
 
     import sqlite3
-    from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     import requests as _req
 
@@ -2185,21 +2185,21 @@ def update_industry(db: DatabaseInterface) -> dict:
     success_map: dict[str, str] = {}
     fail_list: list[str] = []
     processed = 0
-    BATCH_SIZE = 50        # 减小批次，避免限流时损失过多
-    BATCH_TIMEOUT = 600    # 每批最多等 10 分钟（给重试留足时间）
-    BATCH_COOLDOWN = 30    # 批间冷却 30s，降低被限流概率
+    batch_size = 50        # 减小批次，避免限流时损失过多
+    batch_timeout = 600    # 每批最多等 10 分钟（给重试留足时间）
+    batch_cooldown = 30    # 批间冷却 30s，降低被限流概率
 
     max_workers = 4
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for batch_start in range(0, len(rows), BATCH_SIZE):
-            batch = rows[batch_start:batch_start + BATCH_SIZE]
+        for batch_start in range(0, len(rows), batch_size):
+            batch = rows[batch_start:batch_start + batch_size]
             fut_map = {}
             for code, market in batch:
                 fut = pool.submit(_fetch_industry, code, market)
                 fut_map[fut] = code
 
             # 等待本批完成或超时
-            done_set, pending_set = wait(fut_map, timeout=BATCH_TIMEOUT)
+            done_set, pending_set = wait(fut_map, timeout=batch_timeout)
 
             # 处理已完成的任务
             for fut in done_set:
@@ -2227,8 +2227,8 @@ def update_industry(db: DatabaseInterface) -> dict:
                 )
 
             # 批间冷却，降低限流概率
-            if batch_start + BATCH_SIZE < len(rows):
-                time.sleep(BATCH_COOLDOWN)
+            if batch_start + batch_size < len(rows):
+                time.sleep(batch_cooldown)
 
     logger.info(
         f"📊 接口请求完成: 成功 {len(success_map)}, 失败 {len(fail_list)}"
