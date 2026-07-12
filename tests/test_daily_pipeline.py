@@ -1469,3 +1469,141 @@ def test_update_dividend_summary_empty(mock_ak: MagicMock):
         r = daily_pipeline.update_dividend_summary(db)
     assert r["saved"] == 0
     db.save_dividend_summary_batch.assert_not_called()
+
+
+# ===========================================================================
+# Global macro: CLI branch coverage (Category 1)
+# ===========================================================================
+
+class TestGlobalMacroCli:
+    @pytest.mark.parametrize(
+        "task_name,func_name",
+        [
+            ("update_north_flow", "update_north_flow"),
+            ("update_index_daily", "update_index_daily"),
+            ("update_limit_up_down", "update_limit_up_down"),
+            ("update_dividend_summary", "update_dividend_summary"),
+            ("update_gold_price", "update_gold_price"),
+            ("update_crude_oil", "update_crude_oil"),
+            ("update_usd", "update_usd"),
+            ("update_global_index", "update_global_index"),
+            ("update_us_treasury", "update_us_treasury"),
+        ],
+    )
+    def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", task_name]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch(f"daily_pipeline.{func_name}") as fn:
+            f.configure.return_value = None
+            f.get_db.return_value = db = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+            fn.assert_called_once_with(db)
+
+
+# ===========================================================================
+# Global macro: ak=None early-return (Category 2)
+# ===========================================================================
+
+class TestGlobalMacroAkNone:
+    def test_global_macro_ak_none(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak", None), patch("daily_pipeline.logger"):
+            for fn in [
+                daily_pipeline.update_north_flow,
+                daily_pipeline.update_index_daily,
+                daily_pipeline.update_limit_up_down,
+                daily_pipeline.update_dividend_summary,
+                daily_pipeline.update_gold_price,
+                daily_pipeline.update_crude_oil,
+                daily_pipeline.update_usd,
+                daily_pipeline.update_global_index,
+                daily_pipeline.update_us_treasury,
+            ]:
+                r = fn(db)
+                assert r["saved"] == 0
+                assert "error" in r
+
+
+# ===========================================================================
+# Global macro: exception handling (Category 3)
+# ===========================================================================
+
+class TestGlobalMacroFetchException:
+    def test_north_flow_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_hsgt_fund_flow_summary_em.side_effect = ValueError("API error")
+            r = daily_pipeline.update_north_flow(db)
+        assert r["saved"] == 0
+
+    def test_index_daily_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zh_index_daily_tx.side_effect = RuntimeError("index fetch failed")
+            r = daily_pipeline.update_index_daily(db)
+        assert r["saved"] == 0
+
+    def test_limit_up_down_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zt_pool_em.side_effect = ValueError("zt_pool error")
+            r = daily_pipeline.update_limit_up_down(db)
+        assert r["saved"] == 0
+
+    def test_limit_down_fetch_exception(self):
+        db = MagicMock()
+        db.save_limit_up_down_batch.return_value = 1
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_zt_pool_em.return_value = pd.DataFrame({
+                "代码": ["000001"], "名称": ["平安银行"], "涨跌幅": [10.0],
+                "最新价": [10.0], "换手率": [0.5], "连板数": [1], "所属行业": ["银行"],
+            })
+            mock_ak.stock_zt_pool_dtgc_em.side_effect = RuntimeError("zt_pool_dtgc error")
+            r = daily_pipeline.update_limit_up_down(db)
+        # limit_up succeeded (1 record) but limit_down failed internally; update returns non-zero saved, no crash
+        assert r["saved"] == 1
+
+    def test_dividend_summary_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.stock_history_dividend.side_effect = ValueError("dividend error")
+            r = daily_pipeline.update_dividend_summary(db)
+        assert r["saved"] == 0
+
+    def test_gold_price_fetch_exception(self):
+        db = MagicMock()
+        db.save_gold_price_batch.return_value = 0
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.spot_golden_benchmark_sge.side_effect = ValueError("gold API error")
+            r = daily_pipeline.update_gold_price(db)
+        assert r["saved"] == 0
+
+    def test_crude_oil_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.futures_foreign_commodity_realtime.side_effect = RuntimeError("oil fetch failed")
+            r = daily_pipeline.update_crude_oil(db)
+        assert r["saved"] == 0
+
+    def test_usd_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.currency_boc_sina.side_effect = ValueError("fx error")
+            r = daily_pipeline.update_usd(db)
+        assert r["saved"] == 0
+
+    def test_global_index_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.index_global_spot_em.side_effect = RuntimeError("global index error")
+            r = daily_pipeline.update_global_index(db)
+        assert r["saved"] == 0
+
+    def test_us_treasury_fetch_exception(self):
+        db = MagicMock()
+        with patch.object(daily_pipeline, "ak") as mock_ak, patch("daily_pipeline.logger"):
+            mock_ak.bond_zh_us_rate.side_effect = ValueError("treasury error")
+            r = daily_pipeline.update_us_treasury(db)
+        assert r["saved"] == 0
