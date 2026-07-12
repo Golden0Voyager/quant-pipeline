@@ -18,6 +18,8 @@ from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Label, RichLog, Select, Static
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
 PIPELINE_PID_PATH = "/tmp/daily_pipeline.pid"
