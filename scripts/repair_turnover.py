@@ -17,7 +17,13 @@ from pathlib import Path
 import akshare as ak
 import pandas as pd
 
-sys.path.insert(0, str(Path("~/Code").expanduser()))
+_CODE_DIR = str(Path("~/Code").expanduser())
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+_HUNTER_SRC = str(Path("~/Code/quant_hunter/src").expanduser())
+if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
+    sys.path.insert(0, _HUNTER_SRC)
+
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
@@ -67,6 +73,10 @@ def get_symbols_to_repair(cur: sqlite3.Cursor, cutoff: str) -> list[str]:
         "SELECT DISTINCT ts_code FROM daily_bars WHERE trade_date >= ? AND turnover_rate IS NULL",
         (cutoff,),
     )
+    # 默认跳过北交所（除非 INCLUDE_BJ=1）
+    include_bj = os.environ.get("INCLUDE_BJ", "0") == "1"
+    if include_bj:
+        return [row[0] for row in cur.fetchall()]
     return [row[0] for row in cur.fetchall() if not is_beijing_stock(row[0])]
 
 

@@ -61,7 +61,8 @@ def run_checks(db_path: Path) -> dict:
     # ------------------------------------------------------------------
     required_tables = [
         "daily_bars", "indicators", "stock_list", "fundamentals",
-        "fund_flow", "historical_valuation", "scan_results", "chip_distribution"
+        "fund_flow", "historical_valuation", "scan_results", "chip_distribution",
+        "chip_distribution_em"
     ]
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
     existing = {r[0] for r in cursor.fetchall()}
