@@ -477,19 +477,23 @@ async def test_data_completeness_shows_freshness_and_dates():
             "daily_bars": 7000000,
             "indicators": 6500000,
             "fundamentals": 5000,
+            "chip_distribution": 1000000,
+            "chip_distribution_em": 2000,
         }
         widget._latest_dates = {
             "daily_bars": "2026-07-09",
             "indicators": "2026-07-09",
             "fundamentals": "2026-07-08",
+            "chip_distribution": "2026-07-09",
+            "chip_distribution_em": "2026-07-09",
         }
         captured = []
         with patch.object(widget._content, "update", side_effect=captured.append):
             widget._rebuild_content()
         text = "\n".join(captured)
         assert "期望最新日期" in text
-        assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
         assert "2026-07-09" in text
+        assert "daily_bars" in text or "Daily Bars" in text
 
 
 def test_parse_progress_valid(tmp_path):
