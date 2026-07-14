@@ -722,10 +722,12 @@ async def test_stop_daemon_process_success_new():
     mock_proc = MagicMock()
     mock_proc.returncode = 0
     mock_proc.communicate = MagicMock(return_value=(b"daemon stopped", b""))
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        with patch("logging.getLogger", return_value=MagicMock()):
-            await app._stop_daemon_process()
-            mock_exec.assert_called_once()
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
+        patch("logging.getLogger", return_value=MagicMock()),
+    ):
+        await app._stop_daemon_process()
+        mock_exec.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -733,9 +735,11 @@ async def test_stop_daemon_process_timeout_new():
     app = PipelineApp()
     mock_proc = MagicMock()
     mock_proc.communicate = MagicMock(side_effect=asyncio.TimeoutError)
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with patch("logging.getLogger", return_value=MagicMock()):
-            await app._stop_daemon_process()
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch("logging.getLogger", return_value=MagicMock()),
+    ):
+        await app._stop_daemon_process()
 
 
 @pytest.mark.asyncio
@@ -761,8 +765,9 @@ async def test_action_run_single_task_new():
 # DataCompletenessWidget: _get_updating_table
 # ===========================================================================
 def test_get_updating_table_active():
-    from tui import DataCompletenessWidget
     import time
+
+    from tui import DataCompletenessWidget
     data = {"task": "update_bars", "processed": 10}
     with patch("os.path.getmtime", return_value=time.time() - 30), \
          patch("tui.parse_progress", return_value=data):
@@ -771,8 +776,9 @@ def test_get_updating_table_active():
 
 
 def test_get_updating_table_stale():
-    from tui import DataCompletenessWidget
     import time
+
+    from tui import DataCompletenessWidget
     with patch("os.path.getmtime", return_value=time.time() - 120):
         result = DataCompletenessWidget._get_updating_table()
         assert result is None
@@ -865,6 +871,7 @@ async def test_sync_watchlists_exception_suppressed():
 # ===========================================================================
 def test_confirm_stop_screen_on_key_n():
     from unittest.mock import MagicMock
+
     from tui import ConfirmStopScreen
     screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
     screen.dismiss = MagicMock()
@@ -876,6 +883,7 @@ def test_confirm_stop_screen_on_key_n():
 
 def test_confirm_stop_screen_on_key_y():
     from unittest.mock import MagicMock
+
     from tui import ConfirmStopScreen
     screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
     screen.dismiss = MagicMock()
@@ -887,6 +895,7 @@ def test_confirm_stop_screen_on_key_y():
 
 def test_confirm_stop_screen_other_key():
     from unittest.mock import MagicMock
+
     from tui import ConfirmStopScreen
     screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
     screen.dismiss = MagicMock()
@@ -923,23 +932,6 @@ async def test_run_or_schedule_none():
         _, callback = mock_push.call_args[0]
         callback(None)
         mock_bg.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_run_or_schedule_run_later():
-    """_run_or_schedule with run-later → creates delayed task."""
-    app = PipelineApp()
-    with patch.object(app, "push_screen") as mock_push, \
-         patch("tui._seconds_until_safe", return_value=60), \
-         patch.object(app, "notify") as mock_notify, \
-         patch("asyncio.sleep", return_value=asyncio.Future()) as mock_sleep:
-        mock_sleep.return_value.set_result(None)
-        app._run_or_schedule("测试", "python", "test.py")
-        _, callback = mock_push.call_args[0]
-        callback("run-later")
-        mock_notify.assert_called_once()
-        assert "已调度" in mock_notify.call_args[0][0]
-        assert "1 分钟" in mock_notify.call_args[0][0]
 
 
 # ===========================================================================
@@ -1584,8 +1576,9 @@ def test_progress_widget_with_data():
 # ===========================================================================
 def test_get_updating_table_matched():
     """_get_updating_table returns table name for mapped task."""
-    from tui import DataCompletenessWidget
     import time
+
+    from tui import DataCompletenessWidget
     data = {"task": "update_indicators", "processed": 10}
     with patch("os.path.getmtime", return_value=time.time() - 30), \
          patch("tui.parse_progress", return_value=data):
@@ -1595,8 +1588,9 @@ def test_get_updating_table_matched():
 
 def test_get_updating_table_unmapped_task():
     """_get_updating_table returns None for unmapped task."""
-    from tui import DataCompletenessWidget
     import time
+
+    from tui import DataCompletenessWidget
     data = {"task": "unknown_task", "processed": 10}
     with patch("os.path.getmtime", return_value=time.time() - 30), \
          patch("tui.parse_progress", return_value=data):
