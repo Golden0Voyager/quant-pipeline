@@ -45,6 +45,8 @@ from core.config import (
 from core.config import (
     PARALLEL_WORKERS_VAL as PARALLEL_WORKERS,
 )
+from datetime import datetime, timedelta
+
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,  # noqa: F401
 )
@@ -55,6 +57,9 @@ from core.lock import ProcessLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
 from core.runner import safe_task
+from core.utils import (
+    infer_market as _infer_market,  # noqa: F401
+)
 from core.utils import (
     is_trading_day as _is_trading_day,  # noqa: F401
 )
@@ -207,37 +212,6 @@ def main():
     parser = argparse.ArgumentParser(description="SmartMoney 日常数据管道（解耦版 + 断点续传）")
     parser.add_argument(
         "--task",
-        choices=[
-            "all",
-            "update_stock_list",
-            "update_bars",
-            "update_indicators",
-            "update_chip_distribution",
-            "update_chip_distribution_em",
-            "update_fundamentals",
-            "update_market_snapshot",
-            "update_fund_flow",
-            "update_margin_trading",
-            "update_dragon_tiger",
-            "update_block_trade",
-            "update_sector_fund_flow",
-            "update_shareholder_count",
-            "update_quarterly_financials",
-            "update_historical_valuation",
-            "update_sector_industry",
-            "update_industry",
-            "update_north_flow",
-            "update_index_daily",
-            "update_limit_up_down",
-            "update_dividend_summary",
-            "update_gold_price",
-            "update_crude_oil",
-            "update_usd",
-            "update_global_index",
-            "update_us_treasury",
-            "retry",
-            "health_check",
-        ],
         default="all",
         help="要执行的任务 (默认: all)",
     )

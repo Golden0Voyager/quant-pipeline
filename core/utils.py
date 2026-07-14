@@ -29,7 +29,9 @@ def infer_market(code: str) -> str:
     """根据股票代码前缀精确推断板块市场标识。"""
     if code.startswith("688"):
         return "star"
-    if code.startswith("6"):
+    if code.startswith(("4", "8", "920")):
+        return "bj"
+    if code.startswith("6") or code.startswith("90"):
         return "sh"
     if code.startswith(("300", "301")):
         return "gem"
@@ -37,8 +39,6 @@ def infer_market(code: str) -> str:
         return "sme"
     if code.startswith(("000", "001")):
         return "sz"
-    if code.startswith(("4", "8", "920")):
-        return "bj"
     return "sz"
 
 

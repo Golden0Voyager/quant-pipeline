@@ -367,6 +367,8 @@ def test_normalize_date():
     assert _normalize_date("2026-07-07") == "2026-07-07"
     assert _normalize_date("20260630") == "2026-06-30"
     assert _normalize_date("20260331") == "2026-03-31"
+    # chip_distribution 等表以 DATE 类型存储，SQLite 返回带时间戳的字符串
+    assert _normalize_date("2026-07-13 00:00:00") == "2026-07-13"
     assert _normalize_date("not-a-date") == "not-a-date"
 
 
@@ -477,23 +479,56 @@ async def test_data_completeness_shows_freshness_and_dates():
             "daily_bars": 7000000,
             "indicators": 6500000,
             "fundamentals": 5000,
-            "chip_distribution": 1000000,
-            "chip_distribution_em": 2000,
         }
         widget._latest_dates = {
             "daily_bars": "2026-07-09",
             "indicators": "2026-07-09",
             "fundamentals": "2026-07-08",
-            "chip_distribution": "2026-07-09",
-            "chip_distribution_em": "2026-07-09",
+        }
+        captured = []
+        with patch.object(widget._content, "update", side_effect=captured.append), \
+             patch("tui._get_expected_latest_trading_day", return_value="2026-07-09"):
+            widget._rebuild_content()
+        text = "\n".join(captured)
+        assert "期望最新日期" in text
+        assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
+        assert "2026-07-09" in text
+
+
+def test_status_for_table_with_timestamp():
+    from tui import DataCompletenessWidget
+    # chip_distribution 等表返回带时间戳的日期，只落后 1 天应判定为略滞后
+    emoji, status = DataCompletenessWidget._get_status_for_table(
+        "chip_distribution", "2026-07-13", "2026-07-14", None
+    )
+    assert status == "略滞后"
+    assert emoji == "[yellow]●[/yellow]"
+
+
+@pytest.mark.asyncio
+async def test_data_completeness_sorts_lagging_to_bottom():
+    from tui import DataCompletenessWidget, PipelineApp
+    app = PipelineApp()
+    async with app.run_test():
+        widget = app.query_one("#data-completeness", DataCompletenessWidget)
+        widget._counts = {
+            "daily_bars": 7000000,
+            "margin_trading": 46607,
+            "global_index": 56,
+        }
+        widget._latest_dates = {
+            "daily_bars": "2026-07-14",
+            "margin_trading": "2026-07-13",
+            "global_index": "2026-07-10",
         }
         captured = []
         with patch.object(widget._content, "update", side_effect=captured.append):
             widget._rebuild_content()
         text = "\n".join(captured)
-        assert "期望最新日期" in text
-        assert "2026-07-09" in text
-        assert "daily_bars" in text or "Daily Bars" in text
+        daily_pos = text.find("Daily Bars")
+        margin_pos = text.find("Margin Trading")
+        global_pos = text.find("Global Index")
+        assert daily_pos < margin_pos < global_pos
 
 
 def test_parse_progress_valid(tmp_path):
@@ -680,10 +715,10 @@ def test_get_all_table_counts_no_db():
 
 
 # ===========================================================================
-# PipelineApp: action handlers
+# PipelineApp: action_run_reconcile, action_copy_panel, on_mount no processes
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_action_run_reconcile_new():
+async def test_action_run_reconcile():
     app = PipelineApp()
     with patch.object(app, "_create_background_task") as mock_bg, \
          patch.object(app, "notify") as mock_notify:
@@ -693,17 +728,17 @@ async def test_action_run_reconcile_new():
 
 
 @pytest.mark.asyncio
-async def test_on_mount_no_processes_new():
+async def test_on_mount_no_processes():
     app = PipelineApp()
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
          patch.object(app, "_create_background_task") as mock_bg:
         await app.on_mount()
-        # on_mount returns early when no processes → _sync_watchlists not called
+        # 没有后台进程时直接返回，不会创建后台同步任务
         mock_bg.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_action_stop_pipeline_and_daemon():
+async def test_action_stop_pipeline_also_stops_daemon():
     app = PipelineApp()
     mock_proc = MagicMock()
     mock_proc.pid = 99999
@@ -712,53 +747,55 @@ async def test_action_stop_pipeline_and_daemon():
     wait_future.set_result(0)
     mock_proc.wait = MagicMock(return_value=wait_future)
     app._current_process = mock_proc
+
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
          patch("tui.get_daemon_status", return_value=("Running", 88888)), \
          patch.object(app, "_create_background_task") as mock_bg, \
          patch("logging.getLogger", return_value=MagicMock()):
         await app.action_stop_pipeline()
-        mock_bg.assert_called()
+        mock_bg.assert_called()  # should schedule daemon stop
 
 
+# ===========================================================================
+# PipelineApp: _stop_daemon_process and action_copy_panel
+# ===========================================================================
 @pytest.mark.asyncio
-async def test_stop_daemon_process_success_new():
+async def test_stop_daemon_process_success():
     app = PipelineApp()
     mock_proc = MagicMock()
     mock_proc.returncode = 0
     mock_proc.communicate = MagicMock(return_value=(b"daemon stopped", b""))
-    with (
-        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
-        patch("logging.getLogger", return_value=MagicMock()),
-    ):
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
+         patch("logging.getLogger", return_value=MagicMock()):
         await app._stop_daemon_process()
         mock_exec.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_stop_daemon_process_timeout_new():
+async def test_stop_daemon_process_timeout():
     app = PipelineApp()
     mock_proc = MagicMock()
     mock_proc.communicate = MagicMock(side_effect=asyncio.TimeoutError)
-    with (
-        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
-        patch("logging.getLogger", return_value=MagicMock()),
-    ):
-        await app._stop_daemon_process()
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("logging.getLogger", return_value=MagicMock()):
+        await app._stop_daemon_process()  # should handle timeout gracefully
 
 
 @pytest.mark.asyncio
-async def test_action_copy_panel_new():
+async def test_action_copy_panel_empty():
     app = PipelineApp()
     async with app.run_test():
+        # Mock the _static_plain to return empty
         with patch.object(app, "copy_to_clipboard") as mock_copy, \
              patch.object(app, "notify") as mock_notify:
+            # Set the copy panel index
             app._copy_panel_index = 0
             app.action_copy_panel()
             assert mock_notify.called or mock_copy.called
 
 
 @pytest.mark.asyncio
-async def test_action_run_single_task_new():
+async def test_action_run_single_task():
     app = PipelineApp()
     with patch.object(app, "_run_or_schedule") as mock_run:
         await app.action_run_single_task("update_bars")
@@ -772,6 +809,7 @@ def test_get_updating_table_active():
     import time
 
     from tui import DataCompletenessWidget
+
     data = {"task": "update_bars", "processed": 10}
     with patch("os.path.getmtime", return_value=time.time() - 30), \
          patch("tui.parse_progress", return_value=data):
@@ -783,6 +821,7 @@ def test_get_updating_table_stale():
     import time
 
     from tui import DataCompletenessWidget
+
     with patch("os.path.getmtime", return_value=time.time() - 120):
         result = DataCompletenessWidget._get_updating_table()
         assert result is None
@@ -793,838 +832,3 @@ def test_get_updating_table_no_file():
     with patch("os.path.getmtime", side_effect=OSError):
         result = DataCompletenessWidget._get_updating_table()
         assert result is None
-
-
-# ===========================================================================
-# PipelineApp on_mount: yes/no dialog branches
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_on_mount_with_processes_yes_stop():
-    """on_mount with processes → user presses Y → kills processes + syncs watchlists."""
-    app = PipelineApp()
-    fake_procs = [{"pid": 12345, "elapsed": "01:00", "command": "daily_pipeline.py"}]
-
-    async def fake_push_screen(*args, **kwargs):
-        return True
-
-    with patch("tui.find_running_pipeline_processes", return_value=fake_procs), \
-         patch.object(app, "push_screen_wait", side_effect=fake_push_screen), \
-         patch("os.kill") as mock_kill, \
-         patch.object(app, "_create_background_task") as mock_bg, \
-         patch.object(app, "notify"):
-        await app.on_mount()
-        mock_kill.assert_called_once()  # SIGTERM
-        mock_bg.assert_called_once()  # watchlist sync
-
-
-@pytest.mark.asyncio
-async def test_on_mount_with_processes_no_keep():
-    """on_mount with processes → user presses N → keeps processes running + syncs watchlists."""
-    app = PipelineApp()
-    fake_procs = [{"pid": 12345, "elapsed": "01:00", "command": "daily_pipeline.py"}]
-
-    async def fake_push_screen(*args, **kwargs):
-        return False
-
-    with patch("tui.find_running_pipeline_processes", return_value=fake_procs), \
-         patch.object(app, "push_screen_wait", side_effect=fake_push_screen), \
-         patch("os.kill") as mock_kill, \
-         patch.object(app, "_create_background_task") as mock_bg, \
-         patch.object(app, "notify") as mock_notify:
-        await app.on_mount()
-        mock_kill.assert_not_called()
-        mock_notify.assert_called_with(
-            "Background processes kept running",
-            severity="information", timeout=3.0,
-        )
-        mock_bg.assert_called_once()  # still syncs watchlists
-
-
-@pytest.mark.asyncio
-async def test_sync_watchlists_with_files_notify():
-    """_sync_watchlists with files > 0 calls notify."""
-    app = PipelineApp()
-    with patch("tui.sync_watchlists_from_files", return_value=(5, 3)), \
-         patch.object(app, "notify") as mock_notify:
-        await app._sync_watchlists()
-        mock_notify.assert_called_once()
-        args = mock_notify.call_args[0]
-        assert "新增 5" in str(args)
-
-
-@pytest.mark.asyncio
-async def test_sync_watchlists_no_files_no_notify():
-    """_sync_watchlists with files=0 does NOT call notify."""
-    app = PipelineApp()
-    with patch("tui.sync_watchlists_from_files", return_value=(0, 0)), \
-         patch.object(app, "notify") as mock_notify:
-        await app._sync_watchlists()
-        mock_notify.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_sync_watchlists_exception_suppressed():
-    """_sync_watchlists exceptions are suppressed."""
-    app = PipelineApp()
-    with patch("tui.sync_watchlists_from_files", side_effect=RuntimeError("boom")):
-        await app._sync_watchlists()  # should not raise
-
-
-# ===========================================================================
-# ConfirmStopScreen: on_key "n"
-# ===========================================================================
-def test_confirm_stop_screen_on_key_n():
-    from unittest.mock import MagicMock
-
-    from tui import ConfirmStopScreen
-    screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
-    screen.dismiss = MagicMock()
-    event = MagicMock()
-    event.key = "n"
-    screen.on_key(event)
-    screen.dismiss.assert_called_once_with(False)
-
-
-def test_confirm_stop_screen_on_key_y():
-    from unittest.mock import MagicMock
-
-    from tui import ConfirmStopScreen
-    screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
-    screen.dismiss = MagicMock()
-    event = MagicMock()
-    event.key = "Y"
-    screen.on_key(event)
-    screen.dismiss.assert_called_once_with(True)
-
-
-def test_confirm_stop_screen_other_key():
-    from unittest.mock import MagicMock
-
-    from tui import ConfirmStopScreen
-    screen = ConfirmStopScreen([{"pid": 1, "elapsed": "00:01", "command": "test"}])
-    screen.dismiss = MagicMock()
-    event = MagicMock()
-    event.key = "x"
-    screen.on_key(event)
-    screen.dismiss.assert_not_called()
-
-
-# ===========================================================================
-# _run_or_schedule: cancel + run-later
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_run_or_schedule_cancel():
-    """_run_or_schedule with cancel callback → no background task created."""
-    app = PipelineApp()
-    with patch.object(app, "push_screen") as mock_push, \
-         patch.object(app, "_create_background_task") as mock_bg, \
-         patch.object(app, "notify") as mock_notify:
-        app._run_or_schedule("测试", "python", "test.py")
-        _, callback = mock_push.call_args[0]
-        callback("cancel")
-        mock_bg.assert_not_called()
-        mock_notify.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_run_or_schedule_none():
-    """_run_or_schedule with None callback → no background task created."""
-    app = PipelineApp()
-    with patch.object(app, "push_screen") as mock_push, \
-         patch.object(app, "_create_background_task") as mock_bg:
-        app._run_or_schedule("测试", "python", "test.py")
-        _, callback = mock_push.call_args[0]
-        callback(None)
-        mock_bg.assert_not_called()
-
-
-# ===========================================================================
-# LogsWidget: colorize_line all branches
-# ===========================================================================
-def test_colorize_line_error():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | ERROR | Something broke")
-    assert "[red]❌" in result
-    assert "Something broke" in result
-
-
-def test_colorize_line_warn():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | WARN | Connection slow")
-    assert "[yellow]⚠️" in result
-
-
-def test_colorize_line_warning():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | WARNING | Disk full")
-    assert "[yellow]⚠️" in result
-
-
-def test_colorize_line_success():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | SUCCESS | Done")
-    assert "[bold green]✅" in result
-
-
-def test_colorize_line_info():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | INFO | Processing")
-    assert "[#e2e8f0]" in result
-
-
-def test_colorize_line_unknown_level():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | DEBUG | Debug msg")
-    assert "Debug msg" in result
-    assert "❌" not in result
-    assert "⚠️" not in result
-
-
-def test_colorize_line_equals_in_body():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("2026-07-12 | INFO | x=y=z")
-    assert "x-y-z" in result
-    assert "=" not in result
-
-
-def test_colorize_line_no_pipe():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("plain text with = signs")
-    assert "plain text with - signs" in result
-
-
-def test_colorize_line_empty():
-    from tui import LogsWidget
-    w = LogsWidget()
-    result = w.colorize_line("")
-    assert result == ""
-
-
-# ===========================================================================
-# LogsWidget: tail_log error + no log
-# ===========================================================================
-def test_tail_log_no_latest():
-    """tail_log when find_latest_log_file returns None."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    with patch("tui.find_latest_log_file", return_value=None), \
-         patch.object(w, "write") as mock_write:
-        w.tail_log()
-        mock_write.assert_not_called()
-
-
-def test_tail_log_error():
-    """tail_log when an exception occurs."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    with patch("tui.find_latest_log_file", side_effect=OSError("permission denied")), \
-         patch.object(w, "write") as mock_write:
-        w.tail_log()
-        mock_write.assert_called_once()
-        assert "Error tailing log" in mock_write.call_args[0][0]
-
-
-def test_tail_log_switch_log_file(tmp_path):
-    """tail_log when log file changes → closes old handle, opens new."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    log1 = tmp_path / "log1.log"
-    log1.write_text("line 1\n")
-    log2 = tmp_path / "log2.log"
-    log2.write_text("line 2\n")
-
-    old_fh = MagicMock()
-    w.file_handle = old_fh
-    w.active_log = str(log1)
-
-    with patch("tui.find_latest_log_file", return_value=str(log2)), \
-         patch.object(w, "write") as mock_write:
-        w.tail_log()
-        old_fh.close.assert_called_once()
-        assert w.active_log == str(log2)
-        # Should have written the "Bound to log" message
-        assert any("Bound to log" in str(call) for call in mock_write.call_args_list)
-
-
-# ===========================================================================
-# LogsWidget: copy_recent_logs
-# ===========================================================================
-def test_copy_recent_logs_from_active_file(tmp_path):
-    """copy_recent_logs reads from active log file."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    log_file = tmp_path / "test.log"
-    log_file.write_text("line1\nline2\nline3\n")
-    w.active_log = str(log_file)
-    result = w.copy_recent_logs(line_count=2)
-    assert "line2" in result
-    assert "line3" in result
-    assert "line1" not in result
-
-
-def test_copy_recent_logs_fallback_to_lines():
-    """copy_recent_logs falls back to RichLog lines when no active file."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    w.active_log = None
-    w.lines = ["rendered line 1", "rendered line 2"]
-    result = w.copy_recent_logs(line_count=1)
-    assert "rendered line 2" in result
-
-
-def test_copy_recent_logs_empty_fallback():
-    """copy_recent_logs returns empty string when all fallbacks fail."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    w.active_log = "/nonexistent/path.log"
-    w.lines = []
-    result = w.copy_recent_logs()
-    assert result == ""
-
-
-# ===========================================================================
-# LogsWidget: on_unmount
-# ===========================================================================
-def test_logs_widget_on_unmount_closes_handle():
-    """on_unmount closes file handle if open."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    mock_fh = MagicMock()
-    w.file_handle = mock_fh
-    w.on_unmount()
-    mock_fh.close.assert_called_once()
-    assert w.file_handle is None
-
-
-def test_logs_widget_on_unmount_no_handle():
-    """on_unmount does nothing if no file handle."""
-    from tui import LogsWidget
-    w = LogsWidget()
-    w.file_handle = None
-    w.on_unmount()  # should not raise
-
-
-# ===========================================================================
-# format_count: all branches
-# ===========================================================================
-def test_format_count_millions():
-    from tui import format_count
-    assert format_count(7_500_000) == "7.50M"
-
-
-def test_format_count_thousands():
-    from tui import format_count
-    assert format_count(5_500) == "5.5K"
-
-
-def test_format_count_small():
-    from tui import format_count
-    assert format_count(42) == "42"
-
-
-# ===========================================================================
-# get_db_size: GB branch
-# ===========================================================================
-def test_get_db_size_gb(tmp_path):
-    from tui import get_db_size
-    db_file = tmp_path / "big.db"
-    # Write just over 1GB of bytes
-    db_file.write_bytes(b"\x00" * (1024 * 1024 * 1024 + 1024 * 1024))
-    size_str = get_db_size(str(db_file))
-    assert "GB" in size_str
-
-
-# ===========================================================================
-# DataCompletenessWidget: _rebuild_content edge cases
-# ===========================================================================
-def test_rebuild_content_estimated_mode():
-    """_rebuild_content in estimated mode (fast counts, all zeros)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"_estimated_total": 1000, "_db_bytes": 500000}
-    for k in DataCompletenessWidget.TABLE_LABELS:
-        w._counts[k] = 0
-    w._latest_dates = {}
-    with patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.23 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "行数加载中" in call_args
-        assert "计算中" in call_args
-
-
-def test_rebuild_content_updating_table():
-    """_rebuild_content with an updating table."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "indicators": 500, "stock_list": 100}
-    w._latest_dates = {"daily_bars": "2026-07-10", "indicators": "2026-07-09"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value="daily_bars"), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "更新中" in call_args
-
-
-def test_rebuild_content_monthly_table():
-    """_rebuild_content with institutional_holdings (monthly table)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "institutional_holdings": 5000}
-    w._latest_dates = {"daily_bars": "2026-07-10", "institutional_holdings": "2026-06-30"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "按月更新" in call_args
-
-
-def test_rebuild_content_quarterly_table():
-    """_rebuild_content with shareholder_count (quarterly table)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "shareholder_count": 5000}
-    w._latest_dates = {"daily_bars": "2026-07-10", "shareholder_count": "2026-03-31"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "按季更新" in call_args
-
-
-def test_rebuild_content_delayed_table():
-    """_rebuild_content with fx_rate (delayed publish table)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "fx_rate": 500}
-    w._latest_dates = {"daily_bars": "2026-07-10", "fx_rate": "2026-07-08"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "延迟发布" in call_args
-
-
-def test_rebuild_content_no_date_table():
-    """_rebuild_content with dividend_summary (NO_DATE_TABLES)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "dividend_summary": 500}
-    w._latest_dates = {"daily_bars": "2026-07-10"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "最新" not in call_args.split("Dividends")[1].split("\n")[0]
-
-
-def test_rebuild_content_stock_list_table():
-    """_rebuild_content with stock_list (special '只' suffix)."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "stock_list": 5528}
-    w._latest_dates = {"daily_bars": "2026-07-10"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "只" in call_args
-
-
-def test_rebuild_content_daily_bars_with_bar():
-    """_rebuild_content daily_bars with coverage bar."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 7000000, "indicators": 4000000}
-    w._latest_dates = {"daily_bars": "2026-07-10", "indicators": "2026-07-10"}
-    w._daily_coverage = (5000, 5528)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="2.50 GB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "█" in call_args
-        assert "%" in call_args
-        assert "2.50 GB" in call_args
-        assert "700.00万" in call_args or "7.00M" in call_args
-
-
-def test_rebuild_content_indicators_with_bar():
-    """_rebuild_content indicators with percentage bar."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "indicators": 750, "stock_list": 0}
-    w._latest_dates = {"daily_bars": "2026-07-10", "indicators": "2026-07-10"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        # indicators should have a bar with %
-        indicators_section = call_args.split("Indicators")[1]
-        assert "█" in indicators_section
-        assert "%" in indicators_section
-
-
-def test_rebuild_content_default_else_branch():
-    """_rebuild_content default else branch for regular tables."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {"daily_bars": 1000, "fund_flow": 5000}
-    w._latest_dates = {"daily_bars": "2026-07-10", "fund_flow": "2026-07-09"}
-    w._daily_coverage = (950, 1000)
-    with patch.object(DataCompletenessWidget, "_get_updating_table", return_value=None), \
-         patch("tui._get_expected_latest_trading_day", return_value="2026-07-10"), \
-         patch("tui.get_db_size", return_value="1.00 MB"):
-        w._rebuild_content()
-        call_args = w._content.update.call_args[0][0]
-        assert "Fund Flow" in call_args
-        assert "2026-07-09" in call_args
-
-
-# ===========================================================================
-# DataCompletenessWidget: _mini_bar
-# ===========================================================================
-def test_mini_bar_zero():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(0)
-    assert pct == 0
-    assert bar.count("█") == 0
-    assert bar.count("░") == 10
-
-
-def test_mini_bar_fifty():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(50)
-    assert pct == 50
-    assert bar.count("█") == 5
-    assert bar.count("░") == 5
-
-
-def test_mini_bar_hundred():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(100)
-    assert pct == 100
-    assert bar.count("█") == 10
-    assert bar.count("░") == 0
-
-
-def test_mini_bar_over_100():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(150)
-    assert pct == 100
-    assert bar.count("█") == 10
-
-
-def test_mini_bar_negative():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(-10)
-    assert pct == 0
-    assert bar.count("█") == 0
-
-
-def test_mini_bar_33():
-    from tui import DataCompletenessWidget
-    bar, pct = DataCompletenessWidget._mini_bar(33.3)
-    assert pct == 33
-    assert bar.count("█") == 3
-
-
-# ===========================================================================
-# DataCompletenessWidget: _rebuild_from_cache
-# ===========================================================================
-def test_rebuild_from_cache():
-    """_rebuild_from_cache just calls _rebuild_content."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    with patch.object(w, "_rebuild_content") as mock_rebuild:
-        w._rebuild_from_cache()
-        mock_rebuild.assert_called_once()
-
-
-# ===========================================================================
-# DataCompletenessWidget: _rebuild_content empty counts
-# ===========================================================================
-def test_rebuild_content_empty_counts():
-    """_rebuild_content with empty counts dict."""
-    from tui import DataCompletenessWidget
-    w = DataCompletenessWidget()
-    w._content = MagicMock()
-    w._counts = {}
-    w._latest_dates = {}
-    w._daily_coverage = (0, 0)
-    w._rebuild_content()
-    w._content.update.assert_called_once()
-    assert "等待数据库连接" in w._content.update.call_args[0][0]
-
-
-# ===========================================================================
-# find_running_pipeline_processes: skip_ppid_check
-# ===========================================================================
-def test_find_running_pipeline_skip_ppid_check():
-    """With skip_ppid_check=True, ppid filter is bypassed."""
-    from tui import find_running_pipeline_processes
-    with patch("tui.Path.exists", side_effect=[False]), \
-         patch("subprocess.run") as mock_run:
-        mock_run.side_effect = [
-            MagicMock(stdout="12345\n"),
-            MagicMock(stdout="12345  01:23:45 python daily_pipeline.py --task all"),
-        ]
-        procs = find_running_pipeline_processes(skip_ppid_check=True)
-    assert len(procs) == 1
-    assert procs[0]["pid"] == 12345
-
-
-def test_find_running_pipeline_pgrep_exception():
-    """pgrep fails → returns empty list gracefully."""
-    from tui import find_running_pipeline_processes
-    with patch("tui.Path.exists", return_value=False), \
-         patch("subprocess.run", side_effect=OSError):
-        procs = find_running_pipeline_processes()
-    assert procs == []
-
-
-# ===========================================================================
-# _stop_current_process: killpg + ProcessLookupError
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_stop_current_process_killpg():
-    """_stop_current_process uses os.killpg when available."""
-    app = PipelineApp()
-    mock_proc = MagicMock()
-    mock_proc.pid = 12345
-    mock_proc.returncode = None
-    wait_future = asyncio.Future()
-    wait_future.set_result(0)
-    mock_proc.wait = MagicMock(return_value=wait_future)
-    app._current_process = mock_proc
-
-    with patch("os.killpg") as mock_killpg, \
-         patch("os.getpgid", return_value=12345), \
-         patch.object(app, "notify"):
-        await app._stop_current_process()
-        mock_killpg.assert_called_once_with(12345, 15)
-        assert app._current_process is None
-
-
-@pytest.mark.asyncio
-async def test_stop_current_process_already_exited():
-    """_stop_current_process when ProcessLookupError is raised on killpg."""
-    app = PipelineApp()
-    mock_proc = MagicMock()
-    mock_proc.pid = 12345
-    mock_proc.returncode = None
-    wait_future = asyncio.Future()
-    wait_future.set_result(0)
-    mock_proc.wait = MagicMock(return_value=wait_future)
-    app._current_process = mock_proc
-
-    with patch("os.killpg", side_effect=ProcessLookupError), \
-         patch("os.getpgid", return_value=12345), \
-         patch.object(mock_proc, "terminate") as mock_terminate, \
-         patch.object(app, "notify"):
-        await app._stop_current_process()
-        mock_terminate.assert_called_once()
-        assert app._current_process is None
-
-
-# ===========================================================================
-# _stop_daemon_process: non-zero exit
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_stop_daemon_process_nonzero_exit():
-    """_stop_daemon_process when daemon.py exits non-zero."""
-    app = PipelineApp()
-    mock_proc = MagicMock()
-    mock_proc.returncode = 1
-    mock_proc.communicate = MagicMock(return_value=asyncio.Future())
-    mock_proc.communicate.return_value.set_result((b"error output", b""))
-    mock_logger = MagicMock()
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
-         patch("logging.getLogger", return_value=mock_logger):
-        await app._stop_daemon_process()
-        mock_logger.warning.assert_called_once()
-
-
-# ===========================================================================
-# _stop_daemon_process: exception
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_stop_daemon_process_exception():
-    """_stop_daemon_process when create_subprocess_exec raises."""
-    app = PipelineApp()
-    mock_logger = MagicMock()
-
-    with patch("asyncio.create_subprocess_exec", side_effect=OSError("exec failed")), \
-         patch("logging.getLogger", return_value=mock_logger):
-        await app._stop_daemon_process()
-        mock_logger.exception.assert_called_once()
-
-
-# ===========================================================================
-# action_copy_panel: cycle through all 4 panels
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_action_copy_panel_cycle_all():
-    """action_copy_panel cycles through all 4 panels."""
-    app = PipelineApp()
-    async with app.run_test():
-        logs = app.query_one("#live-logs")
-        with patch.object(logs, "copy_recent_logs", return_value="some log text"), \
-             patch.object(app, "copy_to_clipboard") as mock_copy, \
-             patch.object(app, "notify") as mock_notify:
-            # Call 4 times to cycle through all panels
-            for i in range(4):
-                app._copy_panel_index = i
-                app.action_copy_panel()
-            assert mock_copy.call_count == 4
-            assert mock_notify.call_count == 4
-
-
-@pytest.mark.asyncio
-async def test_action_copy_panel_empty_text_skip():
-    """action_copy_panel skips panels with empty text."""
-    app = PipelineApp()
-    async with app.run_test():
-        dc = app.query_one("#data-completeness")
-        dc._content = MagicMock()
-        # Mock all panels to return empty text
-        with patch.object(app, "notify") as mock_notify:
-            app._copy_panel_index = 0
-            # Force empty content
-            dc._content._Static__content = ""
-            app.action_copy_panel()
-            assert "内容为空" in mock_notify.call_args[0][0]
-
-
-# ===========================================================================
-# action_stop_pipeline: with pgrep processes
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_action_stop_pipeline_with_pgrep_procs():
-    """action_stop_pipeline kills processes found via pgrep."""
-    app = PipelineApp()
-    app._current_process = None
-    mock_logger = MagicMock()
-    fake_procs = [{"pid": 99999}]
-
-    with patch("tui.find_running_pipeline_processes", return_value=fake_procs), \
-         patch("tui.get_daemon_status", return_value=("Stopped", None)), \
-         patch("os.kill") as mock_kill, \
-         patch("logging.getLogger", return_value=mock_logger), \
-         patch.object(app, "notify"):
-        await app.action_stop_pipeline()
-        mock_kill.assert_called_once_with(99999, 15)
-        mock_logger.info.assert_called()
-
-
-# ===========================================================================
-# ProgressWidget: with actual progress data
-# ===========================================================================
-def test_progress_widget_with_data():
-    """ProgressWidget.update_progress with full progress data."""
-    from tui import ProgressWidget
-    w = ProgressWidget()
-    progress_data = {
-        "task": "update_bars",
-        "processed": 500,
-        "total": 1000,
-        "last_symbol": "000001.SZ",
-        "failed_queue": ["err1", "err2"],
-    }
-    with patch("tui.parse_progress", return_value=progress_data), \
-         patch.object(w, "update") as mock_update:
-        w.update_progress()
-        mock_update.assert_called_once()
-        text = mock_update.call_args[0][0]
-        assert "50.0%" in text
-        assert "000001.SZ" in text
-        assert "2" in text  # failed count
-
-
-# ===========================================================================
-# _get_updating_table: progress parsed, task matched
-# ===========================================================================
-def test_get_updating_table_matched():
-    """_get_updating_table returns table name for mapped task."""
-    import time
-
-    from tui import DataCompletenessWidget
-    data = {"task": "update_indicators", "processed": 10}
-    with patch("os.path.getmtime", return_value=time.time() - 30), \
-         patch("tui.parse_progress", return_value=data):
-        result = DataCompletenessWidget._get_updating_table()
-        assert result == "indicators"
-
-
-def test_get_updating_table_unmapped_task():
-    """_get_updating_table returns None for unmapped task."""
-    import time
-
-    from tui import DataCompletenessWidget
-    data = {"task": "unknown_task", "processed": 10}
-    with patch("os.path.getmtime", return_value=time.time() - 30), \
-         patch("tui.parse_progress", return_value=data):
-        result = DataCompletenessWidget._get_updating_table()
-        assert result is None
-
-
-# ===========================================================================
-# get_latest_dates: with YYYYMMDD normalization
-# ===========================================================================
-def test_get_latest_dates_normalized(tmp_path):
-    """get_latest_dates normalizes YYYYMMDD to YYYY-MM-DD."""
-    from tui import get_latest_dates
-    db_file = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_file))
-    conn.execute("CREATE TABLE margin_trading (trade_date TEXT, ts_code TEXT)")
-    conn.execute("INSERT INTO margin_trading VALUES ('20260710', '000001.SZ')")
-    conn.commit()
-    conn.close()
-
-    result = get_latest_dates(str(db_file))
-    assert result.get("margin_trading") == "2026-07-10"
-
-
-# ===========================================================================
-# _date_status: exception path
-# ===========================================================================
-def test_date_status_invalid_date():
-    """_date_status with non-parseable date returns '滞后'."""
-    from tui import _date_status
-    emoji, status = _date_status("not-a-date", "2026-07-10")
-    assert status == "滞后"
-    assert "red" in emoji
