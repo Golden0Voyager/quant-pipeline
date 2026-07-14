@@ -48,6 +48,9 @@ class MockDatabase:
         self._record("get_stock_list")
         return pd.DataFrame({"code": ["000001"], "name": ["平安银行"]})
 
+    def save_stock_list(self, df: pd.DataFrame) -> None:
+        self._record("save_stock_list", df)
+
     def get_daily_bars(self, symbol: str) -> pd.DataFrame:
         self._record("get_daily_bars", symbol)
         return pd.DataFrame({"open": [1.0], "close": [2.0]})
@@ -58,22 +61,13 @@ class MockDatabase:
     def save_indicators(self, symbol: str, df: pd.DataFrame) -> None:
         self._record("save_indicators", symbol, df)
 
-    def save_fundamentals(self, symbol: str, data: dict) -> None:
-        self._record("save_fundamentals", symbol, data)
-
     def save_fundamentals_batch(self, records: list[dict]) -> int:
         self._record("save_fundamentals_batch", records)
         return len(records)
 
-    def save_fund_flow(self, symbol: str, data: dict) -> None:
-        self._record("save_fund_flow", symbol, data)
-
     def save_fund_flow_batch(self, records: list[dict]) -> int:
         self._record("save_fund_flow_batch", records)
         return len(records)
-
-    def save_margin_trading(self, symbol: str, data: dict) -> None:
-        self._record("save_margin_trading", symbol, data)
 
     def save_margin_trading_batch(self, records: list[dict]) -> int:
         self._record("save_margin_trading_batch", records)
@@ -83,9 +77,6 @@ class MockDatabase:
         self._record("get_margin_trading", symbol, date=date)
         return {"symbol": symbol, "date": date}
 
-    def save_dragon_tiger(self, symbol: str, data: dict) -> None:
-        self._record("save_dragon_tiger", symbol, data)
-
     def save_dragon_tiger_batch(self, records: list[dict]) -> int:
         self._record("save_dragon_tiger_batch", records)
         return len(records)
@@ -94,22 +85,13 @@ class MockDatabase:
         self._record("get_dragon_tiger", symbol, date=date)
         return {"symbol": symbol, "date": date}
 
-    def save_shareholder_count(self, symbol: str, data: dict) -> None:
-        self._record("save_shareholder_count", symbol, data)
-
     def save_shareholder_count_batch(self, records: list[dict]) -> int:
         self._record("save_shareholder_count_batch", records)
         return len(records)
 
-    def save_quarterly_financials(self, symbol: str, data: dict) -> None:
-        self._record("save_quarterly_financials", symbol, data)
-
     def save_quarterly_financials_batch(self, records: list[dict]) -> int:
         self._record("save_quarterly_financials_batch", records)
         return len(records)
-
-    def save_block_trade(self, symbol: str, data: dict) -> None:
-        self._record("save_block_trade", symbol, data)
 
     def save_block_trade_batch(self, records: list[dict]) -> int:
         self._record("save_block_trade_batch", records)
@@ -118,9 +100,6 @@ class MockDatabase:
     def get_block_trade(self, symbol: str, date: str | None = None) -> dict | None:
         self._record("get_block_trade", symbol, date=date)
         return {"symbol": symbol, "date": date}
-
-    def save_sector_fund_flow(self, sector_name: str, data: dict) -> None:
-        self._record("save_sector_fund_flow", sector_name, data)
 
     def save_sector_fund_flow_batch(self, records: list[dict]) -> int:
         self._record("save_sector_fund_flow_batch", records)
@@ -183,6 +162,30 @@ class MockDatabase:
     def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         self._record("watchlist_get_all", date=status)
         return pd.DataFrame({"ts_code": ["000001.SZ"], "status": ["active"]})
+
+    def save_chip_distribution_batch(self, records: list[dict]) -> int:
+        self._record("save_chip_distribution_batch", records)
+        return len(records)
+
+    def get_chip_distribution(self, symbol: str, date: str | None = None) -> dict | None:
+        self._record("get_chip_distribution", symbol, date=date)
+        return {"symbol": symbol, "date": date}
+
+    def get_chip_distribution_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        self._record("get_chip_distribution_batch", stock_list)
+        return {"000001.SZ": {"symbol": "000001.SZ"}}
+
+    def save_chip_distribution_em_batch(self, records: list[dict]) -> int:
+        self._record("save_chip_distribution_em_batch", records)
+        return len(records)
+
+    def get_chip_distribution_em_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        self._record("get_chip_distribution_em_batch", stock_list)
+        return {"000001.SZ": {"symbol": "000001.SZ"}}
 
 
 class MockDataLoader:
@@ -288,34 +291,25 @@ def test_database_interface_contract():
     assert not bars.empty
 
     sample_df = pd.DataFrame({"open": [1.0], "close": [2.0]})
+    db.save_stock_list(sample_df)
     db.save_daily_bars("000001.SZ", sample_df)
     db.save_indicators("000001.SZ", sample_df)
 
-    db.save_fundamentals("000001.SZ", {"pe": 10.0})
     assert db.save_fundamentals_batch([{"pe": 10.0}]) == 1
-
-    db.save_fund_flow("000001.SZ", {"main": 100.0})
     assert db.save_fund_flow_batch([{"main": 100.0}]) == 1
 
-    db.save_margin_trading("000001.SZ", {"balance": 1.0})
     assert db.save_margin_trading_batch([{"balance": 1.0}]) == 1
     assert db.get_margin_trading("000001.SZ", "2024-01-01") is not None
 
-    db.save_dragon_tiger("000001.SZ", {"amount": 1.0})
     assert db.save_dragon_tiger_batch([{"amount": 1.0}]) == 1
     assert db.get_dragon_tiger("000001.SZ", "2024-01-01") is not None
 
-    db.save_shareholder_count("000001.SZ", {"count": 1000})
     assert db.save_shareholder_count_batch([{"count": 1000}]) == 1
-
-    db.save_quarterly_financials("000001.SZ", {"revenue": 1e9})
     assert db.save_quarterly_financials_batch([{"revenue": 1e9}]) == 1
 
-    db.save_block_trade("000001.SZ", {"price": 10.0})
     assert db.save_block_trade_batch([{"price": 10.0}]) == 1
     assert db.get_block_trade("000001.SZ", "2024-01-01") is not None
 
-    db.save_sector_fund_flow("bank", {"inflow": 100.0})
     assert db.save_sector_fund_flow_batch([{"inflow": 100.0}]) == 1
     assert db.get_sector_fund_flow("bank", "2024-01-01") is not None
 
@@ -336,6 +330,18 @@ def test_database_interface_contract():
     assert db.save_us_treasury_batch([{"yield": 4.0}]) == 1
 
     assert not db.watchlist_get_all().empty
+
+    assert db.save_chip_distribution_batch([{"symbol": "000001.SZ"}]) == 1
+    assert db.get_chip_distribution("000001.SZ", "2024-01-01") is not None
+    dist_batch = db.get_chip_distribution_batch(["000001.SZ"])
+    assert "000001.SZ" in dist_batch
+    assert db.save_chip_distribution_em_batch([{"symbol": "000001.SZ"}]) == 1
+    em_batch = db.get_chip_distribution_em_batch(["000001.SZ"])
+    assert "000001.SZ" in em_batch
+
+    # 验证 ProviderFactory.get_db() 返回的对象符合 DatabaseInterface 契约
+    ProviderFactory._db_provider = db
+    assert ProviderFactory.get_db() is db
 
 
 def test_data_loader_interface_contract():

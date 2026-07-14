@@ -395,13 +395,14 @@ def _normalize_date(value: object) -> str | None:
     """将日期/报告期归一化为 YYYY-MM-DD。
 
     部分表（margin_trading、dragon_tiger、block_trade、shareholder_count、
-    quarterly_financials）的日期列以 YYYYMMDD 无横线格式存储，需归一化后
+    quarterly_financials）的日期列以 YYYYMMDD 无横线格式存储；
+    chip_distribution 等表以 YYYY-MM-DD HH:MM:SS 格式存储。需归一化后
     才能与期望日做新鲜度比较，否则会被 _date_status 误判为滞后。
     """
     if value is None:
         return None
     s = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -796,6 +797,37 @@ class DataCompletenessWidget(VerticalScroll):
         except OSError:
             return None
 
+    # 数据新鲜度排序权重：数字越小越靠前，滞后/无数据沉底
+    _STATUS_ORDER: dict[str, int] = {
+        "更新中": 0,
+        "最新": 1,
+        "延迟发布": 2,
+        "按月更新": 2,
+        "按季更新": 2,
+        "略滞后": 3,
+        "滞后": 4,
+        "无数据": 5,
+    }
+
+    @classmethod
+    def _get_status_for_table(
+        cls,
+        tbl: str,
+        latest: str | None,
+        expected_date: str,
+        updating_table: str | None,
+    ) -> tuple[str, str]:
+        """返回指定表的新鲜度标记和状态标签。"""
+        if tbl == updating_table:
+            return "[cyan]●[/cyan]", "更新中"
+        if tbl in MONTHLY_TABLES and latest:
+            return "[yellow]●[/yellow]", "按月更新"
+        if tbl in QUARTERLY_TABLES and latest:
+            return "[dark_orange]●[/dark_orange]", "按季更新"
+        if tbl in DELAYED_PUBLISH_TABLES and latest:
+            return "[green]●[/green]", "延迟发布"
+        return _date_status(latest, expected_date)
+
     def _rebuild_content(self) -> None:
         counts = self._counts
         latest_dates = self._latest_dates
@@ -830,21 +862,22 @@ class DataCompletenessWidget(VerticalScroll):
             "",
         ]
 
-        for tbl, label in self.TABLE_LABELS.items():
+        # 先计算每个表的状态与排序键，再按新鲜度排序（滞后/无数据沉底）
+        items: list[tuple[int, int, str, str, int, str | None, str, str]] = []
+        for idx, (tbl, label) in enumerate(self.TABLE_LABELS.items()):
             n = counts.get(tbl, 0)
+            latest = latest_dates.get(tbl)
+            emoji, status = self._get_status_for_table(
+                tbl, latest, expected_date, updating_table
+            )
+            order = self._STATUS_ORDER.get(status, 3)
+            items.append((order, idx, tbl, label, n, latest, emoji, status))
+
+        items.sort(key=lambda x: (x[0], x[1]))
+
+        for _, _, tbl, label, n, latest, emoji, status in items:
             formatted = format_count(n)
             cn_formatted = format_chinese_magnitude(n)
-            latest = latest_dates.get(tbl)
-            if tbl == updating_table:
-                emoji, status = "[cyan]●[/cyan]", "更新中"
-            elif tbl in MONTHLY_TABLES and latest:
-                emoji, status = "[yellow]●[/yellow]", "按月更新"
-            elif tbl in QUARTERLY_TABLES and latest:
-                emoji, status = "[dark_orange]●[/dark_orange]", "按季更新"
-            elif tbl in DELAYED_PUBLISH_TABLES and latest:
-                emoji, status = "[green]●[/green]", "延迟发布"
-            else:
-                emoji, status = _date_status(latest, expected_date)
             date_str = f"[gray]{latest or '—'}[/gray]"
             status_str = f"{emoji} [bold]{status}[/bold]".strip()
 
