@@ -586,8 +586,9 @@ def update_bars(
     loader: DataLoaderInterface,
     limit: int = None,
     resume: bool = False,
+    symbols: list[str] | None = None,
 ) -> dict:
-    """分批增量更新所有股票的日线数据，支持断点续传。"""
+    """分批增量更新指定或所有股票的日线数据，支持断点续传。"""
     logger.info("=" * 60)
     logger.info("📈 任务: 更新日线数据")
     logger.info("=" * 60)
@@ -599,18 +600,22 @@ def update_bars(
             "东财接口可能返回 RemoteDisconnected，建议等到 16:00 后再运行"
         )
 
-    stocks = db.get_stock_list()
-    if stocks.empty:
-        logger.error("❌ 股票列表为空")
-        return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+    if symbols:
+        stock_codes = [s for s in symbols if not should_skip_beijing(s)]
+        bj_count = len(symbols) - len(stock_codes)
+    else:
+        stocks = db.get_stock_list()
+        if stocks.empty:
+            logger.error("❌ 股票列表为空")
+            return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+        stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+        bj_count = len(stocks) - len(stock_codes)
 
-    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     if limit:
         stock_codes = stock_codes[:limit]
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")
 
     total = len(stock_codes)
-    bj_count = len(stocks) - total
     if bj_count > 0:
         logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
     else:
@@ -1517,12 +1522,18 @@ def update_chip_distribution_em(
 # ===========================================================================
 
 def update_fundamentals(
-    db: DatabaseInterface, loader: DataLoaderInterface
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    symbols: list[str] | None = None,
 ) -> dict:
-    """批量获取全市场估值数据并保存到 fundamentals 表。"""
+    """批量获取指定或全市场估值数据并保存到 fundamentals 表。"""
     logger.info("\n" + "=" * 60)
     logger.info("📊 任务: 批量获取估值数据")
     logger.info("=" * 60)
+
+    target_symbols = set(symbols) if symbols else None
+    if target_symbols:
+        logger.info(f"🎯 指定模式：只处理 {len(target_symbols)} 只股票的估值数据")
 
     today = datetime.now().strftime("%Y-%m-%d")
     # 尝试今天，如果没数据回退到最近交易日
@@ -1532,10 +1543,11 @@ def update_fundamentals(
         if d.weekday() < 5:
             trade_dates.append(d.strftime("%Y-%m-%d"))
 
-    existing_count = db.count_fundamentals_for_date(today)
-    if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
-        logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
-        return {"saved": 0, "total": 0, "skipped": True}
+    if target_symbols is None:
+        existing_count = db.count_fundamentals_for_date(today)
+        if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
+            logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
+            return {"saved": 0, "total": 0, "skipped": True}
 
     import requests as _req
 
@@ -1587,6 +1599,8 @@ def update_fundamentals(
         try:
             code = str(rec.get("SECURITY_CODE", "")).strip()
             if not code:
+                continue
+            if target_symbols is not None and code not in target_symbols:
                 continue
             trade_date = str(rec.get("TRADE_DATE", today))[:10]
             batch_records.append({
@@ -1736,11 +1750,19 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 # 任务 4: 批量获取全市场资金流向
 # ===========================================================================
 
-def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
-    """批量获取全市场资金流向并保存。"""
+def update_fund_flow(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    symbols: list[str] | None = None,
+) -> dict:
+    """批量获取指定或全市场资金流向并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("💰 任务: 批量获取资金流向")
     logger.info("=" * 60)
+
+    target_symbols = set(symbols) if symbols else None
+    if target_symbols:
+        logger.info(f"🎯 指定模式：只处理 {len(target_symbols)} 只股票的资金流向")
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -1755,6 +1777,8 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
             try:
                 code = str(row.get("code", "")).strip()
                 if not code:
+                    continue
+                if target_symbols is not None and code not in target_symbols:
                     continue
 
                 data = {
@@ -1809,11 +1833,18 @@ def _safe_fetch_margin_detail(fetcher, date: str, exchange: str) -> pd.DataFrame
         raise
 
 
-def update_margin_trading(db: DatabaseInterface) -> dict:
+def update_margin_trading(
+    db: DatabaseInterface, symbols: list[str] | None = None
+) -> dict:
     """批量获取昨日全市场融资融券数据并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("📈 任务: 批量获取融资融券")
     logger.info("=" * 60)
+
+    if symbols:
+        logger.info(
+            f"🎯 --symbols 已接受，但融资融券任务尚未实现按股票过滤（共 {len(symbols)} 只）"
+        )
 
     if ak is None:
         logger.error("❌ akshare 未安装")
@@ -1873,11 +1904,18 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
 # 任务 6: 批量获取龙虎榜数据
 # ===========================================================================
 
-def update_dragon_tiger(db: DatabaseInterface) -> dict:
+def update_dragon_tiger(
+    db: DatabaseInterface, symbols: list[str] | None = None
+) -> dict:
     """批量获取昨日龙虎榜数据并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("🐉 任务: 批量获取龙虎榜")
     logger.info("=" * 60)
+
+    if symbols:
+        logger.info(
+            f"🎯 --symbols 已接受，但龙虎榜任务尚未实现按股票过滤（共 {len(symbols)} 只）"
+        )
 
     if ak is None:
         logger.error("❌ akshare 未安装")
@@ -1924,11 +1962,18 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
 # 任务 7: 批量获取大宗交易数据
 # ===========================================================================
 
-def update_block_trade(db: DatabaseInterface) -> dict:
+def update_block_trade(
+    db: DatabaseInterface, symbols: list[str] | None = None
+) -> dict:
     """批量获取昨日大宗交易数据并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("📦 任务: 批量获取大宗交易")
     logger.info("=" * 60)
+
+    if symbols:
+        logger.info(
+            f"🎯 --symbols 已接受，但大宗交易任务尚未实现按股票过滤（共 {len(symbols)} 只）"
+        )
 
     if ak is None:
         logger.error("❌ akshare 未安装")
@@ -2043,11 +2088,18 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
 # 任务 8.5: 保存历史估值快照
 # ===========================================================================
 
-def update_historical_valuation(db: DatabaseInterface) -> dict:
+def update_historical_valuation(
+    db: DatabaseInterface, symbols: list[str] | None = None
+) -> dict:
     """把最新 fundamentals 估值数据快照写入 historical_valuation，用于分位数计算。"""
     logger.info("\n" + "=" * 60)
     logger.info("📈 任务: 保存历史估值快照")
     logger.info("=" * 60)
+
+    if symbols:
+        logger.info(
+            f"🎯 --symbols 已接受，但历史估值快照任务尚未实现按股票过滤（共 {len(symbols)} 只）"
+        )
 
     try:
         df = db.get_fundamentals_batch()
@@ -2313,11 +2365,18 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
 # 任务 9: 批量获取股东户数（季度）
 # ===========================================================================
 
-def update_shareholder_count(db: DatabaseInterface) -> dict:
+def update_shareholder_count(
+    db: DatabaseInterface, symbols: list[str] | None = None
+) -> dict:
     """批量获取最新季度股东户数并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("👥 任务: 批量获取股东户数")
     logger.info("=" * 60)
+
+    if symbols:
+        logger.info(
+            f"🎯 --symbols 已接受，但股东户数任务尚未实现按股票过滤（共 {len(symbols)} 只）"
+        )
 
     if ak is None:
         logger.error("❌ akshare 未安装")
@@ -2371,8 +2430,12 @@ def update_shareholder_count(db: DatabaseInterface) -> dict:
 # 任务 10: 批量获取季度财务数据
 # ===========================================================================
 
-def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
-    """批量获取全市场季度财务数据并保存。"""
+def update_quarterly_financials(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    symbols: list[str] | None = None,
+) -> dict:
+    """批量获取指定或全市场季度财务数据并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("📋 任务: 批量获取季度财务数据")
     logger.info("=" * 60)
@@ -2381,17 +2444,21 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "failed": 0, "total": 0, "error": "akshare not installed"}
 
-    stocks = db.get_stock_list()
-    if stocks.empty:
-        logger.error("❌ 股票列表为空")
-        return {"saved": 0, "failed": 0, "total": 0}
+    if symbols:
+        stock_codes = [c for c in symbols if not should_skip_beijing(c)]
+        logger.info(f"🎯 指定模式：只处理 {len(stock_codes)} 只股票的季度财务数据")
+    else:
+        stocks = db.get_stock_list()
+        if stocks.empty:
+            logger.error("❌ 股票列表为空")
+            return {"saved": 0, "failed": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
-    existing_codes = db.get_distinct_codes("quarterly_financials")
-    filtered_codes = [c for c in stock_codes if c not in existing_codes]
-    if len(filtered_codes) < len(stock_codes):
-        logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
-    stock_codes = filtered_codes
+        stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+        existing_codes = db.get_distinct_codes("quarterly_financials")
+        filtered_codes = [c for c in stock_codes if c not in existing_codes]
+        if len(filtered_codes) < len(stock_codes):
+            logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
+        stock_codes = filtered_codes
     total = len(stock_codes)
     saved = 0
     failed = 0
@@ -3572,8 +3639,26 @@ def main():
         default=os.getenv("QUANT_DB_PATH", DEFAULT_DB_PATH),
         help="数据库路径（默认从环境变量 QUANT_DB_PATH 读取）",
     )
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default=None,
+        help="逗号分隔的股票代码列表，或包含一行一个代码的文件路径。指定后只处理这些股票。",
+    )
 
     args = parser.parse_args()
+
+    symbols_arg = args.symbols
+    symbols: list[str] | None = None
+    if symbols_arg:
+        if Path(symbols_arg).exists():
+            symbols = [
+                line.strip()
+                for line in Path(symbols_arg).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        else:
+            symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
     # 进程锁：防止多实例同时运行（health_check 除外）
     if args.task != "health_check":
@@ -3596,47 +3681,53 @@ def main():
     elif args.task == "update_stock_list":
         update_stock_list(db)
     elif args.task == "update_bars":
-        update_bars(db, loader, limit=args.limit, resume=args.resume)
+        update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols)
     elif args.task == "update_indicators":
-        if args.force:
+        if args.force or symbols:
             conn_kw = sqlite3.connect(str(db.db_path))
-            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            if symbols:
+                all_symbols = symbols
+            else:
+                all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
             conn_kw.close()
-            logger.info(f"🔁 --force 模式：强制全量重算 {len(all_symbols)} 只股票的技术指标")
+            logger.info(f"🔁 强制/指定股票模式：重算 {len(all_symbols)} 只股票的技术指标")
             update_indicators(db, engine, symbols_to_update=all_symbols)
         else:
             update_indicators(db, engine)
     elif args.task == "update_chip_distribution":
-        if args.force:
+        if args.force or symbols:
             conn_kw = sqlite3.connect(str(db.db_path))
-            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            if symbols:
+                all_symbols = symbols
+            else:
+                all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
             conn_kw.close()
-            logger.info(f"🔁 --force 模式：强制重算 {len(all_symbols)} 只股票的筹码分布")
+            logger.info(f"🔁 强制/指定股票模式：重算 {len(all_symbols)} 只股票的筹码分布")
             update_chip_distribution(db, symbols_to_update=all_symbols)
         else:
             update_chip_distribution(db)
     elif args.task == "update_chip_distribution_em":
         update_chip_distribution_em(db)
     elif args.task == "update_fundamentals":
-        update_fundamentals(db, loader)
+        update_fundamentals(db, loader, symbols=symbols)
     elif args.task == "update_market_snapshot":
         update_market_snapshot(db)
     elif args.task == "update_fund_flow":
-        update_fund_flow(db, loader)
+        update_fund_flow(db, loader, symbols=symbols)
     elif args.task == "update_margin_trading":
-        update_margin_trading(db)
+        update_margin_trading(db, symbols=symbols)
     elif args.task == "update_dragon_tiger":
-        update_dragon_tiger(db)
+        update_dragon_tiger(db, symbols=symbols)
     elif args.task == "update_block_trade":
-        update_block_trade(db)
+        update_block_trade(db, symbols=symbols)
     elif args.task == "update_sector_fund_flow":
         update_sector_fund_flow(db)
     elif args.task == "update_shareholder_count":
-        update_shareholder_count(db)
+        update_shareholder_count(db, symbols=symbols)
     elif args.task == "update_quarterly_financials":
-        update_quarterly_financials(db, loader)
+        update_quarterly_financials(db, loader, symbols=symbols)
     elif args.task == "update_historical_valuation":
-        update_historical_valuation(db)
+        update_historical_valuation(db, symbols=symbols)
     elif args.task == "update_sector_industry":
         update_sector_industry(db)
     elif args.task == "update_industry":
