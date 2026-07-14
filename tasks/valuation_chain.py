@@ -44,9 +44,9 @@ def should_skip_beijing(symbol: str) -> bool:
 
 
 def update_fundamentals(
-    db: DatabaseInterface, loader: DataLoaderInterface
+    db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None
 ) -> dict:
-    """批量获取全市场估值数据并保存到 fundamentals 表。"""
+    """批量获取全市场（或指定股票）估值数据并保存到 fundamentals 表。"""
     logger.info("\n" + "=" * 60)
     logger.info("📊 任务: 批量获取估值数据")
     logger.info("=" * 60)
@@ -137,6 +137,12 @@ def update_fundamentals(
         except Exception as e:
             logger.debug(f"  保存估值失败: {e}")
             continue
+
+    if symbols:
+        symbol_set = set(symbols)
+        before = len(batch_records)
+        batch_records = [r for r in batch_records if r["ts_code"] in symbol_set]
+        logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
 
     try:
         saved = db.save_fundamentals_batch(batch_records) if batch_records else 0
@@ -264,8 +270,10 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
-def update_historical_valuation(db: DatabaseInterface) -> dict:
+def update_historical_valuation(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
     """把最新 fundamentals 估值数据快照写入 historical_valuation，用于分位数计算。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("📈 任务: 保存历史估值快照")
     logger.info("=" * 60)
@@ -275,6 +283,12 @@ def update_historical_valuation(db: DatabaseInterface) -> dict:
         if df.empty:
             logger.warning("⚠️  fundamentals 为空，跳过历史估值快照")
             return {"saved": 0, "total": 0}
+
+        if symbols:
+            symbol_set = set(symbols)
+            before = len(df)
+            df = df[df["ts_code"].isin(symbol_set)]
+            logger.info(f"  --symbols 过滤：{len(df)}/{before} 只")
 
         saved = 0
         for _, row in df.iterrows():

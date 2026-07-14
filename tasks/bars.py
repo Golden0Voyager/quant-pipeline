@@ -75,8 +75,9 @@ def update_bars(
     loader: DataLoaderInterface,
     limit: int = None,
     resume: bool = False,
+    symbols: list[str] | None = None,
 ) -> dict:
-    """分批增量更新所有股票的日线数据，支持断点续传。"""
+    """分批增量更新指定或所有股票的日线数据，支持断点续传。"""
     logger.info("=" * 60)
     logger.info("📈 任务: 更新日线数据")
     logger.info("=" * 60)
@@ -88,12 +89,16 @@ def update_bars(
             "东财接口可能返回 RemoteDisconnected，建议等到 16:00 后再运行"
         )
 
-    stocks = db.get_stock_list()
-    if stocks.empty:
-        logger.error("❌ 股票列表为空")
-        return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
-
-    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+    if symbols:
+        stock_codes = [s for s in symbols if not should_skip_beijing(s)]
+        bj_count = len(symbols) - len(stock_codes)
+    else:
+        stocks = db.get_stock_list()
+        if stocks.empty:
+            logger.error("❌ 股票列表为空")
+            return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+        stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+        bj_count = len(stocks) - len(stock_codes)
     if limit:
         stock_codes = stock_codes[:limit]
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")

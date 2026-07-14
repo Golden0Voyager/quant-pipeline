@@ -24,8 +24,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def update_shareholder_count(db: DatabaseInterface) -> dict:
+def update_shareholder_count(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
     """批量获取最新季度股东户数并保存。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("👥 任务: 批量获取股东户数")
     logger.info("=" * 60)
@@ -72,6 +74,12 @@ def update_shareholder_count(db: DatabaseInterface) -> dict:
             except Exception:
                 continue
 
+        if symbols:
+            symbol_set = set(symbols)
+            before = len(batch_records)
+            batch_records = [r for r in batch_records if r["ts_code"] in symbol_set]
+            logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
+
         saved = db.save_shareholder_count_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 股东户数保存完成: {saved}/{len(df)} ({period})")
         return {"saved": saved, "total": len(df)}
@@ -80,8 +88,10 @@ def update_shareholder_count(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": 0, "error": str(e)}
 
 
-def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
-    """批量获取全市场季度财务数据并保存。"""
+def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
+    """批量获取全市场（或指定股票）季度财务数据并保存。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("📋 任务: 批量获取季度财务数据")
     logger.info("=" * 60)
@@ -90,17 +100,20 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "failed": 0, "total": 0, "error": "akshare not installed"}
 
-    stocks = db.get_stock_list()
-    if stocks.empty:
-        logger.error("❌ 股票列表为空")
-        return {"saved": 0, "failed": 0, "total": 0}
+    if symbols:
+        stock_codes = symbols[:]
+    else:
+        stocks = db.get_stock_list()
+        if stocks.empty:
+            logger.error("❌ 股票列表为空")
+            return {"saved": 0, "failed": 0, "total": 0}
 
-    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
-    existing_codes = db.get_distinct_codes("quarterly_financials")
-    filtered_codes = [c for c in stock_codes if c not in existing_codes]
-    if len(filtered_codes) < len(stock_codes):
-        logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
-    stock_codes = filtered_codes
+        stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+        existing_codes = db.get_distinct_codes("quarterly_financials")
+        filtered_codes = [c for c in stock_codes if c not in existing_codes]
+        if len(filtered_codes) < len(stock_codes):
+            logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
+        stock_codes = filtered_codes
     total = len(stock_codes)
     saved = 0
     failed = 0

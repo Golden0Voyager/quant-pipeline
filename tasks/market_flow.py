@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 
-def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
-    """批量获取全市场资金流向并保存。"""
+def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
+    """批量获取全市场（或指定股票）资金流向并保存。"""
     logger.info("\n" + "=" * 60)
     logger.info("💰 任务: 批量获取资金流向")
     logger.info("=" * 60)
@@ -72,6 +72,12 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface) -> dict
             except Exception as e:
                 logger.debug(f"  保存资金流失败: {e}")
                 continue
+
+        if symbols:
+            symbol_set = set(symbols)
+            before = len(batch_records)
+            batch_records = [r for r in batch_records if r["symbol"] in symbol_set]
+            logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
 
         saved = db.save_fund_flow_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 资金流向保存完成: {saved}/{len(df)} 只")
@@ -120,8 +126,10 @@ def _safe_fetch_margin_detail(fetcher, date: str, exchange: str) -> pd.DataFrame
         raise
 
 
-def update_margin_trading(db: DatabaseInterface) -> dict:
-    """批量获取昨日全市场融资融券数据并保存。"""
+def update_margin_trading(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
+    """批量获取昨日全市场（或指定股票）融资融券数据并保存。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("📈 任务: 批量获取融资融券")
     logger.info("=" * 60)
@@ -175,6 +183,12 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
             except Exception:
                 continue
 
+    if symbols:
+        symbol_set = set(symbols)
+        before = len(batch_records)
+        batch_records = [r for r in batch_records if r["ts_code"] in symbol_set]
+        logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
+
     saved = db.save_margin_trading_batch(batch_records) if batch_records else 0
     logger.info(f"✅ 融资融券保存完成: {saved}/{total}")
     return {"saved": saved, "total": total}
@@ -185,8 +199,10 @@ def update_margin_trading(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
-def update_dragon_tiger(db: DatabaseInterface) -> dict:
+def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
     """批量获取昨日龙虎榜数据并保存。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("🐉 任务: 批量获取龙虎榜")
     logger.info("=" * 60)
@@ -224,6 +240,12 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
             except Exception:
                 continue
 
+        if symbols:
+            symbol_set = set(symbols)
+            before = len(batch_records)
+            batch_records = [r for r in batch_records if r["ts_code"] in symbol_set]
+            logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
+
         saved = db.save_dragon_tiger_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 龙虎榜保存完成: {saved}/{len(df)}")
         return {"saved": saved, "total": len(df)}
@@ -237,8 +259,10 @@ def update_dragon_tiger(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
-def update_block_trade(db: DatabaseInterface) -> dict:
+def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
     """批量获取昨日大宗交易数据并保存。"""
+    if symbols:
+        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("📦 任务: 批量获取大宗交易")
     logger.info("=" * 60)
@@ -274,6 +298,12 @@ def update_block_trade(db: DatabaseInterface) -> dict:
                 })
             except Exception:
                 continue
+
+        if symbols:
+            symbol_set = set(symbols)
+            before = len(batch_records)
+            batch_records = [r for r in batch_records if r["ts_code"] in symbol_set]
+            logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
 
         saved = db.save_block_trade_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 大宗交易保存完成: {saved}/{len(df)}")

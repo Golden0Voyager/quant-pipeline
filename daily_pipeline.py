@@ -228,8 +228,26 @@ def main():
         default=os.getenv("QUANT_DB_PATH", DEFAULT_DB_PATH),
         help="数据库路径（默认从环境变量 QUANT_DB_PATH 读取）",
     )
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default=None,
+        help="逗号分隔的股票代码列表，或包含一行一个代码的文件路径。指定后只处理这些股票。",
+    )
 
     args = parser.parse_args()
+
+    symbols_arg = args.symbols
+    symbols: list[str] | None = None
+    if symbols_arg:
+        if Path(symbols_arg).exists():
+            symbols = [
+                line.strip()
+                for line in Path(symbols_arg).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        else:
+            symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
     # 进程锁：防止多实例同时运行（health_check 除外）
     if args.task != "health_check":
@@ -252,47 +270,53 @@ def main():
     elif args.task == "update_stock_list":
         update_stock_list(db)
     elif args.task == "update_bars":
-        update_bars(db, loader, limit=args.limit, resume=args.resume)
+        update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols)
     elif args.task == "update_indicators":
-        if args.force:
+        if args.force or symbols:
             conn_kw = sqlite3.connect(str(db.db_path))
-            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            if symbols:
+                target_symbols = symbols
+            else:
+                target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
             conn_kw.close()
-            logger.info(f"🔁 --force 模式：强制全量重算 {len(all_symbols)} 只股票的技术指标")
-            update_indicators(db, engine, symbols_to_update=all_symbols)
+            logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的技术指标")
+            update_indicators(db, engine, symbols_to_update=target_symbols)
         else:
             update_indicators(db, engine)
     elif args.task == "update_chip_distribution":
-        if args.force:
+        if args.force or symbols:
             conn_kw = sqlite3.connect(str(db.db_path))
-            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            if symbols:
+                target_symbols = symbols
+            else:
+                target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
             conn_kw.close()
-            logger.info(f"🔁 --force 模式：强制重算 {len(all_symbols)} 只股票的筹码分布")
-            update_chip_distribution(db, symbols_to_update=all_symbols)
+            logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的筹码分布")
+            update_chip_distribution(db, symbols_to_update=target_symbols)
         else:
             update_chip_distribution(db)
     elif args.task == "update_chip_distribution_em":
         update_chip_distribution_em(db)
     elif args.task == "update_fundamentals":
-        update_fundamentals(db, loader)
+        update_fundamentals(db, loader, symbols=symbols)
     elif args.task == "update_market_snapshot":
         update_market_snapshot(db)
     elif args.task == "update_fund_flow":
-        update_fund_flow(db, loader)
+        update_fund_flow(db, loader, symbols=symbols)
     elif args.task == "update_margin_trading":
-        update_margin_trading(db)
+        update_margin_trading(db, symbols=symbols)
     elif args.task == "update_dragon_tiger":
-        update_dragon_tiger(db)
+        update_dragon_tiger(db, symbols=symbols)
     elif args.task == "update_block_trade":
-        update_block_trade(db)
+        update_block_trade(db, symbols=symbols)
     elif args.task == "update_sector_fund_flow":
         update_sector_fund_flow(db)
     elif args.task == "update_shareholder_count":
-        update_shareholder_count(db)
+        update_shareholder_count(db, symbols=symbols)
     elif args.task == "update_quarterly_financials":
-        update_quarterly_financials(db, loader)
+        update_quarterly_financials(db, loader, symbols=symbols)
     elif args.task == "update_historical_valuation":
-        update_historical_valuation(db)
+        update_historical_valuation(db, symbols=symbols)
     elif args.task == "update_sector_industry":
         update_sector_industry(db)
     elif args.task == "update_industry":
