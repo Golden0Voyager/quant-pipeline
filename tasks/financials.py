@@ -1,0 +1,384 @@
+"""
+财务数据更新任务
+────────────────
+从 daily_pipeline.py 提取：股东户数、季度财务数据、行业分类。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from datetime import datetime
+
+from core.utils import should_skip_beijing
+from interface import DatabaseInterface, DataLoaderInterface
+
+try:
+    import akshare as ak
+except ImportError:
+    ak = None
+
+logger = logging.getLogger(__name__)
+
+
+def update_shareholder_count(db: DatabaseInterface) -> dict:
+    """批量获取最新季度股东户数并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("👥 任务: 批量获取股东户数")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "total": 0, "error": "akshare not installed"}
+
+    # 计算最近的报告期（0331, 0630, 0930, 1231）
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    if month >= 11:
+        period = f"{year}0930"
+    elif month >= 8:
+        period = f"{year}0630"
+    elif month >= 5:
+        period = f"{year}0331"
+    else:
+        period = f"{year - 1}0930"
+
+    try:
+        df = ak.stock_hold_num_cninfo(date=period)
+        if df is None or df.empty:
+            logger.warning(f"⚠️  股东户数无数据 ({period})")
+            return {"saved": 0, "total": 0}
+
+        batch_records = []
+        for _, row in df.iterrows():
+            try:
+                code = str(row.get("证券代码", "")).strip()
+                if not code:
+                    continue
+                batch_records.append(
+                    {
+                        "ts_code": code,
+                        "report_date": period,
+                        "holder_count": row.get("本期股东人数"),
+                        "holder_count_change_pct": row.get("股东人数增幅"),
+                        "avg_shares_per_holder": row.get("本期人均持股数量"),
+                        "data_source": "akshare",
+                    }
+                )
+            except Exception:
+                continue
+
+        saved = db.save_shareholder_count_batch(batch_records) if batch_records else 0
+        logger.info(f"✅ 股东户数保存完成: {saved}/{len(df)} ({period})")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 股东户数获取失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface) -> dict:
+    """批量获取全市场季度财务数据并保存。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📋 任务: 批量获取季度财务数据")
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"saved": 0, "failed": 0, "total": 0, "error": "akshare not installed"}
+
+    stocks = db.get_stock_list()
+    if stocks.empty:
+        logger.error("❌ 股票列表为空")
+        return {"saved": 0, "failed": 0, "total": 0}
+
+    stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
+    existing_codes = db.get_distinct_codes("quarterly_financials")
+    filtered_codes = [c for c in stock_codes if c not in existing_codes]
+    if len(filtered_codes) < len(stock_codes):
+        logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
+    stock_codes = filtered_codes
+    total = len(stock_codes)
+    saved = 0
+    failed = 0
+    batch_chunk = 500
+
+    import pandas as _pd
+
+    def _extract_float(df, label):
+        try:
+            mask = df["指标"] == label
+            if mask.any():
+                val = df.loc[mask].iloc[:, 2]
+                if _pd.notna(val.iloc[0]):
+                    return float(val.iloc[0])
+        except Exception:
+            pass
+        return None
+
+    def _fetch_one(code: str) -> tuple[dict | None, bool]:
+        try:
+            time.sleep(0.03)  # 控制请求频率，降低被限流风险
+            df = ak.stock_financial_abstract(symbol=code)
+            if df is not None and not df.empty and len(df.columns) > 2:
+                record = {
+                    "ts_code": code,
+                    "report_period": str(df.columns[2]),
+                    "revenue": _extract_float(df, "营业总收入"),
+                    "net_profit": _extract_float(df, "归母净利润"),
+                    "operating_cashflow": _extract_float(df, "经营现金流量净额"),
+                    "roe": _extract_float(df, "净资产收益率(ROE)"),
+                    "gross_margin": _extract_float(df, "毛利率"),
+                    "net_margin": _extract_float(df, "销售净利率"),
+                    "revenue_growth": _extract_float(df, "营业总收入增长率"),
+                    "profit_growth": _extract_float(df, "归属母公司净利润增长率"),
+                    "debt_ratio": _extract_float(df, "资产负债率"),
+                    "eps": _extract_float(df, "基本每股收益"),
+                    "bps": _extract_float(df, "每股净资产"),
+                }
+                return record, False
+        except Exception as e:
+            logger.debug(f"  股票 {code} 失败: {e}")
+            return None, True
+        return None, False
+
+    batch_buffer: list[dict] = []
+    workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_code = {executor.submit(_fetch_one, code): code for code in stock_codes}
+        for i, future in enumerate(as_completed(future_to_code), 1):
+            record, is_failed = future.result()
+            if record:
+                batch_buffer.append(record)
+                saved += 1
+            if is_failed:
+                failed += 1
+
+            if len(batch_buffer) >= batch_chunk:
+                db.save_quarterly_financials_batch(batch_buffer)
+                batch_buffer.clear()
+
+            if i % 500 == 0:
+                logger.info(f"  进度: {i}/{total} (成功: {saved}, 失败: {failed})")
+
+    if batch_buffer:
+        db.save_quarterly_financials_batch(batch_buffer)
+
+    logger.info(f"✅ 季度财务数据保存完成: {saved}/{total} (失败: {failed})")
+    return {"saved": saved, "failed": failed, "total": total}
+
+
+def update_industry(db: DatabaseInterface) -> dict:
+    """
+    批量更新 stock_list.industry 列。
+
+    策略 A: eastmoney F10 CompanySurvey API (SZ/SH 主板/创业板/科创板)
+    提取 申万行业 (jbzl.sshy)。
+    策略 B (回退): AkShare stock_individual_info_em 接口。
+    策略 C (回退): Sina 财经个股资料页 (覆盖 BJ 及部分新上市股票)
+    使用 ThreadPoolExecutor 并发加速，但控制并发数以避免被限流。
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("🏢 任务: 更新行业分类 (F10 API)")
+    logger.info("=" * 60)
+
+    import sqlite3
+
+    import requests as _req
+
+    # 1. 读取需要更新的股票
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT code, market FROM stock_list WHERE industry IS NULL OR industry = '未分类'")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        logger.info("✅ 所有股票已有行业分类")
+        return {"saved": 0, "total": 0}
+
+    total = len(rows)
+    logger.info(f"📊 共 {total} 只股票需要更新行业")
+
+    # 2. 市场前缀映射
+    exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
+
+    # 3. 网络请求策略（依次降级）
+    # F10 限流探测标志：连续限流时整轮跳过 F10 API，避免浪费时间
+    _f10_blocked = threading.Event()
+
+    def _fetch_industry(code: str, market: str) -> tuple[str, str | None]:
+        prefix = exchange_map.get(market, "SZ")
+        api_code = f"{prefix}{code}"
+
+        if not _f10_blocked.is_set():
+            f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
+            for attempt in range(3):
+                session = None
+                try:
+                    session = _req.Session()
+                    session.proxies = {"http": None, "https": None}
+                    session.trust_env = False
+                    resp = session.get(
+                        f10_url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        jbzl = data.get("jbzl")
+                        if isinstance(jbzl, dict):
+                            industry = jbzl.get("sshy")
+                            if industry and industry != "N/A":
+                                return code, industry
+                    if resp.status_code in (403, 429, 503):
+                        time.sleep(2**attempt)
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(2**attempt)
+                finally:
+                    if session is not None:
+                        session.close()
+            # 3 次重试全部失败 → 判定被限流，后续跳过
+            _f10_blocked.set()
+        else:
+            logger.debug(f"  F10 API 已被限流，{code} 跳过直接走备用源")
+
+        if ak is not None:
+            try:
+                df = ak.stock_individual_info_em(symbol=code)
+                if df is not None and not df.empty:
+                    industry_row = df[df.iloc[:, 0] == "行业"]
+                    if not industry_row.empty:
+                        industry = str(industry_row.iloc[0, 1]).strip()
+                        if industry and industry != "nan":
+                            return code, industry
+            except Exception:
+                pass
+
+        try:
+            sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
+            session = _req.Session()
+            session.proxies = {"http": None, "https": None}
+            session.trust_env = False
+            resp = session.get(
+                sin_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            resp.encoding = "gb2312"
+            if resp.status_code == 200:
+                import re
+
+                m = re.search(
+                    r"所属行业板块</td>\s*</tr>\s*<tr>.*?<td[^>]*>([^<]+)",
+                    resp.text,
+                    re.DOTALL,
+                )
+                if m:
+                    industry = m.group(1).strip()
+                    if industry and "备注" not in industry:
+                        return code, industry
+        except Exception:
+            pass
+        finally:
+            session.close()
+
+        return code, None
+
+    # 4. 分批并发执行（防止单线程挂死导致整体卡住）
+    success_map: dict[str, str] = {}
+    fail_list: list[str] = []
+    processed = 0
+    batch_size = 50  # 减小批次，避免限流时损失过多
+    batch_timeout = 600  # 每批最多等 10 分钟（给重试留足时间）
+    batch_cooldown = 30  # 批间冷却 30s，降低被限流概率
+
+    max_workers = 4
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for batch_start in range(0, len(rows), batch_size):
+            batch = rows[batch_start : batch_start + batch_size]
+            fut_map = {}
+            for code, market in batch:
+                fut = pool.submit(_fetch_industry, code, market)
+                fut_map[fut] = code
+
+            # 等待本批完成或超时
+            done_set, pending_set = wait(fut_map, timeout=batch_timeout)
+
+            # 处理已完成的任务
+            for fut in done_set:
+                code = fut_map[fut]
+                try:
+                    result = fut.result(timeout=5)
+                    if result and result[1]:
+                        success_map[code] = result[1]
+                    else:
+                        fail_list.append(code)
+                except Exception:
+                    fail_list.append(code)
+
+            # 超时未完成的视为失败，尝试取消
+            for fut in pending_set:
+                code = fut_map[fut]
+                fut.cancel()
+                fail_list.append(code)
+
+            processed += len(batch)
+            if processed % 500 == 0 or processed == total:
+                logger.info(f"  进度: {processed}/{total} (成功: {len(success_map)}, 失败: {len(fail_list)})")
+
+            # 批间冷却，降低限流概率
+            if batch_start + batch_size < len(rows):
+                time.sleep(batch_cooldown)
+
+    logger.info(f"📊 接口请求完成: 成功 {len(success_map)}, 失败 {len(fail_list)}")
+
+    # 5. 批量写入数据库
+    if success_map:
+        conn = sqlite3.connect(str(db.db_path))
+        cursor = conn.cursor()
+        updated = 0
+        batch = []
+        for code, industry in success_map.items():
+            batch.append((industry, code))
+            if len(batch) >= 500:
+                cursor.executemany(
+                    "UPDATE stock_list SET industry = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE code = ? AND (industry IS NULL OR industry = '未分类')",
+                    batch,
+                )
+                updated += cursor.rowcount
+                conn.commit()
+                batch = []
+        if batch:
+            cursor.executemany(
+                "UPDATE stock_list SET industry = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE code = ? AND (industry IS NULL OR industry = '未分类')",
+                batch,
+            )
+            updated += cursor.rowcount
+            conn.commit()
+        conn.close()
+        logger.info(f"✅ 行业分类更新完成: {updated} 只股票")
+    else:
+        updated = 0
+        logger.warning("⚠️  未获取到任何行业数据")
+
+    # 6. 更新 stock_list 表索引（如果不存在）
+    try:
+        conn = sqlite3.connect(str(db.db_path))
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_list_industry ON stock_list(industry)")
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ 创建索引失败（可能已存在）: {e}")
+
+    return {
+        "saved": updated,
+        "total": total,
+        "failed": len(fail_list),
+        "coverage_pct": round(100 * updated / total, 1) if total else 0,
+    }

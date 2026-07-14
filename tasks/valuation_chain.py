@@ -1,0 +1,534 @@
+"""
+估值相关数据更新任务
+────────────────────
+包含：估值数据获取、实时行情快照、历史估值快照、行业对比数据。
+"""
+
+from __future__ import annotations
+
+import json  # noqa: F401
+import logging
+import os
+import time
+from datetime import datetime, timedelta
+
+import pandas as pd  # noqa: F401
+from smartmoney_hunter.market_utils import is_beijing_stock
+
+from core.config import SHARED_DATA_DIR  # noqa: F401
+from core.utils import infer_market  # noqa: F401
+from interface import DatabaseInterface, DataLoaderInterface
+
+try:
+    import akshare as ak  # noqa: F401
+except ImportError:
+    ak = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
+
+# 当 fundamentals 表某日记录数达到该阈值时，视为已完成并跳过
+MIN_FUNDAMENTALS_STOCK_COUNT = 5000
+
+
+def should_skip_beijing(symbol: str) -> bool:
+    """判断是否根据环境变量配置跳过北交所股票。"""
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        return False
+    return is_beijing_stock(symbol)
+
+
+# ===========================================================================
+# 任务 3.4: 批量获取全市场估值数据（PE/PB/PS/PEG）
+# ===========================================================================
+
+
+def update_fundamentals(
+    db: DatabaseInterface, loader: DataLoaderInterface
+) -> dict:
+    """批量获取全市场估值数据并保存到 fundamentals 表。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📊 任务: 批量获取估值数据")
+    logger.info("=" * 60)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    # 尝试今天，如果没数据回退到最近交易日
+    trade_dates = [today]
+    for offset in range(1, 5):
+        d = datetime.now() - timedelta(days=offset)
+        if d.weekday() < 5:
+            trade_dates.append(d.strftime("%Y-%m-%d"))
+
+    existing_count = db.count_fundamentals_for_date(today)
+    if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
+        logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
+        return {"saved": 0, "total": 0, "skipped": True}
+
+    import requests as _req
+
+    session = _req.Session()
+    session.proxies = {"http": None, "https": None}
+    session.trust_env = False
+
+    all_records = []
+    for td in trade_dates:
+        if all_records:
+            break
+        page = 1
+        page_size = 500
+        while True:
+            try:
+                url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+                params = {
+                    "sortColumns": "TRADE_DATE,SECURITY_CODE",
+                    "sortTypes": "-1,1",
+                    "pageSize": str(page_size),
+                    "pageNumber": str(page),
+                    "reportName": "RPT_VALUEANALYSIS_DET",
+                    "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CLOSE_PRICE,TOTAL_MARKET_CAP,PE_TTM,PB_MRQ,PE_LAR,PEG_CAR,PS_TTM",
+                    "source": "WEB",
+                    "client": "WEB",
+                    "filter": f"(TRADE_DATE='{td}')",
+                }
+                resp = session.get(url, params=params, timeout=15)
+                data = resp.json()
+                if data.get("success") and data.get("result") and data["result"].get("data"):
+                    records = data["result"]["data"]
+                    all_records.extend(records)
+                    total_count = data["result"].get("count", 0)
+                    if page * page_size >= total_count:
+                        break
+                    page += 1
+                else:
+                    break
+            except Exception as e:
+                logger.warning(f"⚠️  获取估值数据失败 (日期={td}): {e}")
+                break
+
+    if not all_records:
+        logger.warning("⚠️  未获取到估值数据")
+        return {"saved": 0, "total": 0}
+
+    batch_records = []
+    for rec in all_records:
+        try:
+            code = str(rec.get("SECURITY_CODE", "")).strip()
+            if not code:
+                continue
+            trade_date = str(rec.get("TRADE_DATE", today))[:10]
+            batch_records.append({
+                "ts_code": code,
+                "trade_date": trade_date,
+                "pe_ttm": rec.get("PE_TTM"),
+                "pb": rec.get("PB_MRQ"),
+                "ps_ttm": rec.get("PS_TTM"),
+                "dividend_yield": None,
+                "roe": None,
+                "roa": None,
+                "gross_margin": None,
+                "net_margin": None,
+                "debt_ratio": None,
+                "revenue_growth": None,
+                "profit_growth": None,
+                "eps_growth": None,
+                "peg": rec.get("PEG_CAR"),
+                "market_cap": rec.get("TOTAL_MARKET_CAP"),
+            })
+        except Exception as e:
+            logger.debug(f"  保存估值失败: {e}")
+            continue
+
+    try:
+        saved = db.save_fundamentals_batch(batch_records) if batch_records else 0
+    except Exception as e:
+        logger.error(f"❌ 估值数据批量保存失败: {e}")
+        saved = 0
+    date_used = str(all_records[0].get("TRADE_DATE", ""))[:10] if all_records else today
+    if saved > 0 and date_used:
+        db.record_task_run("update_fundamentals", date_used)
+    logger.info(f"✅ 估值数据保存完成: {saved}/{len(all_records)} 只 (日期: {date_used})")
+    return {"saved": saved, "total": len(all_records)}
+
+
+# ===========================================================================
+# 任务 3.5: 雪球 token 落地 — 批量补充实时行情指标
+# ===========================================================================
+
+
+def update_market_snapshot(db: DatabaseInterface) -> dict:
+    """
+    通过雪球 batch/quote API 批量获取全市场实时行情指标，
+    补充 fundamentals 表的 dividend_yield 字段。
+
+    Token 从环境变量 / smartmoney_hunter/.env 读取（XUEQIU_TOKEN / XUEQIU_USER_ID）。
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("📊 任务: 雪球行情快照 (dividend_yield 补充)")
+    logger.info("=" * 60)
+
+    import sqlite3
+
+    from smartmoney_hunter import xueqiu as xq
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. 查找 fundamentals 表中最新的交易日，确保在正确的日期上更新股息率
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(trade_date) FROM fundamentals")
+    row = cursor.fetchone()
+    conn.close()
+    target_date = row[0] if (row and row[0]) else today
+
+    # 增量检测：如果本 target_date 已经跑过 market_snapshot，直接跳过
+    last_run = db.get_last_task_run("update_market_snapshot")
+    if last_run == target_date:
+        logger.info(f"  跳过：target_date={target_date} 的 dividend_yield 已补充过")
+        return {"saved": 0, "total": 0, "updated": 0, "skipped": True}
+
+    # 1. 读取全量股票
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT code, market FROM stock_list")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        logger.warning("⚠️  股票列表为空")
+        return {"saved": 0, "total": 0}
+
+    rows = [(c, m) for c, m in rows if not should_skip_beijing(c)]
+
+    # 雪球不支持北交所，即使 INCLUDE_BJ=1 也要过滤掉
+    xq_rows = [(c, m) for c, m in rows if not is_beijing_stock(c)]
+    if len(xq_rows) < len(rows):
+        logger.info(f"  过滤北交所: {len(rows)} → {len(xq_rows)} (雪球不支持北交所)")
+
+    if xq._get_token() is None:
+        logger.warning("⚠️  XUEQIU_TOKEN 未设置，跳过雪球行情快照")
+        return {"saved": 0, "total": 0, "skipped": True}
+
+    total = len(xq_rows)
+    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
+    if include_bj:
+        logger.info(f"📊 共 {total} 只股票（排除北交所），准备拉取雪球行情")
+    else:
+        logger.info(f"📊 共 {total} 只股票，准备拉取雪球行情")
+
+    # 2. 分批调用（每批 50 只，串行 + 小延迟避免风控）
+    batch = 50
+    codes = [c for c, _ in xq_rows]
+    all_quotes: list[dict] = []
+
+    for i in range(0, total, batch):
+        chunk = codes[i : i + batch]
+        try:
+            quotes = xq.get_batch_quotes(chunk)
+            all_quotes.extend(quotes)
+        except Exception as e:
+            logger.debug(f"  批次 {i//batch + 1} 失败: {e}")
+        if (i // batch + 1) % 20 == 0 or i + batch >= total:
+            logger.info(f"  批次进度: {min(i + batch, total)}/{total} (已获取 {len(all_quotes)} 只)")
+        time.sleep(0.05)
+
+    logger.info(f"📊 雪球行情获取完成: {len(all_quotes)} 只")
+
+    # 3. 写回数据库 — 只补充 dividend_yield (不覆盖现有 pe_ttm/pb/market_cap)
+    updated = 0
+    if all_quotes:
+        conn = sqlite3.connect(str(db.db_path))
+        cursor = conn.cursor()
+        for q in all_quotes:
+            div_yield = q.get("dividend_yield")
+            if div_yield is not None:
+                cursor.execute(
+                    """UPDATE fundamentals SET dividend_yield = ?
+                       WHERE ts_code = ? AND trade_date = ?
+                       AND (dividend_yield IS NULL OR dividend_yield = 0)""",
+                    (div_yield, q["code"], target_date),
+                )
+                if cursor.rowcount:
+                    updated += 1
+        conn.commit()
+        conn.close()
+        logger.info(f"✅ dividend_yield 补充完成: {updated} 只")
+        db.record_task_run("update_market_snapshot", target_date)
+    else:
+        logger.warning("⚠️  雪球行情未获取到数据")
+
+    return {"saved": len(all_quotes), "total": total, "updated": updated}
+
+
+# ===========================================================================
+# 任务 8.5: 历史估值快照
+# ===========================================================================
+
+
+def update_historical_valuation(db: DatabaseInterface) -> dict:
+    """把最新 fundamentals 估值数据快照写入 historical_valuation，用于分位数计算。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("📈 任务: 保存历史估值快照")
+    logger.info("=" * 60)
+
+    try:
+        df = db.get_fundamentals_batch()
+        if df.empty:
+            logger.warning("⚠️  fundamentals 为空，跳过历史估值快照")
+            return {"saved": 0, "total": 0}
+
+        saved = 0
+        for _, row in df.iterrows():
+            try:
+                symbol = row.get("ts_code")
+                trade_date = row.get("trade_date")
+                if not symbol or not trade_date:
+                    continue
+                data = {
+                    "pe_ttm": row.get("pe_ttm"),
+                    "pb": row.get("pb"),
+                    "ps_ttm": row.get("ps_ttm"),
+                    "dividend_yield": row.get("dividend_yield"),
+                }
+                db.save_historical_valuation(symbol, str(trade_date)[:10], data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 历史估值快照保存完成: {saved}/{len(df)}")
+        return {"saved": saved, "total": len(df)}
+    except Exception as e:
+        logger.error(f"❌ 历史估值快照失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 任务 8.6: 生成行业对比数据
+# ===========================================================================
+
+
+def update_sector_industry(db: DatabaseInterface) -> dict:
+    """基于 fundamentals + stock_list 生成行业聚合数据，写入 sector_industry。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🏭 任务: 生成行业对比数据")
+    logger.info("=" * 60)
+
+    try:
+        import difflib
+        import sqlite3
+
+        import pandas as pd
+
+        stocks = db.get_stock_list()
+        fundamentals = db.get_fundamentals_batch()
+        if stocks.empty or fundamentals.empty:
+            logger.warning("⚠️  股票列表或基本面为空，跳过行业对比")
+            return {"saved": 0, "total": 0}
+
+        df = fundamentals.merge(stocks[["code", "industry"]], left_on="ts_code", right_on="code", how="left")
+        df["industry"] = df["industry"].fillna("未知行业")
+
+        numeric_cols = ["pe_ttm", "pb", "ps_ttm", "roe", "revenue_growth", "profit_growth", "market_cap"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        grouped = df.groupby("industry").agg(
+            avg_pe=("pe_ttm", "mean"),
+            avg_pb=("pb", "mean"),
+            avg_ps=("ps_ttm", "mean"),
+            avg_roe=("roe", "mean"),
+            avg_revenue_growth=("revenue_growth", "mean"),
+            avg_profit_growth=("profit_growth", "mean"),
+            total_market_cap=("market_cap", "sum"),
+        ).reset_index()
+
+        # 尝试补充资金流入排名（如果 sector_fund_flow 表已有数据）
+        try:
+            conn = sqlite3.connect(db.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT sector_name, main_net_inflow
+                FROM sector_fund_flow
+                WHERE trade_date = (SELECT MAX(trade_date) FROM sector_fund_flow)
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            if rows:
+                df_flow = pd.DataFrame(rows, columns=["sector_name", "main_net_inflow"])
+                df_flow["main_net_inflow"] = pd.to_numeric(df_flow["main_net_inflow"], errors="coerce")
+                df_flow = df_flow.dropna(subset=["main_net_inflow"])
+                df_flow = df_flow.sort_values("main_net_inflow", ascending=False).reset_index(drop=True)
+                df_flow["fund_inflow_rank"] = df_flow.index + 1
+
+                # 行业名称在 stock_list / sector_industry 与 sector_fund_flow 之间常不一致。
+                # 先精确匹配，再走少量 hard-coded 映射，最后用模糊匹配兜底。
+                flow_names = df_flow["sector_name"].tolist()
+                hard_coded_map = {
+                    "酿酒行业": "白酒",
+                    "家电行业": "白色家电",
+                    "食品饮料": "食品加工制造",
+                    "化工": "化学制品",
+                    "化工行业": "化学制品",
+                    "基础化工": "化学制品",
+                    "化纤行业": "化学纤维",
+                    "化肥行业": "农化制品",
+                    "医疗行业": "医疗器械",
+                    "医药制造": "化学制药",
+                    "医药生物": "化学制药",
+                    "水泥建材": "建筑材料",
+                    "玻璃陶瓷": "建筑材料",
+                    "装修建材": "建筑材料",
+                    "旅游酒店": "旅游及酒店",
+                    "商业百货": "零售",
+                    "贸易行业": "贸易",
+                    "电子信息": "电子",
+                    "电子元件": "元件",
+                    "电子零部件制造": "元件",
+                    "输配电气": "电网设备",
+                    "电源设备": "电网设备",
+                    "高低压设备": "电网设备",
+                    "安防设备": "计算机设备",
+                    "计算机应用": "软件开发",
+                    "计算机": "计算机设备",
+                    "软件服务": "软件开发",
+                    "汽车行业": "汽车整车",
+                    "汽车服务": "汽车服务及其他",
+                    "房地产服务": "房地产",
+                    "房地产开发": "房地产",
+                    "石油行业": "石油加工贸易",
+                    "石油石化": "石油加工贸易",
+                    "煤炭行业": "煤炭开采加工",
+                    "煤炭采选": "煤炭开采加工",
+                    "钢铁行业": "钢铁",
+                    "环保工程": "环境治理",
+                    "环保行业": "环境治理",
+                    "环保工程及服务": "环境治理",
+                    "港口水运": "港口航运",
+                    "航空机场": "机场航运",
+                    "航天航空": "军工装备",
+                    "国防军工": "军工装备",
+                    "交运物流": "物流",
+                    "物流行业": "物流",
+                    "通讯行业": "通信服务",
+                    "通信配套服务": "通信服务",
+                    "电信运营": "通信服务",
+                    "造纸印刷": "造纸",
+                    "服装家纺": "服装家纺",
+                    "纺织服装": "纺织制造",
+                    "纺织服饰": "纺织制造",
+                    "橡胶": "橡胶制品",
+                    "塑胶制品": "塑料制品",
+                    "包装材料": "包装印刷",
+                    "金属制品": "通用设备",
+                    "机械行业": "通用设备",
+                    "机械设备": "通用设备",
+                    "农林牧渔": "养殖业",
+                    "农牧饲渔": "养殖业",
+                    "农业综合": "种植业与林业",
+                    "种子生产": "种植业与林业",
+                    "农产品加工": "农产品加工",
+                    "农药": "农化制品",
+                    "农药兽药": "农化制品",
+                    "小金属": "小金属",
+                    "有色金属": "工业金属",
+                    "贵金属": "贵金属",
+                    "能源金属": "能源金属",
+                    "铁路公路": "公路铁路运输",
+                    "航运": "港口航运",
+                    "航运港口": "港口航运",
+                    "船舶制造": "船舶制造",
+                    "电力行业": "电力",
+                    "电力设备": "电网设备",
+                    "公用事业": "电力",
+                    "燃气": "燃气",
+                    "保险": "保险",
+                    "券商信托": "证券",
+                    "银行": "银行",
+                    "多元金融": "多元金融",
+                    "综合行业": "综合",
+                    "塑料制品": "塑料制品",
+                    "光学元件": "光学光电子",
+                    "光学光电子": "光学光电子",
+                    "半导体": "半导体",
+                    "集成电路": "半导体",
+                    "光伏设备": "光伏设备",
+                    "风电设备": "风电设备",
+                    "电池": "电池",
+                    "储能设备": "电池",
+                    "电机": "电机",
+                    "电网设备": "电网设备",
+                    "电子化学品": "电子化学品",
+                    "非金属材料Ⅱ": "非金属材料",
+                    "美容护理": "美容护理",
+                    "生物制品": "生物制品",
+                    "中药": "中药",
+                    "化学制药": "化学制药",
+                    "医疗服务": "医疗服务",
+                    "医疗器械": "医疗器械",
+                    "医药商业": "医药商业",
+                    "传媒": "文化传媒",
+                    "教育": "教育",
+                    "厨卫电器": "厨卫电器",
+                    "小家电": "小家电",
+                    "黑色家电": "黑色家电",
+                    "家居用品": "家居用品",
+                    "家具": "家居用品",
+                    "家用轻工": "家居用品",
+                    "饲料": "养殖业",
+                    "食品加工制造": "食品加工制造",
+                    "饮料制造": "饮料制造",
+                }
+
+                rank_map: dict[str, int | None] = {}
+                for industry in grouped["industry"]:
+                    target_name = industry
+                    # 1) hard-coded alias
+                    if industry in hard_coded_map:
+                        target_name = hard_coded_map[industry]
+                    # 2) exact match after alias
+                    if target_name in flow_names:
+                        rank_map[industry] = int(
+                            df_flow.loc[df_flow["sector_name"] == target_name, "fund_inflow_rank"].iloc[0]
+                        )
+                        continue
+                    # 3) fuzzy fallback
+                    matches = difflib.get_close_matches(industry, flow_names, n=1, cutoff=0.5)
+                    if matches:
+                        rank_map[industry] = int(
+                            df_flow.loc[df_flow["sector_name"] == matches[0], "fund_inflow_rank"].iloc[0]
+                        )
+                    else:
+                        rank_map[industry] = None
+
+                grouped["fund_inflow_rank"] = grouped["industry"].map(rank_map)
+            else:
+                grouped["fund_inflow_rank"] = None
+        except Exception:
+            grouped["fund_inflow_rank"] = None
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        saved = 0
+        for _, row in grouped.iterrows():
+            try:
+                data = {
+                    "industry_name": row["industry"],
+                    "trade_date": today,
+                    "avg_pe": row["avg_pe"],
+                    "avg_pb": row["avg_pb"],
+                    "avg_ps": row["avg_ps"],
+                    "avg_roe": row["avg_roe"],
+                    "avg_revenue_growth": row["avg_revenue_growth"],
+                    "avg_profit_growth": row["avg_profit_growth"],
+                    "total_market_cap": row["total_market_cap"],
+                    "fund_inflow_rank": row.get("fund_inflow_rank"),
+                    "data_source": "derived",
+                }
+                db.save_sector_industry(data)
+                saved += 1
+            except Exception:
+                continue
+
+        logger.info(f"✅ 行业对比数据保存完成: {saved}/{len(grouped)}")
+        return {"saved": saved, "total": len(grouped)}
+    except Exception as e:
+        logger.error(f"❌ 行业对比数据生成失败: {e}")
+        return {"saved": 0, "total": 0, "error": str(e)}
