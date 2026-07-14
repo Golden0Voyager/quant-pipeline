@@ -1,4 +1,5 @@
 """Test configuration for quant_pipeline."""
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -13,9 +14,8 @@ _market_utils_mock.is_beijing_stock = lambda _symbol: False
 # Create a real temp DB path so mocked DatabaseManager().db_path is a string,
 # preventing _ensure_wal_mode / _ensure_chip_tables from writing
 # MagicMock-named SQLite files into the project root.
-_tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp_db.close()
-_db_path = _tmp_db.name
+_fd, _db_path = tempfile.mkstemp(suffix=".db")
+os.close(_fd)
 
 
 def _make_database_manager(*args, **kwargs):

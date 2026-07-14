@@ -1,5 +1,6 @@
 """Tests for providers.py with mocked dependencies."""
 from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -323,9 +324,9 @@ def test_db_provider_chip_distribution_methods():
 
 
 def test_db_provider_save_chip_distribution_batch():
+    import os
     import sqlite3
     import tempfile
-    import os
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -364,10 +365,10 @@ def test_db_provider_save_chip_distribution_batch():
 
 
 def test_db_provider_save_chip_distribution_batch_empty_and_exception():
-    import sqlite3
-    from unittest.mock import patch
-    import tempfile
     import os
+    import sqlite3
+    import tempfile
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -385,10 +386,10 @@ def test_db_provider_save_chip_distribution_batch_empty_and_exception():
 
 
 def test_db_provider_ensure_wal_mode():
-    import sqlite3
-    from unittest.mock import patch, MagicMock
-    import tempfile
     import os
+    import sqlite3
+    import tempfile
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -407,8 +408,9 @@ def test_db_provider_ensure_wal_mode():
 
 
 def test_db_provider_ensure_wal_mode_early_return():
+    from unittest.mock import MagicMock, patch
+
     from providers import SmartMoneyDBProvider
-    from unittest.mock import patch, MagicMock
 
     # Parent directory does not exist -> early return branch
     mock_db = MagicMock()
@@ -420,10 +422,10 @@ def test_db_provider_ensure_wal_mode_early_return():
 
 
 def test_db_provider_ensure_chip_tables_exception():
-    import sqlite3
-    from unittest.mock import patch
-    import tempfile
     import os
+    import sqlite3
+    import tempfile
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
