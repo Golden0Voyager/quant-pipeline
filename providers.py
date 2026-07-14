@@ -8,6 +8,7 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ class SmartMoneyDBProvider:
     def __init__(self, db_path: str | None = None):
         self._db = DatabaseManager(db_path=db_path)
         self._ensure_wal_mode()
+        self._ensure_chip_tables()
 
     def _ensure_wal_mode(self) -> None:
         """启用 WAL 模式以提升并发读写性能。"""
@@ -40,6 +42,34 @@ class SmartMoneyDBProvider:
                 cursor.execute("PRAGMA synchronous=NORMAL")
         except Exception:
             # WAL 启用失败不应阻塞正常流程
+            pass
+
+    def _ensure_chip_tables(self) -> None:
+        """确保 chip_distribution_em 表存在（第二阶段在线校验用）。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chip_distribution_em (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT NOT NULL,
+                        trade_date DATE NOT NULL,
+                        profit_ratio REAL,
+                        avg_cost REAL,
+                        cost_90_low REAL,
+                        cost_90_high REAL,
+                        concentration_90 REAL,
+                        cost_70_low REAL,
+                        cost_70_high REAL,
+                        concentration_70 REAL,
+                        chip_concentration REAL,
+                        UNIQUE(ts_code, trade_date)
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_chip_distribution_em_code_date
+                    ON chip_distribution_em(ts_code, trade_date DESC)
+                """)
+        except Exception:
             pass
 
     @property
@@ -177,6 +207,99 @@ class SmartMoneyDBProvider:
 
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
+
+    def save_chip_distribution(self, symbol: str, data: dict[str, Any]) -> None:
+        self._db.save_chip_distribution(symbol, data)
+
+    def get_chip_distribution(self, symbol: str, date: str | None = None) -> dict | None:
+        return self._db.get_chip_distribution(symbol, date)
+
+    def get_chip_distribution_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        return self._db.get_chip_distribution_batch(stock_list)
+
+    def save_chip_distribution_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存筹码分布数据（使用原始 SQL 因 DatabaseManager 可能缺少 batch 方法）。"""
+        if not records:
+            return 0
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO chip_distribution (
+                        ts_code, trade_date, profit_ratio, avg_cost,
+                        cost_90_low, cost_90_high, concentration_90,
+                        cost_70_low, cost_70_high, concentration_70,
+                        chip_concentration
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r["trade_date"],
+                            r.get("profit_ratio"),
+                            r.get("avg_cost"),
+                            r.get("cost_90_low"),
+                            r.get("cost_90_high"),
+                            r.get("concentration_90"),
+                            r.get("cost_70_low"),
+                            r.get("cost_70_high"),
+                            r.get("concentration_70"),
+                            r.get("chip_concentration"),
+                        )
+                        for r in records
+                    ],
+                )
+                return conn.total_changes
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 筹码分布批量保存失败: {e}")
+            return 0
+
+    def save_chip_distribution_em_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存东方财富筹码分布数据到 chip_distribution_em 表。"""
+        if not records:
+            return 0
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO chip_distribution_em (
+                        ts_code, trade_date, profit_ratio, avg_cost,
+                        cost_90_low, cost_90_high, concentration_90,
+                        cost_70_low, cost_70_high, concentration_70,
+                        chip_concentration
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r["trade_date"],
+                            r.get("profit_ratio"),
+                            r.get("avg_cost"),
+                            r.get("cost_90_low"),
+                            r.get("cost_90_high"),
+                            r.get("concentration_90"),
+                            r.get("cost_70_low"),
+                            r.get("cost_70_high"),
+                            r.get("concentration_70"),
+                            r.get("chip_concentration"),
+                        )
+                        for r in records
+                    ],
+                )
+                return conn.total_changes
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 东方财富筹码分布批量保存失败: {e}")
+            return 0
+
+    def get_chip_distribution_em_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        """批量获取多只股票最新东方财富筹码分布。"""
+        return self._db.get_chip_distribution_em_batch(stock_list)
 
 
 

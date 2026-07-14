@@ -255,6 +255,11 @@ PROGRESS_FLUSH_INTERVAL = 10  # 每处理 N 只股票刷新一次进度文件
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "1"))
 assert PARALLEL_WORKERS >= 1, "PARALLEL_WORKERS 必须 >= 1"
 
+# 筹码分布计算参数
+CHIP_BINS = int(os.getenv("CHIP_BINS", "100"))             # 价格分档数
+MIN_CHIP_DAYS = int(os.getenv("MIN_CHIP_DAYS", "60"))       # 最少交易日
+CHIP_MAX_TURNOVER = 0.999                                    # 换手率上限裁剪
+
 # ---------------------------------------------------------------------------
 # AkShare 稳定性监控
 # ---------------------------------------------------------------------------
@@ -1104,6 +1109,405 @@ def update_indicators(
         "success": success_count,
         "failed": failed_count,
         "insufficient": insufficient_count,
+        "total": total,
+    }
+
+
+# ===========================================================================
+# 任务 2.5: 本地筹码分布计算
+# ===========================================================================
+
+def _calculate_chip_distribution_for_symbol(
+    df: pd.DataFrame, n_bins: int = 100
+) -> pd.DataFrame:
+    """基于换手率衰减模型计算单只股票的每日期望筹码分布统计量。
+
+    输入：trade_date, open, high, low, close, turnover_rate
+    输出：trade_date, profit_ratio, avg_cost, cost_90_low, cost_90_high,
+          concentration_90, cost_70_low, cost_70_high, concentration_70,
+          chip_concentration
+
+    算法：每日筹码池 * (1 - turnover) 衰减，新筹码按典型价加入，提取分位数。
+
+    Args:
+        df: 日线 DataFrame（已按日期排序）。
+        n_bins: 价格分档数，默认 100。
+
+    Returns:
+        筹码分布统计量的 DataFrame，数据不足 60 天则返回空。
+    """
+    import numpy as np
+
+    df = df.sort_values("trade_date").reset_index(drop=True)
+    if len(df) < MIN_CHIP_DAYS:
+        return pd.DataFrame()
+
+    close = df["close"].to_numpy(dtype=np.float64)
+    open_ = df["open"].to_numpy(dtype=np.float64)
+    high = df["high"].to_numpy(dtype=np.float64)
+    low = df["low"].to_numpy(dtype=np.float64)
+
+    typical_price = (open_ + high + low + close) / 4.0
+    turnover = df["turnover_rate"].fillna(0).to_numpy(dtype=np.float64)
+    if turnover.max() > 1:
+        turnover = turnover / 100.0
+    turnover = np.clip(turnover, 0.0, CHIP_MAX_TURNOVER)
+
+    price_min = typical_price.min() * 0.95
+    price_max = typical_price.max() * 1.05
+    if price_max <= price_min:
+        return pd.DataFrame()
+
+    bin_edges = np.linspace(price_min, price_max, n_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
+    weights = np.zeros(n_bins, dtype=np.float64)
+    records = []
+
+    for i in range(len(df)):
+        t = turnover[i]
+        price = typical_price[i]
+        weights *= 1.0 - t
+        bin_idx = int(np.searchsorted(bin_edges[1:], price))
+        bin_idx = max(0, min(bin_idx, n_bins - 1))
+        weights[bin_idx] += t
+
+        total_w = weights.sum()
+        if total_w > 0:
+            avg_cost = float(np.average(bin_centers, weights=weights))
+            cdf = np.cumsum(weights) / total_w
+
+            def _pct(cdf_vals, vals, q):
+                idx = min(int(np.searchsorted(cdf_vals, q)), len(vals) - 1)
+                return float(vals[idx])
+
+            cost_90_low = _pct(cdf, bin_centers, 0.05)
+            cost_90_high = _pct(cdf, bin_centers, 0.95)
+            cost_70_low = _pct(cdf, bin_centers, 0.15)
+            cost_70_high = _pct(cdf, bin_centers, 0.85)
+
+            concentration_90 = (cost_90_high - cost_90_low) / avg_cost if avg_cost > 0 else 0.0
+            concentration_70 = (cost_70_high - cost_70_low) / avg_cost if avg_cost > 0 else 0.0
+
+            profit_ratio = float(np.sum(weights[bin_centers <= close[i]]) / total_w)
+            chip_concentration = 1.0 - concentration_90
+
+            records.append({
+                "trade_date": str(df["trade_date"].iloc[i]),
+                "profit_ratio": profit_ratio,
+                "avg_cost": avg_cost,
+                "cost_90_low": cost_90_low,
+                "cost_90_high": cost_90_high,
+                "concentration_90": concentration_90,
+                "cost_70_low": cost_70_low,
+                "cost_70_high": cost_70_high,
+                "concentration_70": concentration_70,
+                "chip_concentration": chip_concentration,
+            })
+
+    return pd.DataFrame(records)
+
+
+def _process_chip_one(
+    db: DatabaseInterface, symbol: str, n_bins: int, min_days: int
+) -> str:
+    """处理单只股票的筹码分布计算和保存。"""
+    try:
+        df = db.get_daily_bars(symbol)
+        if df.empty or len(df) < min_days:
+            return "insufficient"
+        if "date" in df.columns and "trade_date" not in df.columns:
+            df = df.rename(columns={"date": "trade_date"})
+
+        df_chip = _calculate_chip_distribution_for_symbol(df, n_bins=n_bins)
+        if df_chip.empty:
+            return "failed"
+
+        records = []
+        for _, row in df_chip.iterrows():
+            records.append({
+                "ts_code": symbol,
+                "trade_date": str(row["trade_date"]),
+                "profit_ratio": float(row["profit_ratio"]),
+                "avg_cost": float(row["avg_cost"]),
+                "cost_90_low": float(row["cost_90_low"]),
+                "cost_90_high": float(row["cost_90_high"]),
+                "concentration_90": float(row["concentration_90"]),
+                "cost_70_low": float(row["cost_70_low"]),
+                "cost_70_high": float(row["cost_70_high"]),
+                "concentration_70": float(row["concentration_70"]),
+                "chip_concentration": float(row["chip_concentration"]),
+            })
+
+        db.save_chip_distribution_batch(records)
+        return "success"
+    except Exception as e:
+        logger.warning(f"  {symbol} 筹码分布计算失败: {e}")
+        return "failed"
+
+
+def update_chip_distribution(
+    db: DatabaseInterface, symbols_to_update: list[str] | None = None
+) -> dict:
+    """计算并保存本地筹码分布数据。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("任务: 本地筹码分布计算")
+    logger.info("=" * 60)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor()
+
+    if symbols_to_update is not None:
+        symbols = symbols_to_update
+        logger.info(f"指定模式: 计算 {len(symbols)} 只股票的筹码分布")
+    else:
+        logger.info("智能探测需要更新筹码分布的股票...")
+        cursor.execute("""
+            SELECT d.ts_code
+            FROM (
+                SELECT ts_code, MAX(trade_date) as max_bar_date
+                FROM daily_bars
+                GROUP BY ts_code
+            ) d
+            LEFT JOIN (
+                SELECT ts_code, MAX(trade_date) as max_chip_date
+                FROM chip_distribution
+                GROUP BY ts_code
+            ) c ON d.ts_code = c.ts_code
+            WHERE c.max_chip_date IS NULL OR d.max_bar_date > c.max_chip_date
+            ORDER BY d.ts_code
+        """)
+        symbols = [row[0] for row in cursor.fetchall()]
+        logger.info(f"探测完成: 共有 {len(symbols)} 只股票需要更新筹码分布")
+
+    conn.close()
+
+    total = len(symbols)
+    if total == 0:
+        logger.info("所有股票的筹码分布均已是最新，无需计算")
+        return {"success": 0, "failed": 0, "insufficient": 0, "total": 0}
+
+    n_bins = CHIP_BINS
+    min_days = MIN_CHIP_DAYS
+    success_count = 0
+    failed_count = 0
+    insufficient_count = 0
+
+    workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_process_chip_one, db, symbol, n_bins, min_days): symbol
+            for symbol in symbols
+        }
+        for i, future in enumerate(as_completed(futures), 1):
+            status = future.result()
+            if status == "success":
+                success_count += 1
+            elif status == "insufficient":
+                insufficient_count += 1
+            else:
+                failed_count += 1
+
+            if i % 100 == 0 or i == total:
+                logger.info(f"  进度: {i}/{total} ({100 * i // total}%)")
+
+    logger.info("\n" + "=" * 60)
+    logger.info("本地筹码分布计算完成")
+    logger.info(f"  成功: {success_count} 只")
+    logger.info(f"  数据不足(<{min_days}天): {insufficient_count} 只")
+    logger.info(f"  失败: {failed_count} 只")
+    logger.info("=" * 60)
+
+    return {
+        "success": success_count,
+        "failed": failed_count,
+        "insufficient": insufficient_count,
+        "total": total,
+    }
+
+
+# ===========================================================================
+# 任务 2.6: 线上获取东方财富筹码分布（仅自选股+指数成分股）
+# ===========================================================================
+
+def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:
+    """调用 AkShare stock_cyq_em 获取单只股票的东方财富筹码分布。"""
+    try:
+        import os
+
+        import akshare as ak
+
+        # 部分环境存在系统代理，临时清除后重试一次
+        proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+        saved = {k: os.environ.pop(k, None) for k in proxy_vars}
+
+        ts_code = symbol.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+        try:
+            df = ak.stock_cyq_em(symbol=ts_code, adjust="")
+        except Exception:
+            # 如果失败，试试带代理的请求
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+            df = ak.stock_cyq_em(symbol=ts_code, adjust="")
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+
+        if df is None or df.empty:
+            return None
+        df.columns = [
+            "trade_date",
+            "profit_ratio",
+            "avg_cost",
+            "cost_90_low",
+            "cost_90_high",
+            "concentration_90",
+            "cost_70_low",
+            "cost_70_high",
+            "concentration_70",
+        ]
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception as e:
+        logger.warning(f"  {symbol} 东方财富筹码获取失败: {e}")
+        return None
+
+
+def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
+    """获取需要线上抓取筹码分布的目标股票清单。
+
+    优先顺序：
+    1. 自选股（watchlist）
+    2. 指数成分股（从 index_daily 表中有数据的股票）
+    3. 兜底：本地已有筹码分布且有日线数据的活跃股票
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db.db_path))
+    symbols: set[str] = set()
+
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT ts_code FROM watchlist ORDER BY ts_code"
+        ).fetchall()
+        symbols.update(r[0] for r in rows)
+    except Exception:
+        pass
+
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT d.ts_code FROM daily_bars d
+            INNER JOIN index_daily i ON d.ts_code = i.ts_code
+            WHERE i.index_code LIKE '000300%' OR i.index_code LIKE '000905%'
+            ORDER BY d.ts_code
+        """).fetchall()
+        symbols.update(r[0] for r in rows)
+    except Exception:
+        pass
+
+    if len(symbols) < 200:
+        try:
+            rows = conn.execute("""
+                SELECT ts_code FROM (
+                    SELECT ts_code, COUNT(*) as cnt
+                    FROM daily_bars
+                    GROUP BY ts_code
+                    HAVING cnt > 60
+                )
+                WHERE ts_code IN (
+                    SELECT DISTINCT ts_code FROM chip_distribution
+                )
+                ORDER BY RANDOM()
+                LIMIT ?
+            """, (500 - len(symbols),)).fetchall()
+            symbols.update(r[0] for r in rows)
+        except Exception:
+            pass
+
+    conn.close()
+    return sorted(symbols)
+
+
+def update_chip_distribution_em(
+    db: DatabaseInterface, symbols_to_update: list[str] | None = None
+) -> dict:
+    """从东方财富线上获取筹码分布数据，写入 chip_distribution_em 表。
+
+    限量为：自选股 + 指数成分股，避免全市场 5500 次 HTTP 调用。
+
+    Args:
+        db: 数据库接口
+        symbols_to_update: 指定目标股票清单，None 则自动探测
+
+    Returns:
+        统计字典
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("任务: 线上获取东方财富筹码分布")
+    logger.info("=" * 60)
+
+    if symbols_to_update is not None:
+        symbols = symbols_to_update
+        logger.info(f"指定模式: 获取 {len(symbols)} 只股票")
+    else:
+        symbols = _get_chip_em_target_symbols(db)
+        logger.info(f"自动探测: 自选股+指数成分股共 {len(symbols)} 只")
+
+    total = len(symbols)
+    if total == 0:
+        logger.info("没有需要获取的股票")
+        return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for i, symbol in enumerate(symbols, 1):
+        df = _fetch_cyq_em(symbol)
+        if df is None:
+            failed_count += 1
+            continue
+
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "ts_code": symbol,
+                "trade_date": str(row["trade_date"]),
+                "profit_ratio": float(row["profit_ratio"]),
+                "avg_cost": float(row["avg_cost"]),
+                "cost_90_low": float(row["cost_90_low"]),
+                "cost_90_high": float(row["cost_90_high"]),
+                "concentration_90": float(row["concentration_90"]),
+                "cost_70_low": float(row["cost_70_low"]),
+                "cost_70_high": float(row["cost_70_high"]),
+                "concentration_70": float(row["concentration_70"]),
+            })
+
+        try:
+            db.save_chip_distribution_em_batch(records)
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"  {symbol} 保存失败: {e}")
+            failed_count += 1
+
+        if i % 50 == 0 or i == total:
+            logger.info(f"  进度: {i}/{total}  |  成功 {success_count}  失败 {failed_count}  跳过 {skipped_count}")
+
+    logger.info("\n" + "=" * 60)
+    logger.info("线上筹码分布获取完成")
+    logger.info(f"  成功: {success_count} 只")
+    logger.info(f"  失败: {failed_count} 只")
+    logger.info(f"  跳过: {skipped_count} 只")
+    logger.info("=" * 60)
+
+    return {
+        "success": success_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
         "total": total,
     }
 
@@ -3072,6 +3476,12 @@ def run_all(
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
     # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
     results["indicators"] = _safe_task("update_indicators", update_indicators, db, engine)
+    results["chip_distribution"] = _safe_task(
+        "update_chip_distribution", update_chip_distribution, db
+    )
+    results["chip_distribution_em"] = _safe_task(
+        "update_chip_distribution_em", update_chip_distribution_em, db
+    )
 
     results["fundamentals"] = _safe_task("update_fundamentals", update_fundamentals, db, loader)
     results["market_snapshot"] = _safe_task("update_market_snapshot (雪球)", update_market_snapshot, db)
@@ -3120,6 +3530,8 @@ def main():
             "update_stock_list",
             "update_bars",
             "update_indicators",
+            "update_chip_distribution",
+            "update_chip_distribution_em",
             "update_fundamentals",
             "update_market_snapshot",
             "update_fund_flow",
@@ -3194,6 +3606,17 @@ def main():
             update_indicators(db, engine, symbols_to_update=all_symbols)
         else:
             update_indicators(db, engine)
+    elif args.task == "update_chip_distribution":
+        if args.force:
+            conn_kw = sqlite3.connect(str(db.db_path))
+            all_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+            conn_kw.close()
+            logger.info(f"🔁 --force 模式：强制重算 {len(all_symbols)} 只股票的筹码分布")
+            update_chip_distribution(db, symbols_to_update=all_symbols)
+        else:
+            update_chip_distribution(db)
+    elif args.task == "update_chip_distribution_em":
+        update_chip_distribution_em(db)
     elif args.task == "update_fundamentals":
         update_fundamentals(db, loader)
     elif args.task == "update_market_snapshot":

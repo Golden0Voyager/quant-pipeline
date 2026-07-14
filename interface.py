@@ -199,6 +199,33 @@ class DatabaseInterface(Protocol):
         """获取所有自选股列表。"""
         ...
 
+    def save_chip_distribution(self, symbol: str, data: dict[str, Any]) -> None:
+        """保存单只股票的筹码分布数据。"""
+        ...
+
+    def save_chip_distribution_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存筹码分布数据，返回实际保存条数。"""
+        ...
+
+    def get_chip_distribution(self, symbol: str, date: str | None = None) -> dict | None:
+        """获取单只股票指定日期或最新的筹码分布。"""
+        ...
+
+    def get_chip_distribution_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        """批量获取多只股票的最新筹码分布。"""
+        ...
+
+    def save_chip_distribution_em_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存东方财富线上获取的筹码分布数据到 chip_distribution_em 表。"""
+        ...
+
+    def get_chip_distribution_em_batch(
+        self, stock_list: list[str] | None = None
+    ) -> dict[str, dict]:
+        """批量获取多只股票最新东方财富筹码分布。"""
+        ...
 
 
 # ===========================================================================

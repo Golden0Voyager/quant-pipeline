@@ -295,6 +295,7 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "institutional_holdings",
             "north_flow", "index_daily", "limit_up_down", "dividend_summary",
             "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
+            "chip_distribution", "chip_distribution_em",
         ]
         result = {}
         if fast:
@@ -347,6 +348,8 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "fx_rate": "trade_date",
     "global_index": "trade_date",
     "us_treasury": "trade_date",
+    "chip_distribution": "trade_date",
+    "chip_distribution_em": "trade_date",
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
@@ -524,11 +527,14 @@ def _code_to_ts_code(code: str) -> str | None:
     code = code.strip()
     if not code.isdigit():
         return None
+    # 920xxx 北交所（必须在 6/9 之前检查，否则被 "9" 误匹配为 SH）
+    if code.startswith("920"):
+        return f"{code}.BJ"
     if code.startswith(("6", "9")):
         return f"{code}.SH"
     if code.startswith(("0", "2", "3")):
         return f"{code}.SZ"
-    if code.startswith(("4", "8")) or code.startswith("920"):
+    if code.startswith(("4", "8")):
         return f"{code}.BJ"
     return None
 
@@ -642,6 +648,8 @@ class SingleTaskWidget(Static):
         ("USD/CNY", "update_usd"),
         ("Global Index", "update_global_index"),
         ("US Treasury", "update_us_treasury"),
+        ("Chip Distribution (Local)", "update_chip_distribution"),
+        ("Chip Distribution (Online)", "update_chip_distribution_em"),
     ]
 
     def on_mount(self) -> None:
@@ -688,31 +696,43 @@ class DataCompletenessWidget(VerticalScroll):
         "update_usd": "fx_rate",
         "update_global_index": "global_index",
         "update_us_treasury": "us_treasury",
+        "update_chip_distribution": "chip_distribution",
+        "update_chip_distribution_em": "chip_distribution_em",
     }
 
     TABLE_LABELS: dict[str, str] = {
+        # 行情核心
         "daily_bars": "Daily Bars",
         "indicators": "Indicators",
+        # 基本面
         "fundamentals": "Fundamentals",
         "historical_valuation": "Valuation",
+        "quarterly_financials": "Quarterly Fin.",
+        "dividend_summary": "Dividends",
+        # 资金面
         "fund_flow": "Fund Flow",
         "margin_trading": "Margin Trading",
         "dragon_tiger": "Dragon Tiger",
         "block_trade": "Block Trade",
         "sector_fund_flow": "Sector Flow",
-        "sector_industry": "Industry",
         "north_flow": "North Flow",
+        # 行业/大盘
+        "sector_industry": "Industry",
         "index_daily": "Index Daily",
         "limit_up_down": "Limit U/D",
-        "dividend_summary": "Dividends",
+        # 股东
+        "shareholder_count": "Shareholders",
+        "institutional_holdings": "Inst. Holdings",
+        # 筹码分布
+        "chip_distribution": "Chip Dist.",
+        "chip_distribution_em": "Chip EM",
+        # 宏观
         "gold_price": "Gold Price",
         "crude_oil": "Crude Oil",
         "fx_rate": "USD/CNY",
         "global_index": "Global Index",
         "us_treasury": "US Treasury",
-        "institutional_holdings": "Inst. Holdings",
-        "shareholder_count": "Shareholders",
-        "quarterly_financials": "Quarterly Fin.",
+        # 总览
         "stock_list": "Stock List",
     }
 
