@@ -15,6 +15,7 @@ import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 MASTER_DB = Path.home() / "Code/quant_data/quant_core.db"
 
@@ -25,7 +26,7 @@ def fmt_num(n: int) -> str:
 
 def run_checks(db_path: Path) -> dict:
     """运行全部数据校验，返回结果字典"""
-    results = {"passed": 0, "failed": 0, "warnings": 0, "details": []}
+    results: dict[str, Any] = {"passed": 0, "failed": 0, "warnings": 0, "details": []}
 
     def log(status: str, msg: str):
         icon = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️"}.get(status, "ℹ️")
