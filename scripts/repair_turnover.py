@@ -24,7 +24,7 @@ _HUNTER_SRC = str(Path("~/Code/quant_hunter/src").expanduser())
 if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
     sys.path.insert(0, _HUNTER_SRC)
 
-from smartmoney_hunter.market_utils import is_beijing_stock
+from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: E402
 
 DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 REQUEST_TIMEOUT = 20  # seconds for each Sina request
