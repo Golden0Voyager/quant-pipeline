@@ -679,7 +679,7 @@ class TestMain:
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader, limit=5, resume=False)
+            fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None)
 
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
