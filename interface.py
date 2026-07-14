@@ -51,6 +51,10 @@ class DatabaseInterface(Protocol):
         """获取全部股票列表，返回 DataFrame（至少包含 'code' 列）。"""
         ...
 
+    def save_stock_list(self, df: pd.DataFrame) -> None:
+        """保存股票列表到数据库。"""
+        ...
+
     def get_daily_bars(self, symbol: str) -> pd.DataFrame:
         """获取单只股票的日线数据。"""
         ...
@@ -63,83 +67,51 @@ class DatabaseInterface(Protocol):
         """保存技术指标数据。"""
         ...
 
-    def save_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存基本面/估值数据。"""
-        ...
-
     def save_fundamentals_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存基本面/估值数据，返回实际保存条数。"""
-        ...
-
-    def save_fund_flow(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存资金流向数据。"""
         ...
 
     def save_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存资金流向数据，返回实际保存条数。"""
         ...
 
-    def save_margin_trading(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存融资融券数据。"""
-        ...
-
     def save_margin_trading_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存融资融券数据，返回实际保存条数。"""
         ...
 
-    def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
+    def get_margin_trading(self, symbol: str, date: str | None = None) -> dict | None:
         """获取融资融券数据。"""
-        ...
-
-    def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存龙虎榜数据。"""
         ...
 
     def save_dragon_tiger_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存龙虎榜数据，返回实际保存条数。"""
         ...
 
-    def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
+    def get_dragon_tiger(self, symbol: str, date: str | None = None) -> dict | None:
         """获取龙虎榜数据。"""
-        ...
-
-    def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存股东户数数据。"""
         ...
 
     def save_shareholder_count_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存股东户数数据，返回实际保存条数。"""
         ...
 
-    def save_quarterly_financials(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存季度财务指标数据。"""
-        ...
-
     def save_quarterly_financials_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存季度财务指标数据，返回实际保存条数。"""
-        ...
-
-    def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存大宗交易数据。"""
         ...
 
     def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存大宗交易数据，返回实际保存条数。"""
         ...
 
-    def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
+    def get_block_trade(self, symbol: str, date: str | None = None) -> dict | None:
         """获取大宗交易数据。"""
-        ...
-
-    def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
-        """保存板块资金流向数据。"""
         ...
 
     def save_sector_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存板块资金流向数据，返回实际保存条数。"""
         ...
 
-    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
+    def get_sector_fund_flow(self, sector_name: str, date: str | None = None) -> dict | None:
         """获取板块资金流向数据。"""
         ...
 
@@ -151,11 +123,11 @@ class DatabaseInterface(Protocol):
         """保存行业对比数据。"""
         ...
 
-    def get_sector_industry(self, industry_name: str, trade_date: str = None) -> dict | None:
+    def get_sector_industry(self, industry_name: str, trade_date: str | None = None) -> dict | None:
         """获取行业对比数据。"""
         ...
 
-    def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
+    def get_fundamentals_batch(self, trade_date: str | None = None) -> pd.DataFrame:
         """批量获取基本面数据。"""
         ...
 
@@ -195,12 +167,8 @@ class DatabaseInterface(Protocol):
         """批量保存中美国债收益率数据，返回实际保存条数。"""
         ...
 
-    def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
+    def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         """获取所有自选股列表。"""
-        ...
-
-    def save_chip_distribution(self, symbol: str, data: dict[str, Any]) -> None:
-        """保存单只股票的筹码分布数据。"""
         ...
 
     def save_chip_distribution_batch(self, records: list[dict[str, Any]]) -> int:
