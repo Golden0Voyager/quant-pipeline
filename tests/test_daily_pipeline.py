@@ -838,8 +838,9 @@ class TestUpdateBarsAdvanced:
 # Ultra-safe mode
 # ===========================================================================
 def test_ultra_safe_config():
+    import importlib
+
     with patch.dict(os.environ, {"ULTRA_SAFE": "1"}, clear=False):
-        import importlib
         import core.config as cfg
         import tasks.bars
         importlib.reload(cfg)
@@ -1238,6 +1239,47 @@ def test_update_global_index_empty(mock_ak: MagicMock):
         r = daily_pipeline.update_global_index(db)
     assert r["saved"] == 0
     db.save_global_index_batch.assert_not_called()
+
+
+@patch("tasks.macro.ak")
+def test_update_global_index_sina_fallback(mock_ak: MagicMock):
+    db = MagicMock()
+    db.save_global_index_batch.return_value = 2
+    mock_ak.index_global_spot_em.side_effect = Exception("connection reset")
+    mock_ak.index_global_name_table.return_value = pd.DataFrame({
+        "指数名称": ["英国富时100指数", "日经225指数"],
+        "代码": ["UKX", "NKY"],
+    })
+    mock_ak.index_global_hist_sina.side_effect = [
+        pd.DataFrame({
+            "date": ["2026-07-13", "2026-07-14"],
+            "open": [10450.0, 10498.7],
+            "high": [10520.0, 10552.56],
+            "low": [10420.0, 10422.98],
+            "close": [10498.29, 10529.39],
+            "volume": [0, 0],
+        }),
+        pd.DataFrame({
+            "date": ["2026-07-13", "2026-07-14"],
+            "open": [38900.0, 39000.0],
+            "high": [39100.0, 39200.0],
+            "low": [38800.0, 38900.0],
+            "close": [39000.0, 39100.0],
+            "volume": [0, 0],
+        }),
+    ]
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_global_index(db)
+    assert r["saved"] == 2
+    recs = db.save_global_index_batch.call_args[0][0]
+    codes = {rec["index_code"] for rec in recs}
+    assert codes == {"FTSE", "N225"}
+    n225 = [rec for rec in recs if rec["index_code"] == "N225"][0]
+    assert n225["trade_date"] == "2026-07-14"
+    assert n225["latest_price"] == 39100.0
+    assert n225["change_amount"] == 100.0
+    assert n225["change_pct"] == round(100.0 / 39000.0 * 100, 4)
+    assert n225["data_source"] == "akshare_sina_fallback"
 
 
 @patch("tasks.macro.ak")
@@ -1918,7 +1960,7 @@ class TestUpdateQuarterlyFinancials:
         db = MagicMock()
         loader = MagicMock()
         db.get_stock_list.return_value = pd.DataFrame()
-        with patch("tasks.financials.ak") as mock_ak, patch("daily_pipeline.logger"):
+        with patch("tasks.financials.ak"), patch("daily_pipeline.logger"):
             r = daily_pipeline.update_quarterly_financials(db, loader)
         assert r["total"] == 0
 
@@ -2191,23 +2233,29 @@ def test_lower_process_priority():
 # ===========================================================================
 class TestMarginTradingSafety:
     def test_safe_fetch_length_mismatch(self):
+        from tasks.market_flow import _safe_fetch_margin_detail
+
         def bad_fetcher(date=None):
             raise ValueError("Length mismatch: Expected axis has 10 elements")
         with patch("daily_pipeline.logger"):
-            r = daily_pipeline._safe_fetch_margin_detail(bad_fetcher, "20240701", "sh")
+            r = _safe_fetch_margin_detail(bad_fetcher, "20240701", "sh")
         assert r is None
 
     def test_safe_fetch_other_value_error(self):
+        from tasks.market_flow import _safe_fetch_margin_detail
+
         def bad_fetcher(date=None):
             raise ValueError("Some other error")
         with pytest.raises(ValueError):
-            daily_pipeline._safe_fetch_margin_detail(bad_fetcher, "20240701", "sh")
+            _safe_fetch_margin_detail(bad_fetcher, "20240701", "sh")
 
     def test_safe_fetch_none_return(self):
+        from tasks.market_flow import _safe_fetch_margin_detail
+
         def none_fetcher(date=None):
             return None
         with patch("daily_pipeline.logger"):
-            r = daily_pipeline._safe_fetch_margin_detail(none_fetcher, "20240701", "sh")
+            r = _safe_fetch_margin_detail(none_fetcher, "20240701", "sh")
         assert r is None
 
 
@@ -2285,7 +2333,7 @@ class TestRunAllOptions:
              patch.object(daily_pipeline, "update_block_trade", return_value={"saved": 0}), \
              patch.object(daily_pipeline, "update_sector_fund_flow", return_value={"saved": 0}), \
              patch.object(daily_pipeline, "update_shareholder_count", return_value={"saved": 0}):
-            r = daily_pipeline.run_all(db, loader, engine, include_optional=False)
+            r = daily_pipeline.run_all(db, loader, engine)
         assert "bars" in r
 
 
@@ -2346,25 +2394,20 @@ def test_health_check_db_error():
 # _get_expected_latest_trading_day
 # ===========================================================================
 def test_get_expected_latest_trading_day_weekday():
-    with patch("daily_pipeline.datetime") as m:
+    from tasks.macro import _get_expected_latest_trading_day
+
+    with patch("tasks.macro.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 16, 0)  # Monday 16:00
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        result = daily_pipeline._get_expected_latest_trading_day()
+        result = _get_expected_latest_trading_day()
         assert result == "2026-06-22"  # same day after hours
 
 
 def test_get_expected_latest_trading_day_monday_before_market():
-    with patch("daily_pipeline.datetime") as m:
+    from tasks.macro import _get_expected_latest_trading_day
+
+    with patch("tasks.macro.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 9, 0)  # Monday before 15:30
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        result = daily_pipeline._get_expected_latest_trading_day()
+        result = _get_expected_latest_trading_day()
         assert result == "2026-06-19"  # previous Friday
-
-
-# ===========================================================================
-# _sleep_with_progress
-# ===========================================================================
-def test_sleep_with_progress():
-    with patch("daily_pipeline.time.sleep"):
-        daily_pipeline._sleep_with_progress(1.0, "test")
-    # should not raise

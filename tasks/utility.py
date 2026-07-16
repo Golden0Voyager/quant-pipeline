@@ -116,7 +116,12 @@ def health_check(db: DatabaseInterface) -> dict:
     issues: list[str] = []
     report_lines = [f"\n📋 SmartMoney 数据健康报告 ({today})\n" + "=" * 50]
 
-    conn = sqlite3.connect(str(db.db_path))
+    try:
+        conn = sqlite3.connect(str(db.db_path))
+    except sqlite3.OperationalError as e:
+        issues.append(f"无法打开数据库 {db.db_path}: {e}")
+        report_lines.append("  数据库连接失败")
+        return {"issues": issues, "report": "\n".join(report_lines)}
     cursor = conn.cursor()
 
     tables = [

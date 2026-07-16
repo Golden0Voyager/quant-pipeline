@@ -22,7 +22,8 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
+from pathlib import Path
 
 # 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
 _CODE_DIR = os.path.expanduser("~/Code")
@@ -45,8 +46,6 @@ from core.config import (
 from core.config import (
     PARALLEL_WORKERS_VAL as PARALLEL_WORKERS,
 )
-from datetime import datetime, timedelta
-
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,  # noqa: F401
 )
@@ -249,102 +248,111 @@ def main():
         else:
             symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
-    # 进程锁：防止多实例同时运行（health_check 除外）
-    if args.task != "health_check":
-        _acquire_lock()
+    lock_acquired = False
+    db = None
+    try:
+        # 进程锁：防止多实例同时运行（health_check 除外）
+        if args.task != "health_check":
+            _acquire_lock()
+            lock_acquired = True
 
-    # 初始化 provider
-    ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
-    db = ProviderFactory.get_db()
+        # 初始化 provider
+        ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
+        db = ProviderFactory.get_db()
 
-    loader = ProviderFactory.get_loader()
-    engine = ProviderFactory.get_indicator_engine()
+        loader = ProviderFactory.get_loader()
+        engine = ProviderFactory.get_indicator_engine()
 
-    if args.force:
-        global _should_update
-        def _should_update():
-            return True
+        if args.force:
+            global _should_update
+            def _should_update():
+                return True
 
-    if args.task == "all":
-        run_all(db, loader, engine, resume=args.resume)
-    elif args.task == "update_stock_list":
-        update_stock_list(db)
-    elif args.task == "update_bars":
-        update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols)
-    elif args.task == "update_indicators":
-        if args.force or symbols:
-            conn_kw = sqlite3.connect(str(db.db_path))
-            if symbols:
-                target_symbols = symbols
+        if args.task == "all":
+            run_all(db, loader, engine, resume=args.resume)
+        elif args.task == "update_stock_list":
+            update_stock_list(db)
+        elif args.task == "update_bars":
+            update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols)
+        elif args.task == "update_indicators":
+            if args.force or symbols:
+                conn_kw = sqlite3.connect(str(db.db_path))
+                if symbols:
+                    target_symbols = symbols
+                else:
+                    target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+                conn_kw.close()
+                logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的技术指标")
+                update_indicators(db, engine, symbols_to_update=target_symbols)
             else:
-                target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
-            conn_kw.close()
-            logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的技术指标")
-            update_indicators(db, engine, symbols_to_update=target_symbols)
-        else:
-            update_indicators(db, engine)
-    elif args.task == "update_chip_distribution":
-        if args.force or symbols:
-            conn_kw = sqlite3.connect(str(db.db_path))
-            if symbols:
-                target_symbols = symbols
+                update_indicators(db, engine)
+        elif args.task == "update_chip_distribution":
+            if args.force or symbols:
+                conn_kw = sqlite3.connect(str(db.db_path))
+                if symbols:
+                    target_symbols = symbols
+                else:
+                    target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
+                conn_kw.close()
+                logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的筹码分布")
+                update_chip_distribution(db, symbols_to_update=target_symbols)
             else:
-                target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
-            conn_kw.close()
-            logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的筹码分布")
-            update_chip_distribution(db, symbols_to_update=target_symbols)
-        else:
-            update_chip_distribution(db)
-    elif args.task == "update_chip_distribution_em":
-        update_chip_distribution_em(db)
-    elif args.task == "update_fundamentals":
-        update_fundamentals(db, loader, symbols=symbols)
-    elif args.task == "update_market_snapshot":
-        update_market_snapshot(db)
-    elif args.task == "update_fund_flow":
-        update_fund_flow(db, loader, symbols=symbols)
-    elif args.task == "update_margin_trading":
-        update_margin_trading(db, symbols=symbols)
-    elif args.task == "update_dragon_tiger":
-        update_dragon_tiger(db, symbols=symbols)
-    elif args.task == "update_block_trade":
-        update_block_trade(db, symbols=symbols)
-    elif args.task == "update_sector_fund_flow":
-        update_sector_fund_flow(db)
-    elif args.task == "update_shareholder_count":
-        update_shareholder_count(db, symbols=symbols)
-    elif args.task == "update_quarterly_financials":
-        update_quarterly_financials(db, loader, symbols=symbols)
-    elif args.task == "update_historical_valuation":
-        update_historical_valuation(db, symbols=symbols)
-    elif args.task == "update_sector_industry":
-        update_sector_industry(db)
-    elif args.task == "update_industry":
-        update_industry(db)
-    elif args.task == "update_north_flow":
-        update_north_flow(db)
-    elif args.task == "update_index_daily":
-        update_index_daily(db)
-    elif args.task == "update_limit_up_down":
-        update_limit_up_down(db)
-    elif args.task == "update_dividend_summary":
-        update_dividend_summary(db)
-    elif args.task == "update_gold_price":
-        update_gold_price(db)
-    elif args.task == "update_crude_oil":
-        update_crude_oil(db)
-    elif args.task == "update_usd":
-        update_usd(db)
-    elif args.task == "update_global_index":
-        update_global_index(db)
-    elif args.task == "update_us_treasury":
-        update_us_treasury(db)
-    elif args.task == "retry":
-        retry_failed(db, loader)
-    elif args.task == "health_check":
-        health_check(db)
-
-    db.close()
+                update_chip_distribution(db)
+        elif args.task == "update_chip_distribution_em":
+            update_chip_distribution_em(db)
+        elif args.task == "update_fundamentals":
+            update_fundamentals(db, loader, symbols=symbols)
+        elif args.task == "update_market_snapshot":
+            update_market_snapshot(db)
+        elif args.task == "update_fund_flow":
+            update_fund_flow(db, loader, symbols=symbols)
+        elif args.task == "update_margin_trading":
+            update_margin_trading(db, symbols=symbols)
+        elif args.task == "update_dragon_tiger":
+            update_dragon_tiger(db, symbols=symbols)
+        elif args.task == "update_block_trade":
+            update_block_trade(db, symbols=symbols)
+        elif args.task == "update_sector_fund_flow":
+            update_sector_fund_flow(db)
+        elif args.task == "update_shareholder_count":
+            update_shareholder_count(db, symbols=symbols)
+        elif args.task == "update_quarterly_financials":
+            update_quarterly_financials(db, loader, symbols=symbols)
+        elif args.task == "update_historical_valuation":
+            update_historical_valuation(db, symbols=symbols)
+        elif args.task == "update_sector_industry":
+            update_sector_industry(db)
+        elif args.task == "update_industry":
+            update_industry(db)
+        elif args.task == "update_north_flow":
+            update_north_flow(db)
+        elif args.task == "update_index_daily":
+            update_index_daily(db)
+        elif args.task == "update_limit_up_down":
+            update_limit_up_down(db)
+        elif args.task == "update_dividend_summary":
+            update_dividend_summary(db)
+        elif args.task == "update_gold_price":
+            update_gold_price(db)
+        elif args.task == "update_crude_oil":
+            update_crude_oil(db)
+        elif args.task == "update_usd":
+            update_usd(db)
+        elif args.task == "update_global_index":
+            update_global_index(db)
+        elif args.task == "update_us_treasury":
+            update_us_treasury(db)
+        elif args.task == "retry":
+            retry_failed(db, loader)
+        elif args.task == "health_check":
+            health_check(db)
+    except KeyboardInterrupt:
+        logger.info("收到中断信号，正在退出...")
+    finally:
+        if db is not None:
+            db.close()
+        if lock_acquired:
+            _release_lock()
 
 
 if __name__ == "__main__":
