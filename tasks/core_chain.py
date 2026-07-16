@@ -293,21 +293,23 @@ def _process_chip_one(
         if df_chip.empty:
             return "failed"
 
+        numeric_cols = [
+            "profit_ratio", "avg_cost",
+            "cost_90_low", "cost_90_high", "concentration_90",
+            "cost_70_low", "cost_70_high", "concentration_70",
+            "chip_concentration",
+        ]
         records = []
         for _, row in df_chip.iterrows():
-            records.append({
-                "ts_code": symbol,
-                "trade_date": str(row["trade_date"]),
-                "profit_ratio": float(row["profit_ratio"]),
-                "avg_cost": float(row["avg_cost"]),
-                "cost_90_low": float(row["cost_90_low"]),
-                "cost_90_high": float(row["cost_90_high"]),
-                "concentration_90": float(row["concentration_90"]),
-                "cost_70_low": float(row["cost_70_low"]),
-                "cost_70_high": float(row["cost_70_high"]),
-                "concentration_70": float(row["concentration_70"]),
-                "chip_concentration": float(row["chip_concentration"]),
-            })
+            rec: dict[str, object] = {"ts_code": symbol, "trade_date": str(row["trade_date"])}
+            for col in numeric_cols:
+                val = row.get(col)
+                # 抵御 pandas NaT / NaN / None → 存 None 避免 float() 崩溃
+                if val is None or (hasattr(val, "_is_nat") and val._is_nat) or val != val:
+                    rec[col] = None
+                else:
+                    rec[col] = float(val)
+            records.append(rec)
 
         db.save_chip_distribution_batch(records)
         return "success"
