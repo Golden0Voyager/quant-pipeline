@@ -155,7 +155,7 @@ def update_bars(
     backfilled_symbols = set()
     backfill_file = SHARED_DATA_DIR / "watchlist_backfilled.txt"
     try:
-        watchlist_df = db.watchlist_get_all()
+        watchlist_df = db.watchlist_get_all(status="tracking")
         if not watchlist_df.empty:
             watchlist_symbols = set(watchlist_df["ts_code"].tolist())
         if backfill_file.exists():
@@ -392,9 +392,9 @@ def _update_single_bar(
         try:
             if db_lock:
                 with db_lock:
-                    watchlist_df = db.watchlist_get_all()
+                    watchlist_df = db.watchlist_get_all(status="tracking")
             else:
-                watchlist_df = db.watchlist_get_all()
+                watchlist_df = db.watchlist_get_all(status="tracking")
             watchlist_symbols = set(watchlist_df["ts_code"].tolist()) if not watchlist_df.empty else set()
         except Exception:
             watchlist_symbols = set()
