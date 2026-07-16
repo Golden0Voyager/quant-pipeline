@@ -509,7 +509,7 @@ def test_status_for_table_with_timestamp():
 
 @pytest.mark.asyncio
 async def test_data_completeness_sorts_by_freshness():
-    from tui import DataCompletenessWidget, PipelineApp, _get_expected_latest_trading_day
+    from tui import DataCompletenessWidget, PipelineApp
     app = PipelineApp()
     async with app.run_test():
         widget = app.query_one("#data-completeness", DataCompletenessWidget)
