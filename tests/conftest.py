@@ -21,6 +21,9 @@ os.close(_fd)
 def _make_database_manager(*args, **kwargs):
     mock = MagicMock()
     mock.db_path = _db_path
+    mock.get_distinct_codes.return_value = set()
+    mock.count_fundamentals_for_date.return_value = 0
+    mock.get_last_task_run.return_value = None
     return mock
 
 

@@ -509,7 +509,7 @@ def test_status_for_table_with_timestamp():
 
 @pytest.mark.asyncio
 async def test_data_completeness_sorts_by_freshness():
-    from tui import DataCompletenessWidget, PipelineApp
+    from tui import DataCompletenessWidget, PipelineApp, _get_expected_latest_trading_day
     app = PipelineApp()
     async with app.run_test():
         widget = app.query_one("#data-completeness", DataCompletenessWidget)
@@ -532,7 +532,8 @@ async def test_data_completeness_sorts_by_freshness():
         }
         captured = []
         with patch.object(widget._content, "update", side_effect=captured.append):
-            widget._rebuild_content()
+            with patch("tui._get_expected_latest_trading_day", return_value="2026-07-14"):
+                widget._rebuild_content()
         text = "\n".join(captured)
         positions = {
             "Daily Bars": text.find("Daily Bars"),
