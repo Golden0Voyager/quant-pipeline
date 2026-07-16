@@ -104,7 +104,6 @@ def update_bars(
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")
 
     total = len(stock_codes)
-    bj_count = len(stocks) - total
     if bj_count > 0:
         logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
     else:
@@ -212,22 +211,22 @@ def update_bars(
                     if result != "skipped":
                         monitor.record(result == "success", symbol)
 
-                    last_symbol = symbol
+                    # 并行模式下不在循环内设 last_symbol（as_completed 顺序≠批次顺序）
+                    # 批次结束统一设 batch[-1]
 
-                    # 每 N 只股票刷新一次进度文件
-                    current_processed = processed_count
-                    if current_processed % PROGRESS_FLUSH_INTERVAL == 0:
-                        logger.info(
-                            f"  📥 进度: {current_processed}/{total} "
-                            f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
-                        )
-                        ProgressTracker.save(
-                            task="update_bars",
-                            last_symbol=last_symbol,
-                            processed=current_processed,
-                            total=total,
-                            failed_queue=failed_symbols,
-                        )
+            # 并行批次结束后：使用批次原始顺序的最后一只股票作为断点
+            last_symbol = batch[-1]
+            ProgressTracker.save(
+                task="update_bars",
+                last_symbol=last_symbol,
+                processed=processed_count,
+                total=total,
+                failed_queue=failed_symbols,
+            )
+            logger.info(
+                f"  📥 批次完成: {processed_count}/{total} "
+                f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
+            )
 
             # 并行批次结束后检查是否需要中止
             should_abort, abort_msg = monitor.should_abort()

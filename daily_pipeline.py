@@ -200,6 +200,11 @@ def run_all(
     logger.info(f"⏱️  总耗时: {elapsed:.1f}s ({elapsed/60:.1f}min)")
     logger.info("=" * 60)
 
+    # 检查是否有任务崩溃，供 main() 决定退出码
+    results["crashed"] = any(
+        isinstance(v, dict) and v.get("status") == "crashed"
+        for v in results.values()
+    )
     return results
 
 
@@ -269,7 +274,9 @@ def main():
                 return True
 
         if args.task == "all":
-            run_all(db, loader, engine, resume=args.resume)
+            results = run_all(db, loader, engine, resume=args.resume)
+            if results.get("crashed"):
+                sys.exit(1)
         elif args.task == "update_stock_list":
             update_stock_list(db)
         elif args.task == "update_bars":

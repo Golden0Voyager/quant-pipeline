@@ -512,7 +512,7 @@ class TestRetryFailed:
 class TestHealthCheck:
     def test_healthy(self, health_db: str):
         db = _mock_db_path(health_db)
-        with patch("tasks.utility._get_expected_latest_trading_day", return_value="2024-06-20"), \
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
              patch("tasks.utility.logger"):
             r = daily_pipeline.health_check(db)
         assert r["issues"] == []
@@ -563,14 +563,14 @@ class TestHealthCheck:
 
     def test_stale_data(self, health_db: str):
         db = _mock_db_path(health_db)
-        with patch("tasks.utility._get_expected_latest_trading_day", return_value="2024-06-25"), \
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-25"), \
              patch("tasks.utility.logger"):
             r = daily_pipeline.health_check(db)
         assert any("未更新" in i for i in r["issues"])
 
     def test_output_smoke(self, health_db: str):
         db = _mock_db_path(health_db)
-        with patch("tasks.utility._get_expected_latest_trading_day", return_value="2024-06-20"), \
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
              patch("tasks.utility.logger"):
             r = daily_pipeline.health_check(db)
         assert "report" in r
@@ -630,7 +630,7 @@ class TestMain:
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all") as fn:
+             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -651,11 +651,13 @@ class TestMain:
 
     def test_main_does_not_create_magicmock_file(self, weekday_mock, tmp_path):
         """main() 不应在 ProviderFactory.get_db() 为 MagicMock 时生成垃圾 SQLite 文件。"""
+        db_mock = MagicMock()
+        db_mock.db_path = str(tmp_path / "test.db")
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all"):
+             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}):
             f.configure.return_value = None
-            f.get_db.return_value = MagicMock()
+            f.get_db.return_value = db_mock
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
@@ -678,7 +680,7 @@ class TestMain:
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all") as fn:
+             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
@@ -1108,6 +1110,63 @@ def test_update_bars_includes_bj_when_configured():
     # Should process all 3 stocks (include the BJ one)
     assert r["total"] == 3
     assert r["success"] + r["failed"] + r["skipped"] == 3
+
+
+# ===========================================================================
+# Bug regression: --symbols mode / exit code
+# ===========================================================================
+
+def test_update_bars_symbols_mode_no_crash():
+    """update_bars with --symbols must not crash (regression for UnboundLocalError)."""
+    db = MagicMock()
+    loader = MagicMock()
+    loader.incremental_update.return_value = pd.DataFrame()
+    db.get_daily_bars.return_value = pd.DataFrame()
+
+    with patch("core.utils.is_beijing_stock", return_value=False), \
+         patch("daily_pipeline.logger"), \
+         patch("tasks.bars.logger"):
+        from daily_pipeline import ProgressTracker
+        ProgressTracker.clear()
+        r = daily_pipeline.update_bars(db, loader, symbols=["000001", "600000"])
+
+    assert r["total"] == 2
+    ProgressTracker.clear()
+
+
+def test_run_all_detects_crashed_task():
+    """run_all() must detect crashed tasks in results."""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+
+    with patch("daily_pipeline.update_stock_list",
+               side_effect=RuntimeError("simulated crash")), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("time.sleep"):  # skip the 2s sleep in safe_task
+        results = run_all(db, loader, engine)
+
+    assert results.get("crashed") is True, "run_all should set crashed=True"
+    assert results["stock_list"]["status"] == "crashed"
+
+
+def test_main_exits_one_when_run_all_returns_crashed():
+    """main() must exit with code 1 when run_all returns crashed=True."""
+    with patch.object(sys, "argv",
+                      ["daily_pipeline.py", "--task", "all", "--force"]), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.run_all",
+               return_value={"crashed": True, "bars": {"status": "crashed"}}), \
+         patch("daily_pipeline._acquire_lock"), \
+         patch("daily_pipeline._release_lock"), \
+         patch("daily_pipeline.ProviderFactory"), \
+         patch("daily_pipeline.logger"), \
+         pytest.raises(SystemExit) as exc_info:
+        daily_pipeline.main()
+    assert exc_info.value.code == 1
 
 
 # ===========================================================================
@@ -2391,23 +2450,23 @@ def test_health_check_db_error():
 
 
 # ===========================================================================
-# _get_expected_latest_trading_day
+# get_expected_latest_trading_day
 # ===========================================================================
 def test_get_expected_latest_trading_day_weekday():
-    from tasks.macro import _get_expected_latest_trading_day
+    from core.calendar import get_expected_latest_trading_day
 
-    with patch("tasks.macro.datetime") as m:
+    with patch("core.calendar.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 16, 0)  # Monday 16:00
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        result = _get_expected_latest_trading_day()
+        result = get_expected_latest_trading_day()
         assert result == "2026-06-22"  # same day after hours
 
 
 def test_get_expected_latest_trading_day_monday_before_market():
-    from tasks.macro import _get_expected_latest_trading_day
+    from core.calendar import get_expected_latest_trading_day
 
-    with patch("tasks.macro.datetime") as m:
+    with patch("core.calendar.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 9, 0)  # Monday before 15:30
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        result = _get_expected_latest_trading_day()
+        result = get_expected_latest_trading_day()
         assert result == "2026-06-19"  # previous Friday
