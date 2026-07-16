@@ -59,6 +59,10 @@ class DatabaseInterface(Protocol):
         """获取单只股票的日线数据。"""
         ...
 
+    def get_latest_bar_date(self, symbol: str) -> str | None:
+        """获取单只股票最新的交易日（轻量查询，比 get_daily_bars 更高效）。"""
+        ...
+
     def save_daily_bars(self, symbol: str, df: pd.DataFrame) -> None:
         """保存日线数据。"""
         ...

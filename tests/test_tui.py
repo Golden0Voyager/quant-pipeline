@@ -284,8 +284,14 @@ async def test_action_handlers_use_run_in_background():
     expected_pipeline_path = str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py")
     expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
+    def _close_coro(coro, **kwargs):
+        """Close un-awaited coroutine to suppress RuntimeWarning."""
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return MagicMock()
+
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
-         patch("asyncio.create_task") as mock_create_task, \
+         patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
          patch.object(app, "push_screen") as mock_push_screen:
 
         await app.action_run_pipeline()

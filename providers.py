@@ -100,6 +100,19 @@ class SmartMoneyDBProvider:
     def get_daily_bars(self, symbol: str) -> pd.DataFrame:
         return self._db.get_daily_bars(symbol)
 
+    def get_latest_bar_date(self, symbol: str) -> str | None:
+        """轻量查询：直接 SQL 取 MAX(trade_date)，避免全表扫描。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute(
+                    "SELECT MAX(trade_date) FROM daily_bars WHERE ts_code = ?",
+                    (symbol,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
     def save_daily_bars(self, symbol: str, df: pd.DataFrame) -> None:
         self._db.save_daily_bars(symbol, df)
 

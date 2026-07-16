@@ -212,9 +212,21 @@ def _calculate_chip_distribution_for_symbol(
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
     weights = np.zeros(n_bins, dtype=np.float64)
-    records = []
+    n_days = len(df)
+    dates = df["trade_date"].values
 
-    for i in range(len(df)):
+    # 预分配结果数组
+    arr_profit_ratio = np.full(n_days, np.nan, dtype=np.float64)
+    arr_avg_cost = np.full(n_days, np.nan, dtype=np.float64)
+    arr_cost_90_low = np.full(n_days, np.nan, dtype=np.float64)
+    arr_cost_90_high = np.full(n_days, np.nan, dtype=np.float64)
+    arr_cost_70_low = np.full(n_days, np.nan, dtype=np.float64)
+    arr_cost_70_high = np.full(n_days, np.nan, dtype=np.float64)
+    arr_concentration_90 = np.full(n_days, np.nan, dtype=np.float64)
+    arr_concentration_70 = np.full(n_days, np.nan, dtype=np.float64)
+    arr_chip_concentration = np.full(n_days, np.nan, dtype=np.float64)
+
+    for i in range(n_days):
         t = turnover[i]
         price = typical_price[i]
         weights *= 1.0 - t
@@ -227,14 +239,14 @@ def _calculate_chip_distribution_for_symbol(
             avg_cost = float(np.average(bin_centers, weights=weights))
             cdf = np.cumsum(weights) / total_w
 
-            def _pct(cdf_vals, vals, q):
-                idx = min(int(np.searchsorted(cdf_vals, q)), len(vals) - 1)
-                return float(vals[idx])
-
-            cost_90_low = _pct(cdf, bin_centers, 0.05)
-            cost_90_high = _pct(cdf, bin_centers, 0.95)
-            cost_70_low = _pct(cdf, bin_centers, 0.15)
-            cost_70_high = _pct(cdf, bin_centers, 0.85)
+            # 批量 searchsorted（单次调用），保持与旧版一致的离散分位语义
+            pct_indices = np.searchsorted(cdf, [0.05, 0.95, 0.15, 0.85])
+            pct_indices = np.clip(pct_indices, 0, len(bin_centers) - 1)
+            pct_vals = bin_centers[pct_indices]
+            cost_90_low = float(pct_vals[0])
+            cost_90_high = float(pct_vals[1])
+            cost_70_low = float(pct_vals[2])
+            cost_70_high = float(pct_vals[3])
 
             concentration_90 = (cost_90_high - cost_90_low) / avg_cost if avg_cost > 0 else 0.0
             concentration_70 = (cost_70_high - cost_70_low) / avg_cost if avg_cost > 0 else 0.0
@@ -242,20 +254,28 @@ def _calculate_chip_distribution_for_symbol(
             profit_ratio = float(np.sum(weights[bin_centers <= close[i]]) / total_w)
             chip_concentration = 1.0 - concentration_90
 
-            records.append({
-                "trade_date": str(df["trade_date"].iloc[i]),
-                "profit_ratio": profit_ratio,
-                "avg_cost": avg_cost,
-                "cost_90_low": cost_90_low,
-                "cost_90_high": cost_90_high,
-                "concentration_90": concentration_90,
-                "cost_70_low": cost_70_low,
-                "cost_70_high": cost_70_high,
-                "concentration_70": concentration_70,
-                "chip_concentration": chip_concentration,
-            })
+            arr_profit_ratio[i] = profit_ratio
+            arr_avg_cost[i] = avg_cost
+            arr_cost_90_low[i] = cost_90_low
+            arr_cost_90_high[i] = cost_90_high
+            arr_cost_70_low[i] = cost_70_low
+            arr_cost_70_high[i] = cost_70_high
+            arr_concentration_90[i] = concentration_90
+            arr_concentration_70[i] = concentration_70
+            arr_chip_concentration[i] = chip_concentration
 
-    return pd.DataFrame(records)
+    return pd.DataFrame({
+        "trade_date": dates,
+        "profit_ratio": arr_profit_ratio,
+        "avg_cost": arr_avg_cost,
+        "cost_90_low": arr_cost_90_low,
+        "cost_90_high": arr_cost_90_high,
+        "concentration_90": arr_concentration_90,
+        "cost_70_low": arr_cost_70_low,
+        "cost_70_high": arr_cost_70_high,
+        "concentration_70": arr_concentration_70,
+        "chip_concentration": arr_chip_concentration,
+    })
 
 
 def _process_chip_one(

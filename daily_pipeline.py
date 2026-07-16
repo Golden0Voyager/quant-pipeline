@@ -200,9 +200,9 @@ def run_all(
     logger.info(f"⏱️  总耗时: {elapsed:.1f}s ({elapsed/60:.1f}min)")
     logger.info("=" * 60)
 
-    # 检查是否有任务崩溃，供 main() 决定退出码
+    # 检查是否有任务失败，供 main() 决定退出码
     results["crashed"] = any(
-        isinstance(v, dict) and v.get("status") == "crashed"
+        isinstance(v, dict) and (v.get("status") == "crashed" or bool(v.get("error")))
         for v in results.values()
     )
     return results

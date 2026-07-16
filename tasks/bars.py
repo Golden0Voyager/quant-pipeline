@@ -232,6 +232,7 @@ def update_bars(
             should_abort, abort_msg = monitor.should_abort()
             if should_abort:
                 logger.warning(f"⛔ {abort_msg}")
+                monitor.flush()
                 ProgressTracker.save(
                     task="update_bars",
                     last_symbol=last_symbol,
@@ -359,6 +360,7 @@ def update_bars(
     logger.info(f"  ❌ 失败: {failed_count} 只")
     logger.info("=" * 60)
 
+    monitor.flush()
     return {
         "success": success_count,
         "failed": failed_count,
@@ -457,6 +459,11 @@ def _update_single_bar(
                     return "failed"
 
             # 2. 正常增量/全量拉取路径
+            # 轻量查询：先检查 MAX(trade_date)，避免全表扫描（约 5500 次全表读 → 1 次聚合查询）
+            latest_date = db.get_latest_bar_date(symbol)
+            if isinstance(latest_date, str) and latest_date >= datetime.now().strftime("%Y-%m-%d"):
+                return "skipped"
+            # 非最新时才读取全量数据做增量更新
             if db_lock:
                 with db_lock:
                     existing = db.get_daily_bars(symbol)
