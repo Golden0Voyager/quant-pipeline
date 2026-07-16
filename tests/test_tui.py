@@ -505,30 +505,44 @@ def test_status_for_table_with_timestamp():
     assert emoji == "[yellow]●[/yellow]"
 
 
+
+
 @pytest.mark.asyncio
-async def test_data_completeness_sorts_lagging_to_bottom():
+async def test_data_completeness_sorts_by_freshness():
     from tui import DataCompletenessWidget, PipelineApp
     app = PipelineApp()
     async with app.run_test():
         widget = app.query_one("#data-completeness", DataCompletenessWidget)
+        # 用真实表名构造各状态：最新、延迟发布、略滞后、滞后、按月、按季
         widget._counts = {
-            "daily_bars": 7000000,
-            "margin_trading": 46607,
-            "global_index": 56,
+            "daily_bars": 7000000,      # 最新
+            "fx_rate": 13,              # 延迟发布
+            "margin_trading": 46607,    # 略滞后
+            "global_index": 56,         # 滞后
+            "institutional_holdings": 32149,  # 按月更新
+            "quarterly_financials": 5531,     # 按季更新
         }
         widget._latest_dates = {
             "daily_bars": "2026-07-14",
+            "fx_rate": "2026-07-14",
             "margin_trading": "2026-07-13",
             "global_index": "2026-07-10",
+            "institutional_holdings": "2026-06-30",
+            "quarterly_financials": "2026-03-31",
         }
         captured = []
         with patch.object(widget._content, "update", side_effect=captured.append):
             widget._rebuild_content()
         text = "\n".join(captured)
-        daily_pos = text.find("Daily Bars")
-        margin_pos = text.find("Margin Trading")
-        global_pos = text.find("Global Index")
-        assert daily_pos < margin_pos < global_pos
+        positions = {
+            "Daily Bars": text.find("Daily Bars"),
+            "USD/CNY": text.find("USD/CNY"),
+            "Margin Trading": text.find("Margin Trading"),
+            "Global Index": text.find("Global Index"),
+            "Inst. Holdings": text.find("Inst. Holdings"),
+            "Quarterly Fin.": text.find("Quarterly Fin."),
+        }
+        assert positions["Daily Bars"] < positions["USD/CNY"] < positions["Margin Trading"] < positions["Global Index"] < positions["Inst. Holdings"] < positions["Quarterly Fin."]
 
 
 def test_parse_progress_valid(tmp_path):

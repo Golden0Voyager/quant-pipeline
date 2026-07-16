@@ -496,6 +496,32 @@ def update_usd(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
+# 新浪财经全球指数代码 -> 当前数据库使用的东方财富指数代码
+# 用于东财实时接口失败时，用新浪历史行情 fallback 更新同一张表
+_SINA_TO_EM_CODE: dict[str, str | None] = {
+    "UKX": "FTSE",
+    "DAX": "GDAXI",
+    "INDEXCF": None,      # 俄罗斯 MICEX，数据库中暂无对应
+    "CAC": "FCHI",
+    "SWI20": None,        # 瑞士股票指数，数据库中暂无对应
+    "FTSEMIB": "MIB",
+    "AEX": "AEX",
+    "IBEX": "IBEX",
+    "SX5E": "SX5E",
+    "GSPTSE": "TSX",
+    "MXX": "MXX",
+    "IBOV": "BVSP",
+    "TWJQ": "TWII",
+    "NKY": "N225",
+    "KOSPI": "KS11",      # 东财另有 KOSPI200，新浪仅提供综合指数
+    "JCI": "JKSE",
+    "SENSEX": "SENSEX",
+    "AS51": "AS51",
+    "NZ250": "NZ50",
+    "CASE": "CASE",
+}
+
+
 def _fetch_global_index(trade_date: str) -> list[dict]:
     """获取全球主要指数实时行情。"""
     if ak is None:
@@ -529,8 +555,64 @@ def _fetch_global_index(trade_date: str) -> list[dict]:
         return []
 
 
+def _fetch_global_index_sina(trade_date: str) -> list[dict]:
+    """当东财实时接口失败时，使用新浪财经全球指数历史行情作为 fallback。
+
+    返回字段与 _fetch_global_index 保持一致，以便复用同一张表。
+    """
+    if ak is None:
+        return []
+    try:
+        name_df = ak.index_global_name_table()
+    except Exception as e:
+        logger.warning(f"⚠️ 新浪全球指数列表获取失败: {e}")
+        return []
+
+    records: list[dict] = []
+    for _, row in name_df.iterrows():
+        sina_code = str(row.get("代码", "")).strip()
+        name = str(row.get("指数名称", "")).strip()
+        em_code = _SINA_TO_EM_CODE.get(sina_code)
+        if em_code is None:
+            continue
+        try:
+            df = ak.index_global_hist_sina(name)
+            if df is None or df.empty:
+                continue
+            df = df.sort_values("date").reset_index(drop=True)
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) >= 2 else latest
+            close = float(latest["close"])
+            pre_close = float(prev["close"])
+            change_amount = close - pre_close
+            change_pct = (change_amount / pre_close * 100) if pre_close else 0.0
+            high = float(latest["high"])
+            low = float(latest["low"])
+            amplitude = ((high - low) / pre_close * 100) if pre_close else 0.0
+            records.append(
+                {
+                    "trade_date": str(latest["date"])[:10],
+                    "index_code": em_code,
+                    "index_name": name,
+                    "latest_price": close,
+                    "change_amount": round(change_amount, 4),
+                    "change_pct": round(change_pct, 4),
+                    "open": float(latest["open"]),
+                    "high": high,
+                    "low": low,
+                    "pre_close": pre_close,
+                    "amplitude": round(amplitude, 4),
+                    "quote_time": "",
+                    "data_source": "akshare_sina_fallback",
+                }
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ 新浪全球指数 {name} 获取失败: {e}")
+    return records
+
+
 def update_global_index(db: DatabaseInterface) -> dict:
-    """获取全球主要指数实时行情并保存。"""
+    """获取全球主要指数实时行情并保存；东财失败时自动切新浪 fallback。"""
     logger.info("\n" + "=" * 60)
     logger.info("🌍 任务: 更新全球指数")
     logger.info("=" * 60)
@@ -541,6 +623,9 @@ def update_global_index(db: DatabaseInterface) -> dict:
 
     try:
         records = _fetch_global_index(_get_expected_latest_trading_day())
+        if not records:
+            logger.warning("⚠️ 东财全球指数无数据，尝试新浪 fallback...")
+            records = _fetch_global_index_sina(_get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 全球指数无数据")
             return {"saved": 0, "total": 0}

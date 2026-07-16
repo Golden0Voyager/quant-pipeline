@@ -797,16 +797,17 @@ class DataCompletenessWidget(VerticalScroll):
         except OSError:
             return None
 
-    # 数据新鲜度排序权重：数字越小越靠前，滞后/无数据沉底
+    # 数据新鲜度排序权重：数字越小越靠前。
+    # 用户指定顺序：最新 → 延迟发布 → 略滞后 → 滞后 → 按月更新 → 按季更新 → 无数据
     _STATUS_ORDER: dict[str, int] = {
         "更新中": 0,
         "最新": 1,
         "延迟发布": 2,
-        "按月更新": 2,
-        "按季更新": 2,
         "略滞后": 3,
         "滞后": 4,
-        "无数据": 5,
+        "按月更新": 5,
+        "按季更新": 6,
+        "无数据": 7,
     }
 
     @classmethod
