@@ -11,11 +11,12 @@ import logging
 import os  # noqa: F401
 import sqlite3
 import time  # noqa: F401
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd  # noqa: F401
 
+from core.calendar import get_expected_latest_trading_day
 from core.config import DB_PATH, SHARED_DATA_DIR  # noqa: F401
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.utils import should_skip_beijing, should_update  # noqa: F401
@@ -37,25 +38,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _get_expected_latest_trading_day() -> str:
-    """获取期望的最新交易日日期 (YYYY-MM-DD)。
-    如果是周末，期望最新交易日为上周五；
-    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
-    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
-    """
-    now = datetime.now()
-    target = now
-    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
-        target -= timedelta(days=1)
-
-    # 如果目标日期是周末，则向前回滚到周五
-    while target.weekday() >= 5:
-        target -= timedelta(days=1)
-
-    return target.strftime("%Y-%m-%d")
 
 
 # ===========================================================================
@@ -182,7 +164,7 @@ def health_check(db: DatabaseInterface) -> dict:
     report_lines.append(f"  最新板块资金流日期: {latest_sector}")
     report_lines.append(f"  最新股东户数报告期: {latest_holder}")
 
-    expected_latest = _get_expected_latest_trading_day()
+    expected_latest = get_expected_latest_trading_day()
     if latest_bar < expected_latest:
         issues.append(f"日线数据未更新到最新: {latest_bar} (期望最新: {expected_latest}, 今天是 {today})")
 

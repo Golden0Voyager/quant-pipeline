@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
+from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface
 
 try:
@@ -23,25 +24,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _get_expected_latest_trading_day() -> str:
-    """获取期望的最新交易日日期 (YYYY-MM-DD)。
-    如果是周末，期望最新交易日为上周五；
-    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
-    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
-    """
-    now = datetime.now()
-    target = now
-    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
-        target -= timedelta(days=1)
-
-    # 如果目标日期是周末，则向前回滚到周五
-    while target.weekday() >= 5:
-        target -= timedelta(days=1)
-
-    return target.strftime("%Y-%m-%d")
 
 
 # ===========================================================================
@@ -90,7 +72,7 @@ def update_north_flow(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_north_flow(_get_expected_latest_trading_day())
+        records = _fetch_north_flow(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 北向资金无数据")
             return {"saved": 0, "total": 0}
@@ -152,7 +134,7 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_index_daily(_get_expected_latest_trading_day())
+        records = _fetch_index_daily(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 指数日线无数据")
             return {"saved": 0, "total": 0}
@@ -241,7 +223,7 @@ def update_limit_up_down(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "error": "akshare not installed"}
 
-    trade_date = _get_expected_latest_trading_day()
+    trade_date = get_expected_latest_trading_day()
     try:
         limit_up = _fetch_limit_up_down(trade_date)
         limit_down = _fetch_limit_down(trade_date)
@@ -355,7 +337,7 @@ def update_gold_price(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_gold_price(_get_expected_latest_trading_day())
+        records = _fetch_gold_price(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 国际金价无数据")
             return {"saved": 0, "total": 0}
@@ -416,7 +398,7 @@ def update_crude_oil(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_crude_oil(_get_expected_latest_trading_day())
+        records = _fetch_crude_oil(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 国际原油无数据")
             return {"saved": 0, "total": 0}
@@ -479,7 +461,7 @@ def update_usd(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_usd(_get_expected_latest_trading_day())
+        records = _fetch_usd(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 外汇汇率无数据")
             return {"saved": 0, "total": 0}
@@ -622,10 +604,10 @@ def update_global_index(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_global_index(_get_expected_latest_trading_day())
+        records = _fetch_global_index(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 东财全球指数无数据，尝试新浪 fallback...")
-            records = _fetch_global_index_sina(_get_expected_latest_trading_day())
+            records = _fetch_global_index_sina(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 全球指数无数据")
             return {"saved": 0, "total": 0}
@@ -690,7 +672,7 @@ def update_us_treasury(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_us_treasury(_get_expected_latest_trading_day())
+        records = _fetch_us_treasury(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 中美国债收益率无数据")
             return {"saved": 0, "total": 0}

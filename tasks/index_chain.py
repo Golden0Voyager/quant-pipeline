@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 import os  # noqa: F401
 import time  # noqa: F401
-from datetime import datetime, timedelta
 
 import pandas as pd
 
+from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
 from core.utils import infer_market  # noqa: F401
 from interface import DatabaseInterface
@@ -17,25 +17,6 @@ except ImportError:
     ak = None
 
 logger = logging.getLogger(__name__)
-
-
-def _get_expected_latest_trading_day() -> str:
-    """获取期望的最新交易日日期 (YYYY-MM-DD)。
-    如果是周末，期望最新交易日为上周五；
-    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
-    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
-    """
-    now = datetime.now()
-    target = now
-    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
-        target -= timedelta(days=1)
-
-    # 如果目标日期是周末，则向前回滚到周五
-    while target.weekday() >= 5:
-        target -= timedelta(days=1)
-
-    return target.strftime("%Y-%m-%d")
 
 
 def _fetch_index_daily(trade_date: str) -> list[dict]:
@@ -81,7 +62,7 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_index_daily(_get_expected_latest_trading_day())
+        records = _fetch_index_daily(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 指数日线无数据")
             return {"saved": 0, "total": 0}

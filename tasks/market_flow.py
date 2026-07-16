@@ -10,6 +10,7 @@ import logging
 import time  # noqa: F401
 from datetime import datetime, timedelta
 
+from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -93,25 +94,6 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 # ===========================================================================
 
 
-def _get_expected_latest_trading_day() -> str:
-    """获取期望的最新交易日日期 (YYYY-MM-DD)。
-    如果是周末，期望最新交易日为上周五；
-    如果是周一至周五，且在 15:30 之前，期望最新交易日为前一个交易日；
-    如果是周一至周五，且在 15:30 之后，期望最新交易日为今天。
-    """
-    now = datetime.now()
-    target = now
-    # 如果是交易日（周一至周五），在 15:30 之前，预期的数据最新是前一天
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
-        target -= timedelta(days=1)
-
-    # 如果目标日期是周末，则向前回滚到周五
-    while target.weekday() >= 5:
-        target -= timedelta(days=1)
-
-    return target.strftime("%Y-%m-%d")
-
-
 def _safe_fetch_margin_detail(fetcher, date: str, exchange: str) -> pd.DataFrame | None:
     """安全获取融资融券明细，处理 AkShare 空数据返回时的 pandas Length mismatch 异常。"""
     try:
@@ -138,7 +120,7 @@ def update_margin_trading(db: DatabaseInterface, symbols: list[str] | None = Non
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = _get_expected_latest_trading_day().replace("-", "")
+    target_date = get_expected_latest_trading_day().replace("-", "")
     previous_date = (datetime.strptime(target_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
     target_dates = [target_date, previous_date]
     batch_records = []
@@ -211,7 +193,7 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = _get_expected_latest_trading_day().replace("-", "")
+    target_date = get_expected_latest_trading_day().replace("-", "")
     try:
         df = ak.stock_lhb_detail_em(start_date=target_date, end_date=target_date)
         if df is None or df.empty:
@@ -271,7 +253,7 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = _get_expected_latest_trading_day().replace("-", "")
+    target_date = get_expected_latest_trading_day().replace("-", "")
     try:
         df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date, end_date=target_date)
         if df is None or df.empty:
@@ -356,7 +338,7 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = _get_expected_latest_trading_day()
+    target_date = get_expected_latest_trading_day()
 
     try:
         df = _fetch_sector_fund_flow(target_date)

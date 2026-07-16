@@ -16,7 +16,7 @@ import pandas as pd  # noqa: F401
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.config import SHARED_DATA_DIR  # noqa: F401
-from core.utils import infer_market  # noqa: F401
+from core.utils import infer_market, should_skip_beijing  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -28,14 +28,6 @@ logger = logging.getLogger(__name__)
 
 # 当 fundamentals 表某日记录数达到该阈值时，视为已完成并跳过
 MIN_FUNDAMENTALS_STOCK_COUNT = 5000
-
-
-def should_skip_beijing(symbol: str) -> bool:
-    """判断是否根据环境变量配置跳过北交所股票。"""
-    include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
-    if include_bj:
-        return False
-    return is_beijing_stock(symbol)
 
 
 # ===========================================================================

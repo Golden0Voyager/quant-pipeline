@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from core.config import SHARED_DATA_DIR
 
@@ -86,3 +86,18 @@ def is_trading_day(d: date | None = None) -> bool:
     # AkShare fallback: 仅用周末判断（周一~五都认为是交易日）
     logger.warning("⚠️ AkShare 不可用，仅用周末判断交易日")
     return True
+
+
+def get_expected_latest_trading_day() -> str:
+    """获取期望的最新交易日日期 (YYYY-MM-DD)。
+
+    周末 → 上周五；周一至周五 15:30 之前 → 前一天；15:30 之后 → 今天。
+    用于判断数据新鲜度（如 TUI 的数据完整性面板）和任务调度。
+    """
+    now = datetime.now()
+    target = now
+    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
+        target -= timedelta(days=1)
+    while target.weekday() >= 5:
+        target -= timedelta(days=1)
+    return target.strftime("%Y-%m-%d")

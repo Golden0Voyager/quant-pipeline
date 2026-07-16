@@ -346,8 +346,8 @@ def test_format_chinese_magnitude():
 
 
 def test_get_expected_latest_trading_day_is_weekday():
-    from tui import _get_expected_latest_trading_day
-    result = _get_expected_latest_trading_day()
+    from core.calendar import get_expected_latest_trading_day
+    result = get_expected_latest_trading_day()
     from datetime import datetime
     dt = datetime.strptime(result, "%Y-%m-%d")
     assert dt.weekday() < 5
@@ -487,7 +487,7 @@ async def test_data_completeness_shows_freshness_and_dates():
         }
         captured = []
         with patch.object(widget._content, "update", side_effect=captured.append), \
-             patch("tui._get_expected_latest_trading_day", return_value="2026-07-09"):
+             patch("tui.get_expected_latest_trading_day", return_value="2026-07-09"):
             widget._rebuild_content()
         text = "\n".join(captured)
         assert "期望最新日期" in text
@@ -531,7 +531,7 @@ async def test_data_completeness_sorts_by_freshness():
             "quarterly_financials": "2026-03-31",
         }
         captured = []
-        with patch.object(widget._content, "update", side_effect=captured.append), patch("tui._get_expected_latest_trading_day", return_value="2026-07-14"):
+        with patch.object(widget._content, "update", side_effect=captured.append), patch("tui.get_expected_latest_trading_day", return_value="2026-07-14"):
             widget._rebuild_content()
         text = "\n".join(captured)
         positions = {

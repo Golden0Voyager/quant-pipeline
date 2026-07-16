@@ -18,6 +18,8 @@ from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Label, RichLog, Select, Static
 
+from core.calendar import get_expected_latest_trading_day
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
@@ -375,20 +377,6 @@ NO_DATE_TABLES: set[str] = {
 }
 
 
-def _get_expected_latest_trading_day() -> str:
-    """获取期望的最新交易日日期 (YYYY-MM-DD)。
-
-    周末 → 上周五；周一至周五 15:30 之前 → 前一天；15:30 之后 → 今天。
-    """
-    from datetime import datetime, timedelta
-
-    now = datetime.now()
-    target = now
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
-        target -= timedelta(days=1)
-    while target.weekday() >= 5:
-        target -= timedelta(days=1)
-    return target.strftime("%Y-%m-%d")
 
 
 def _normalize_date(value: object) -> str | None:
@@ -764,7 +752,7 @@ class DataCompletenessWidget(VerticalScroll):
 
         串行执行以避免多查询同时抢占同一块磁盘 I/O 导致争用变慢。
         """
-        expected = _get_expected_latest_trading_day()
+        expected = get_expected_latest_trading_day()
         counts = await asyncio.to_thread(get_all_table_counts, str(DEFAULT_DB_PATH), fast=False)
         latest = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
         cov = await asyncio.to_thread(get_daily_bars_coverage, str(DEFAULT_DB_PATH), expected)
@@ -851,7 +839,7 @@ class DataCompletenessWidget(VerticalScroll):
             return
 
         daily_bars = counts.get("daily_bars", 0) or 1
-        expected_date = _get_expected_latest_trading_day()
+        expected_date = get_expected_latest_trading_day()
         daily_up_to_date, daily_total = self._daily_coverage
 
         total_rows = sum(v for k, v in counts.items() if not k.startswith("_"))
