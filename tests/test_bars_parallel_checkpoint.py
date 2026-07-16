@@ -5,7 +5,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
 
 import daily_pipeline
 from core.progress import ProgressTracker
@@ -50,15 +49,15 @@ def test_parallel_checkpoint_saves_batch_boundary():
          patch("tasks.bars.BATCH_SIZE", 4), \
          patch("tasks.bars.PROGRESS_FLUSH_INTERVAL", 1), \
          patch.object(ThreadPoolExecutor, "submit", side_effect=mock_submit), \
-         patch("tasks.bars.as_completed", return_value=reversed_order):
-        with patch.object(ProgressTracker, "save", side_effect=capture_save):
-            ProgressTracker.clear()
-            daily_pipeline.update_bars(db, loader)
+         patch("tasks.bars.as_completed", return_value=reversed_order), \
+         patch.object(ProgressTracker, "save", side_effect=capture_save):
+        ProgressTracker.clear()
+        daily_pipeline.update_bars(db, loader)
 
     # After fix: batch-end save must use batch[-1] ("000004"), not "000001"
     # (which would be the last symbol from reversed as_completed order)
-    if save_calls:
-        last_save = save_calls[-1]
-        assert last_save["last_symbol"] in ("000004",), \
-            f"Expected batch[-1]='000004', got '{last_save['last_symbol']}'"
+    assert save_calls, "ProgressTracker.save was never called"
+    last_save = save_calls[-1]
+    assert last_save["last_symbol"] in ("000004",), \
+        f"Expected batch[-1]='000004', got '{last_save['last_symbol']}'"
     ProgressTracker.clear()

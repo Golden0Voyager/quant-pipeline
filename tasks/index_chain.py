@@ -134,7 +134,8 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
 
     try:
         rows = conn.execute(
-            "SELECT DISTINCT ts_code FROM watchlist ORDER BY ts_code"
+            "SELECT DISTINCT ts_code FROM watchlist "
+            "WHERE status = 'tracking' ORDER BY ts_code"
         ).fetchall()
         symbols.update(r[0] for r in rows)
     except Exception:

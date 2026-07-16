@@ -46,5 +46,8 @@ ignore = ["E501"]
 "reconcile_with_akshare.py" = ["E402"]
 "__init__.py" = ["N999"]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [tool.coverage.report]
 fail_under = 84

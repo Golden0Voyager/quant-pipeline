@@ -20,6 +20,13 @@ from tui import (
 )
 
 
+def _close_coro(coro, **_kwargs):
+    """Close a coroutine captured by a mocked task scheduler."""
+    if asyncio.iscoroutine(coro):
+        coro.close()
+    return MagicMock()
+
+
 @pytest.mark.asyncio
 async def test_app_title():
     app = PipelineApp()
@@ -285,7 +292,7 @@ async def test_action_handlers_use_run_in_background():
     expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
-         patch("asyncio.create_task") as mock_create_task, \
+         patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
          patch.object(app, "push_screen") as mock_push_screen:
 
         await app.action_run_pipeline()
@@ -447,7 +454,7 @@ async def test_run_or_schedule_run_later():
             _, callback = mock_push_screen.call_args[0]
             with patch.object(app, "_background_tasks", new_callable=set), \
                  patch("tui._seconds_until_safe", return_value=1), \
-                 patch("asyncio.create_task") as mock_create_task:
+                 patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task:
                 callback("run-later")
                 mock_create_task.assert_called_once()
 
@@ -635,9 +642,10 @@ def test_code_to_ts_code_invalid():
 def test_sync_watchlists_no_dir(tmp_path, monkeypatch):
     from tui import sync_watchlists_from_files
     monkeypatch.setattr("tui.WATCHLIST_DIR", tmp_path / "nonexistent")
-    added, files = sync_watchlists_from_files(":memory:")
-    assert added == 0
-    assert files == 0
+    result = sync_watchlists_from_files(":memory:")
+    assert result.added == 0
+    assert result.deactivated == 0
+    assert result.files == 0
 
 
 def test_sync_watchlists_empty_dir(tmp_path, monkeypatch):
@@ -645,9 +653,9 @@ def test_sync_watchlists_empty_dir(tmp_path, monkeypatch):
     watch_dir = tmp_path / "watchlists"
     watch_dir.mkdir()
     monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
-    added, files = sync_watchlists_from_files(":memory:")
-    assert added == 0
-    assert files == 0
+    result = sync_watchlists_from_files(":memory:")
+    assert result.added == 0
+    assert result.files == 0
 
 
 def test_sync_watchlists_with_file(tmp_path, monkeypatch):
@@ -661,9 +669,9 @@ def test_sync_watchlists_with_file(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
-    added, files = sync_watchlists_from_files(db_path)
-    assert added == 2
-    assert files == 1
+    result = sync_watchlists_from_files(db_path)
+    assert result.added == 2
+    assert result.files == 1
 
 
 def test_sync_watchlists_with_comments(tmp_path, monkeypatch):
@@ -677,8 +685,123 @@ def test_sync_watchlists_with_comments(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
-    added, _ = sync_watchlists_from_files(db_path)
-    assert added == 1
+    result = sync_watchlists_from_files(db_path)
+    assert result.added == 1
+
+
+def _create_watchlist_db(path: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE watchlist ("
+        "ts_code TEXT PRIMARY KEY, added_date TEXT, "
+        "source_scan TEXT, status TEXT, "
+        "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_sync_watchlists_deactivates_removed_txt_symbols(tmp_path, monkeypatch):
+    from tui import sync_watchlists_from_files
+
+    watch_dir = tmp_path / "watchlists"
+    watch_dir.mkdir()
+    (watch_dir / "main.txt").write_text("600000\n", encoding="utf-8")
+    db_path = str(tmp_path / "test.db")
+    _create_watchlist_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "INSERT INTO watchlist (ts_code, added_date, source_scan, status, updated_at) "
+        "VALUES (?, '2026-07-16', 'watchlist_sync', 'tracking', '2026-01-01 00:00:00')",
+        [("600000.SH",), ("000001.SZ",)],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
+
+    result = sync_watchlists_from_files(db_path)
+
+    assert result.deactivated == 1
+    conn = sqlite3.connect(db_path)
+    statuses = dict(conn.execute("SELECT ts_code, status FROM watchlist"))
+    removed_updated_at = conn.execute(
+        "SELECT updated_at FROM watchlist WHERE ts_code='000001.SZ'"
+    ).fetchone()[0]
+    conn.close()
+    assert statuses == {"600000.SH": "tracking", "000001.SZ": "inactive"}
+    assert removed_updated_at != "2026-01-01 00:00:00"
+
+
+def test_sync_watchlists_reactivates_returning_symbol(tmp_path, monkeypatch):
+    from tui import sync_watchlists_from_files
+
+    watch_dir = tmp_path / "watchlists"
+    watch_dir.mkdir()
+    (watch_dir / "main.txt").write_text("000001\n", encoding="utf-8")
+    db_path = str(tmp_path / "test.db")
+    _create_watchlist_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO watchlist (ts_code, added_date, source_scan, status, updated_at) VALUES "
+        "('000001.SZ', '2026-07-01', 'watchlist_sync', 'inactive', '2026-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
+
+    result = sync_watchlists_from_files(db_path)
+
+    assert result.reactivated == 1
+    conn = sqlite3.connect(db_path)
+    status, updated_at = conn.execute(
+        "SELECT status, updated_at FROM watchlist WHERE ts_code='000001.SZ'"
+    ).fetchone()
+    conn.close()
+    assert status == "tracking"
+    assert updated_at != "2026-01-01 00:00:00"
+
+
+def test_sync_watchlists_empty_directory_deactivates_only_sync_source(tmp_path, monkeypatch):
+    from tui import sync_watchlists_from_files
+
+    watch_dir = tmp_path / "watchlists"
+    watch_dir.mkdir()
+    db_path = str(tmp_path / "test.db")
+    _create_watchlist_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "INSERT INTO watchlist (ts_code, added_date, source_scan, status) "
+        "VALUES (?, '2026-07-16', ?, 'tracking')",
+        [("600000.SH", "watchlist_sync"), ("000001.SZ", "manual")],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
+
+    result = sync_watchlists_from_files(db_path)
+
+    assert result.deactivated == 1
+    conn = sqlite3.connect(db_path)
+    statuses = dict(conn.execute("SELECT ts_code, status FROM watchlist"))
+    conn.close()
+    assert statuses == {"600000.SH": "inactive", "000001.SZ": "tracking"}
+
+
+def test_sync_watchlists_reports_database_failure(tmp_path, monkeypatch):
+    from tui import sync_watchlists_from_files
+
+    watch_dir = tmp_path / "watchlists"
+    watch_dir.mkdir()
+    (watch_dir / "main.txt").write_text("600000\n", encoding="utf-8")
+    db_path = str(tmp_path / "missing_table.db")
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr("tui.WATCHLIST_DIR", watch_dir)
+
+    result = sync_watchlists_from_files(db_path)
+
+    assert result.success is False
+    assert result.error
+    assert "watchlist" in result.error
 
 
 # ===========================================================================
@@ -734,7 +857,7 @@ def test_get_all_table_counts_no_db():
 @pytest.mark.asyncio
 async def test_action_run_reconcile():
     app = PipelineApp()
-    with patch.object(app, "_create_background_task") as mock_bg, \
+    with patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg, \
          patch.object(app, "notify") as mock_notify:
         await app.action_run_reconcile()
         mock_bg.assert_called_once()
@@ -745,10 +868,54 @@ async def test_action_run_reconcile():
 async def test_on_mount_no_processes():
     app = PipelineApp()
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
-         patch.object(app, "_create_background_task") as mock_bg:
+         patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg:
         await app.on_mount()
-        # 没有后台进程时直接返回，不会创建后台同步任务
-        mock_bg.assert_not_called()
+        # 没有后台进程时仍应调度自选股同步
+        mock_bg.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_watchlists_notification_reports_all_changes():
+    from tui import WatchlistSyncResult
+    app = PipelineApp()
+    result = WatchlistSyncResult(
+        added=1,
+        reactivated=2,
+        deactivated=3,
+        files=4,
+        success=True,
+        error=None,
+    )
+    with patch("tui.sync_watchlists_from_files", return_value=result), \
+         patch.object(app, "notify") as notify:
+        await app._sync_watchlists()
+
+    message = notify.call_args.args[0]
+    assert "新增 1" in message
+    assert "恢复 2" in message
+    assert "停用 3" in message
+    assert "4 个文件" in message
+
+
+@pytest.mark.asyncio
+async def test_sync_watchlists_notification_reports_failure():
+    from tui import WatchlistSyncResult
+
+    app = PipelineApp()
+    result = WatchlistSyncResult(
+        added=0,
+        reactivated=0,
+        deactivated=0,
+        files=1,
+        success=False,
+        error="database unavailable",
+    )
+    with patch("tui.sync_watchlists_from_files", return_value=result), \
+         patch.object(app, "notify") as notify:
+        await app._sync_watchlists()
+
+    assert "database unavailable" in notify.call_args.args[0]
+    assert notify.call_args.kwargs["severity"] == "warning"
 
 
 @pytest.mark.asyncio
@@ -764,7 +931,7 @@ async def test_action_stop_pipeline_also_stops_daemon():
 
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
          patch("tui.get_daemon_status", return_value=("Running", 88888)), \
-         patch.object(app, "_create_background_task") as mock_bg, \
+         patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg, \
          patch("logging.getLogger", return_value=MagicMock()):
         await app.action_stop_pipeline()
         mock_bg.assert_called()  # should schedule daemon stop

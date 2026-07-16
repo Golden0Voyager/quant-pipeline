@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,23 @@ class SmartMoneyDBProvider:
     def __init__(self, db_path: str | None = None):
         self._db = DatabaseManager(db_path=db_path)
         self._ensure_wal_mode()
-        self._ensure_chip_tables()
+        self._ensure_tables()
+        # 共享写连接 + 写锁：所有 batch 写入串行化，避免并发写导致 database is locked
+        self._write_lock = threading.Lock()
+        self._write_conn: sqlite3.Connection | None = None
+
+    def _get_write_conn(self) -> sqlite3.Connection:
+        """复用单个写连接（类似 DatabaseManager._connect_for_write）。
+
+        必须在 self._write_lock 保护下使用。
+        """
+        if self._write_conn is None:
+            conn = sqlite3.connect(str(self._db.db_path), timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            self._write_conn = conn
+        return self._write_conn
 
     def _ensure_wal_mode(self) -> None:
         """启用 WAL 模式以提升并发读写性能。"""
@@ -44,10 +61,15 @@ class SmartMoneyDBProvider:
             # WAL 启用失败不应阻塞正常流程
             pass
 
-    def _ensure_chip_tables(self) -> None:
-        """确保 chip_distribution_em 表存在（第二阶段在线校验用）。"""
+    def _ensure_tables(self) -> None:
+        """兜底 DDL：确保管道依赖的表存在。
+
+        即使外部 _init_database 因并发/中断未能执行全部 DDL，
+        这里保证 stock_list / fundamentals / chip_distribution 及其变体存在。
+        """
         try:
             with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                # chip_distribution_em（原有）
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS chip_distribution_em (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +90,51 @@ class SmartMoneyDBProvider:
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_chip_distribution_em_code_date
                     ON chip_distribution_em(ts_code, trade_date DESC)
+                """)
+                # chip_distribution
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chip_distribution (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT NOT NULL,
+                        trade_date DATE NOT NULL,
+                        profit_ratio REAL,
+                        avg_cost REAL,
+                        cost_90_low REAL,
+                        cost_90_high REAL,
+                        concentration_90 REAL,
+                        cost_70_low REAL,
+                        cost_70_high REAL,
+                        concentration_70 REAL,
+                        chip_concentration REAL,
+                        UNIQUE(ts_code, trade_date)
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_chip_distribution_code_date
+                    ON chip_distribution(ts_code, trade_date DESC)
+                """)
+                # stock_list
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_list (
+                        code TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        market TEXT,
+                        industry TEXT,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # fundamentals——只补必要列，更多列在写入时由上层保障
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS fundamentals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT NOT NULL,
+                        trade_date DATE NOT NULL,
+                        pe_ttm REAL,
+                        pb REAL,
+                        ps_ttm REAL,
+                        dividend_yield REAL,
+                        UNIQUE(ts_code, trade_date)
+                    )
                 """)
         except Exception:
             pass
@@ -99,6 +166,19 @@ class SmartMoneyDBProvider:
 
     def get_daily_bars(self, symbol: str) -> pd.DataFrame:
         return self._db.get_daily_bars(symbol)
+
+    def get_latest_bar_date(self, symbol: str) -> str | None:
+        """轻量查询：直接 SQL 取 MAX(trade_date)，避免全表扫描。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute(
+                    "SELECT MAX(trade_date) FROM daily_bars WHERE ts_code = ?",
+                    (symbol,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
 
     def save_daily_bars(self, symbol: str, df: pd.DataFrame) -> None:
         self._db.save_daily_bars(symbol, df)
@@ -220,11 +300,15 @@ class SmartMoneyDBProvider:
         return self._db.get_chip_distribution_batch(stock_list)
 
     def save_chip_distribution_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存筹码分布数据（使用原始 SQL 因 DatabaseManager 可能缺少 batch 方法）。"""
+        """批量保存筹码分布数据（使用原始 SQL 因 DatabaseManager 可能缺少 batch 方法）。
+
+        使用共享写连接 + 写锁，避免 ThreadPoolExecutor 并发写导致 database is locked。
+        """
         if not records:
             return 0
         try:
-            with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+            with self._write_lock:
+                conn = self._get_write_conn()
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO chip_distribution (
@@ -251,6 +335,7 @@ class SmartMoneyDBProvider:
                         for r in records
                     ],
                 )
+                conn.commit()
                 return conn.total_changes
         except Exception as e:
             logger = logging.getLogger(__name__)
@@ -262,7 +347,8 @@ class SmartMoneyDBProvider:
         if not records:
             return 0
         try:
-            with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+            with self._write_lock:
+                conn = self._get_write_conn()
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO chip_distribution_em (
@@ -289,6 +375,7 @@ class SmartMoneyDBProvider:
                         for r in records
                     ],
                 )
+                conn.commit()
                 return conn.total_changes
         except Exception as e:
             logger = logging.getLogger(__name__)

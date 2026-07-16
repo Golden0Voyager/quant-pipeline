@@ -229,6 +229,7 @@ def update_industry(db: DatabaseInterface) -> dict:
 
         if not _f10_blocked.is_set():
             f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
+            f10_rate_limited = False  # 跟踪是否遇到 HTTP 限流
             for attempt in range(3):
                 session = None
                 try:
@@ -248,6 +249,7 @@ def update_industry(db: DatabaseInterface) -> dict:
                             if industry and industry != "N/A":
                                 return code, industry
                     if resp.status_code in (403, 429, 503):
+                        f10_rate_limited = True
                         time.sleep(2**attempt)
                 except Exception:
                     if attempt < 2:
@@ -255,8 +257,10 @@ def update_industry(db: DatabaseInterface) -> dict:
                 finally:
                     if session is not None:
                         session.close()
-            # 3 次重试全部失败 → 判定被限流，后续跳过
-            _f10_blocked.set()
+            # 仅当遇到 HTTP 限流(403/429/503)时才全局熔断
+            # 普通解析错误、单股票 404、连接超时不阻断后续股票
+            if f10_rate_limited:
+                _f10_blocked.set()
         else:
             logger.debug(f"  F10 API 已被限流，{code} 跳过直接走备用源")
 

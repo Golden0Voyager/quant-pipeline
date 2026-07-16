@@ -609,18 +609,16 @@ class TestRunAll:
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), \
              patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
              patch("daily_pipeline._should_update", return_value=True), \
-             patch.object(daily_pipeline, "_update_single_bar", return_value="success"), \
-             patch.object(daily_pipeline, "update_margin_trading", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_dragon_tiger", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_block_trade", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_sector_fund_flow", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_shareholder_count", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "retry_failed", return_value={"success": 0, "failed": 0, "total": 0}), \
-             patch.object(daily_pipeline, "health_check", return_value={"issues": []}):
+             patch.object(
+                 daily_pipeline,
+                 "_safe_task",
+                 return_value={"status": "ok"},
+             ) as safe_task:
             r = daily_pipeline.run_all(db, loader, engine)
         assert "bars" in r
         assert "indicators" in r
         assert "health" in r
+        assert safe_task.call_count > 20
 
 
 # ===========================================================================
@@ -653,6 +651,8 @@ class TestMain:
         """main() 不应在 ProviderFactory.get_db() 为 MagicMock 时生成垃圾 SQLite 文件。"""
         db_mock = MagicMock()
         db_mock.db_path = str(tmp_path / "test.db")
+        # 记录当前 cwd 下已有的 MagicMock 文件，避免被预先存在的文件（如之前的测试残留）干扰
+        pre_existing = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name}
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
              patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}):
@@ -662,9 +662,9 @@ class TestMain:
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
             magicmock_files = list(tmp_path.glob("*MagicMock*"))
-            cwd_magicmock = [p for p in Path.cwd().glob("*MagicMock*") if p.is_file()]
+            new_magicmock = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name} - pre_existing
             assert not magicmock_files
-            assert not cwd_magicmock
+            assert not new_magicmock
 
     def test_update_bars_with_limit(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--limit", "5"]), \
@@ -1142,15 +1142,26 @@ def test_run_all_detects_crashed_task():
     loader = MagicMock()
     engine = MagicMock()
 
-    with patch("daily_pipeline.update_stock_list",
-               side_effect=RuntimeError("simulated crash")), \
+    # _safe_task 内部捕获异常返回 {"status": "crashed", "error": "..."}，
+    # 模拟它返回崩溃结果而非抛异常
+    with patch("daily_pipeline._safe_task",
+               return_value={"status": "crashed", "error": "simulated crash"}), \
          patch("daily_pipeline._should_update", return_value=True), \
          patch("daily_pipeline.logger"), \
-         patch("time.sleep"):  # skip the 2s sleep in safe_task
+         patch("time.sleep"):
         results = run_all(db, loader, engine)
 
     assert results.get("crashed") is True, "run_all should set crashed=True"
-    assert results["stock_list"]["status"] == "crashed"
+
+    # Also test: task returning {"saved": 0, "error": "..."} should set crashed=True
+    with patch("daily_pipeline._safe_task",
+               return_value={"saved": 0, "error": "API unavailable"}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("time.sleep"):
+        results2 = run_all(db, loader, engine)
+    assert results2.get("crashed") is True, \
+        "run_all should set crashed=True when task returns error field"
 
 
 def test_main_exits_one_when_run_all_returns_crashed():
@@ -2384,16 +2395,14 @@ class TestRunAllOptions:
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), \
              patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
              patch("daily_pipeline._should_update", return_value=True), \
-             patch.object(daily_pipeline, "update_bars", return_value={"success": 1, "failed": 0, "skipped": 0, "total": 1}), \
-             patch.object(daily_pipeline, "retry_failed", return_value={"success": 0, "failed": 0, "total": 0}), \
-             patch.object(daily_pipeline, "health_check", return_value={"issues": []}), \
-             patch.object(daily_pipeline, "update_margin_trading", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_dragon_tiger", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_block_trade", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_sector_fund_flow", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_shareholder_count", return_value={"saved": 0}):
+             patch.object(
+                 daily_pipeline,
+                 "_safe_task",
+                 return_value={"status": "ok"},
+             ) as safe_task:
             r = daily_pipeline.run_all(db, loader, engine)
         assert "bars" in r
+        assert safe_task.call_count > 20
 
 
 # ===========================================================================

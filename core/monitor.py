@@ -22,10 +22,13 @@ class AkShareMonitor:
     FILE = SHARED_DATA_DIR / "akshare_monitor.json"
     WINDOW_SIZE = 30  # 滑动窗口大小
 
+    FLUSH_INTERVAL = 50  # 每 N 条记录写一次磁盘
+
     def __init__(self):
         self.records = self._load()
         self.current_run_attempts = 0
         self.current_run_consecutive_failures = 0
+        self._dirty_since_last_save = 0  # 自上次写入以来新增的记录数
 
     def _load(self) -> list[dict[str, Any]]:
         if not self.FILE.exists():
@@ -57,7 +60,16 @@ class AkShareMonitor:
             "success": success,
             "symbol": symbol,
         })
-        self._save()
+        self._dirty_since_last_save += 1
+        if self._dirty_since_last_save >= self.FLUSH_INTERVAL:
+            self._save()
+            self._dirty_since_last_save = 0
+
+    def flush(self) -> None:
+        """强制刷写缓存中的记录到磁盘。"""
+        if self._dirty_since_last_save > 0:
+            self._save()
+            self._dirty_since_last_save = 0
 
     def get_success_rate(self, window: int | None = None) -> float:
         if not self.records:

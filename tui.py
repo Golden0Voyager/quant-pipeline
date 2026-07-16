@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -511,6 +512,15 @@ def get_active_stock_count(db_path: str) -> int:
         if conn is not None:
             conn.close()
 
+class WatchlistSyncResult(NamedTuple):
+    added: int
+    reactivated: int
+    deactivated: int
+    files: int
+    success: bool
+    error: str | None
+
+
 def _code_to_ts_code(code: str) -> str | None:
     """将纯数字股票代码转为 ts_code 格式（加交易所后缀）。"""
     code = code.strip()
@@ -528,58 +538,87 @@ def _code_to_ts_code(code: str) -> str | None:
     return None
 
 
-def sync_watchlists_from_files(db_path: str) -> tuple[int, int]:
-    """从文本文件同步自选股到数据库，返回 (新增数, 总文件数)。"""
+def sync_watchlists_from_files(db_path: str) -> WatchlistSyncResult:
+    """从文本文件同步自选股到数据库，支持新增/恢复/停用。"""
     watch_dir = Path(WATCHLIST_DIR)
     if not watch_dir.is_dir():
-        logger.warning(f"自选股目录不存在: {watch_dir}")
-        return 0, 0
-
-    txt_files = sorted(watch_dir.glob("*.txt"))
-    if not txt_files:
-        return 0, 0
-
-    new_codes: list[str] = []
-    for fpath in txt_files:
-        text = fpath.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # 格式: "603893  # 瑞芯微" 或 "603893"
-            code = line.split("#")[0].split()[0].strip()
-            ts_code = _code_to_ts_code(code)
-            if ts_code:
-                new_codes.append(ts_code)
-
-    if not new_codes:
-        return 0, len(txt_files)
+        error = f"自选股目录不存在: {watch_dir}"
+        logger.warning(error)
+        return WatchlistSyncResult(0, 0, 0, 0, False, error)
 
     conn = None
+    txt_files: list[Path] = []
     try:
+        txt_files = sorted(watch_dir.glob("*.txt"))
+        desired_codes: set[str] = set()
+        for fpath in txt_files:
+            text = fpath.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                code = line.split("#")[0].split()[0].strip()
+                ts_code = _code_to_ts_code(code)
+                if ts_code:
+                    desired_codes.add(ts_code)
+
         conn = sqlite3.connect(db_path, timeout=5.0)
         cur = conn.cursor()
+
+        existing: dict[str, str] = {
+            row[0]: row[1]
+            for row in cur.execute(
+                "SELECT ts_code, status FROM watchlist "
+                "WHERE source_scan = 'watchlist_sync'"
+            )
+        }
+
         today = datetime.now().strftime("%Y-%m-%d")
-        added = 0
-        for ts_code in new_codes:
-            try:
+        updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        added = reactivated = deactivated = 0
+
+        for ts_code in sorted(desired_codes):
+            if ts_code not in existing:
                 cur.execute(
-                    """INSERT OR IGNORE INTO watchlist
-                       (ts_code, added_date, source_scan, status)
-                       VALUES (?, ?, 'watchlist_sync', 'tracking')""",
+                    "INSERT OR IGNORE INTO watchlist "
+                    "(ts_code, added_date, source_scan, status) "
+                    "VALUES (?, ?, 'watchlist_sync', 'tracking')",
                     (ts_code, today),
                 )
-                if cur.rowcount > 0:
-                    added += 1
-            except Exception:
-                continue
+                added += max(cur.rowcount, 0)
+            elif existing[ts_code] != "tracking":
+                cur.execute(
+                    "UPDATE watchlist SET status='tracking', updated_at=? "
+                    "WHERE ts_code=? AND source_scan='watchlist_sync'",
+                    (updated_at, ts_code),
+                )
+                reactivated += max(cur.rowcount, 0)
+
+        removed_codes = set(existing) - desired_codes
+        if removed_codes:
+            placeholders = ",".join("?" for _ in removed_codes)
+            cur.execute(
+                f"UPDATE watchlist SET status='inactive', updated_at=? "
+                f"WHERE source_scan='watchlist_sync' "
+                f"AND status!='inactive' AND ts_code IN ({placeholders})",
+                (updated_at, *sorted(removed_codes)),
+            )
+            deactivated = max(cur.rowcount, 0)
+
         conn.commit()
-        if added:
-            logger.info(f"✅ 自选股同步完成: 新增 {added} 只, 来源 {len(txt_files)} 个文件")
-        return added, len(txt_files)
-    except Exception as e:
-        logger.warning(f"自选股同步失败: {e}")
-        return 0, len(txt_files)
+        logger.info(
+            "自选股同步完成: 新增 %s, 恢复 %s, 停用 %s, 来源 %s 个文件",
+            added, reactivated, deactivated, len(txt_files),
+        )
+        return WatchlistSyncResult(
+            added, reactivated, deactivated, len(txt_files), True, None
+        )
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        error = str(exc)
+        logger.warning(f"自选股同步失败: {error}")
+        return WatchlistSyncResult(0, 0, 0, len(txt_files), False, error)
     finally:
         if conn is not None:
             conn.close()
@@ -1044,7 +1083,10 @@ class PipelineApp(App):
         self._current_process: asyncio.subprocess.Process | None = None
 
     async def on_mount(self) -> None:
-        """启动时检测后台进程，询问用户是否终止，并同步自选股。"""
+        """启动时同步自选股，然后检测后台进程询问是否终止。"""
+        # 无论是否有后台进程，都调度自选股同步
+        self._create_background_task(self._sync_watchlists())
+
         processes = find_running_pipeline_processes()
         if not processes:
             return
@@ -1061,18 +1103,28 @@ class PipelineApp(App):
         else:
             self.notify("Background processes kept running", severity="information", timeout=3.0)
 
-        # 后台同步自选股
-        self._create_background_task(self._sync_watchlists())
-
     async def _sync_watchlists(self) -> None:
-        with contextlib.suppress(Exception):
-            added, files = sync_watchlists_from_files(str(DEFAULT_DB_PATH))
-            if files:
+        try:
+            result = sync_watchlists_from_files(str(DEFAULT_DB_PATH))
+            if not result.success:
                 self.notify(
-                    f"同步自选股完成: 新增 {added} 只, 来源 {files} 个文件" if added
-                    else f"自选股扫描完成: {files} 个文件, 无新增",
-                    timeout=3.0,
+                    f"自选股同步失败: {result.error or '未知错误'}",
+                    severity="warning",
+                    timeout=6.0,
                 )
+            elif result.files or result.deactivated:
+                self.notify(
+                    f"自选股同步完成: 新增 {result.added}, 恢复 {result.reactivated}, "
+                    f"停用 {result.deactivated}, 来源 {result.files} 个文件",
+                    timeout=4.0,
+                )
+        except Exception as exc:
+            logger.exception("自选股同步发生未处理异常")
+            self.notify(
+                f"自选股同步失败: {exc}",
+                severity="warning",
+                timeout=6.0,
+            )
 
     def _create_background_task(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -1437,4 +1489,3 @@ class PipelineApp(App):
 if __name__ == "__main__":
     app = PipelineApp()
     app.run()
-

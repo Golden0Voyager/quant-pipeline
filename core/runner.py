@@ -40,8 +40,7 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
         result = fn(*args, **kwargs)
         elapsed = time.time() - task_start
-        logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s，等待 2s 释放系统资源...")
-        time.sleep(2.0)
+        logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s")
         return result
     except Exception as e:
         elapsed = time.time() - task_start

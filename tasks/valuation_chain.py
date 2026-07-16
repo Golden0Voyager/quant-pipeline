@@ -52,6 +52,9 @@ def update_fundamentals(
             trade_dates.append(d.strftime("%Y-%m-%d"))
 
     existing_count = db.count_fundamentals_for_date(today)
+    if not isinstance(existing_count, int):
+        logger.warning("count_fundamentals_for_date 返回非 int (%s)，视为 0", type(existing_count).__name__)
+        existing_count = 0
     if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
         logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
         return {"saved": 0, "total": 0, "skipped": True}
