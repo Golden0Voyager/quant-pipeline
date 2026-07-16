@@ -531,9 +531,8 @@ async def test_data_completeness_sorts_by_freshness():
             "quarterly_financials": "2026-03-31",
         }
         captured = []
-        with patch.object(widget._content, "update", side_effect=captured.append):
-            with patch("tui._get_expected_latest_trading_day", return_value="2026-07-14"):
-                widget._rebuild_content()
+        with patch.object(widget._content, "update", side_effect=captured.append), patch("tui._get_expected_latest_trading_day", return_value="2026-07-14"):
+            widget._rebuild_content()
         text = "\n".join(captured)
         positions = {
             "Daily Bars": text.find("Daily Bars"),
