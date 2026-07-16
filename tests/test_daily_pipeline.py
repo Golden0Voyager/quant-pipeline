@@ -609,18 +609,16 @@ class TestRunAll:
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), \
              patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
              patch("daily_pipeline._should_update", return_value=True), \
-             patch.object(daily_pipeline, "_update_single_bar", return_value="success"), \
-             patch.object(daily_pipeline, "update_margin_trading", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_dragon_tiger", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_block_trade", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_sector_fund_flow", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "update_shareholder_count", return_value={"saved": 0, "total": 0}), \
-             patch.object(daily_pipeline, "retry_failed", return_value={"success": 0, "failed": 0, "total": 0}), \
-             patch.object(daily_pipeline, "health_check", return_value={"issues": []}):
+             patch.object(
+                 daily_pipeline,
+                 "_safe_task",
+                 return_value={"status": "ok"},
+             ) as safe_task:
             r = daily_pipeline.run_all(db, loader, engine)
         assert "bars" in r
         assert "indicators" in r
         assert "health" in r
+        assert safe_task.call_count > 20
 
 
 # ===========================================================================
@@ -2397,16 +2395,14 @@ class TestRunAllOptions:
         with patch.object(daily_pipeline, "SHARED_DATA_DIR", tmp_path), \
              patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
              patch("daily_pipeline._should_update", return_value=True), \
-             patch.object(daily_pipeline, "update_bars", return_value={"success": 1, "failed": 0, "skipped": 0, "total": 1}), \
-             patch.object(daily_pipeline, "retry_failed", return_value={"success": 0, "failed": 0, "total": 0}), \
-             patch.object(daily_pipeline, "health_check", return_value={"issues": []}), \
-             patch.object(daily_pipeline, "update_margin_trading", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_dragon_tiger", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_block_trade", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_sector_fund_flow", return_value={"saved": 0}), \
-             patch.object(daily_pipeline, "update_shareholder_count", return_value={"saved": 0}):
+             patch.object(
+                 daily_pipeline,
+                 "_safe_task",
+                 return_value={"status": "ok"},
+             ) as safe_task:
             r = daily_pipeline.run_all(db, loader, engine)
         assert "bars" in r
+        assert safe_task.call_count > 20
 
 
 # ===========================================================================

@@ -48,12 +48,6 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-filterwarnings = [
-    # Textual CSS 引擎内部产生的无害协程未 await 警告 (比如 _delayed 延迟任务)
-    "ignore:coroutine 'PipelineApp\\._run_or_schedule.*' was never awaited:RuntimeWarning",
-    "ignore:coroutine 'PipelineApp\\._run_in_background' was never awaited:RuntimeWarning",
-    "ignore:coroutine 'PipelineApp\\._stop_daemon_process' was never awaited:RuntimeWarning",
-]
 
 [tool.coverage.report]
 fail_under = 84
