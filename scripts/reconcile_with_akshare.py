@@ -43,6 +43,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, os.path.expanduser("~/Code"))
 
@@ -268,6 +269,25 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     return df
 
 
+def execute_write_with_retry(conn: sqlite3.Connection, func, *args, max_retries=5, initial_delay=0.5, **kwargs):
+    """遭遇锁或忙碌时执行写操作重试（带指数退避）"""
+    for attempt in range(max_retries):
+        try:
+            res = func(*args, **kwargs)
+            conn.commit()
+            return res
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if ("locked" in err_msg or "busy" in err_msg) and attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0.1, 0.5)
+                logger.warning(f"⚠️ 数据库忙碌/被锁，将在 {delay:.2f}s 后进行第 {attempt + 1} 次写重试: {e}")
+                conn.rollback()
+                time.sleep(delay)
+            else:
+                conn.rollback()
+                raise
+
+
 # ---------------------------------------------------------------------------
 # 单只股票对比修复（智能策略）
 # ---------------------------------------------------------------------------
@@ -279,7 +299,7 @@ def compare_and_repair(
     smart_repair: bool = False,
     full_check: bool = False,
     backfill_source: bool = False,
-) -> dict[str, any]:
+) -> dict[str, Any]:
     """
     对比数据库与 AkShare 数据，修复差异。
 
@@ -355,13 +375,16 @@ def compare_and_repair(
                 backfilled = 0
                 if backfill_source and has_null_source and not dry_run:
                     src = ak_df["data_source"].iloc[0] if "data_source" in ak_df.columns else "eastmoney"
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "UPDATE daily_bars SET data_source = ?, updated_at = ? WHERE ts_code = ? AND data_source IS NULL",
-                        (src, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol)
-                    )
-                    backfilled = cursor.rowcount
-                    conn.commit()
+
+                    def _do_backfill():
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE daily_bars SET data_source = ?, updated_at = ? WHERE ts_code = ? AND data_source IS NULL",
+                            (src, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol)
+                        )
+                        return cursor.rowcount
+
+                    backfilled = execute_write_with_retry(conn, _do_backfill)
                     logger.info(f"  {symbol}: 已成功回填 {backfilled} 行 data_source 为 '{src}'")
 
                 return {
@@ -417,7 +440,6 @@ def compare_and_repair(
         return result
 
     # 6. 修复
-    cursor = conn.cursor()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     use_update = False
@@ -456,17 +478,18 @@ def compare_and_repair(
                     row["trade_date"],
                 )
             )
-        cursor.executemany(update_sql, update_rows)
-        conn.commit()
-        result["fixed"] = len(update_rows)
+
+        def _do_update():
+            cursor = conn.cursor()
+            cursor.executemany(update_sql, update_rows)
+            return len(update_rows)
+
+        result["fixed"] = execute_write_with_retry(conn, _do_update)
         logger.info(
-            f"  {symbol}: 已修复 — UPDATE {len(update_rows)} 行差异数据"
+            f"  {symbol}: 已修复 — UPDATE {result['fixed']} 行差异数据"
         )
     else:
         # 6b. 全量替换：DELETE + INSERT
-        cursor.execute("DELETE FROM daily_bars WHERE ts_code = ?", (symbol,))
-        deleted = cursor.rowcount
-
         insert_rows: list[tuple] = []
         for _, row in ak_df.iterrows():
             src = row.get("data_source", "eastmoney")
@@ -488,21 +511,26 @@ def compare_and_repair(
                 )
             )
 
-        cursor.executemany(
-            """
-            INSERT INTO daily_bars (
-                ts_code, trade_date, open, close, high, low,
-                volume, amount, turnover_rate, pct_change, amplitude,
-                data_source, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            insert_rows,
-        )
-        conn.commit()
-        result["fixed"] = deleted
+        def _do_delete_insert():
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM daily_bars WHERE ts_code = ?", (symbol,))
+            deleted = cursor.rowcount
+            cursor.executemany(
+                """
+                INSERT INTO daily_bars (
+                    ts_code, trade_date, open, close, high, low,
+                    volume, amount, turnover_rate, pct_change, amplitude,
+                    data_source, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+            return deleted
+
+        result["fixed"] = execute_write_with_retry(conn, _do_delete_insert)
         insert_src = ak_df["data_source"].iloc[0] if "data_source" in ak_df.columns else "eastmoney"
         logger.info(
-            f"  {symbol}: 已修复 — 删除 {deleted} 行旧数据，插入 {len(insert_rows)} 行 {insert_src} 数据"
+            f"  {symbol}: 已修复 — 删除 {result['fixed']} 行旧数据，插入 {len(insert_rows)} 行 {insert_src} 数据"
         )
 
     result["elapsed"] = time.time() - t0
@@ -636,8 +664,10 @@ def _worker_task(
     global _eastmoney_available
     _eastmoney_available = eastmoney_available
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         result = compare_and_repair(
             conn,
             symbol,
@@ -834,7 +864,9 @@ def main():
         parser.error("--workers 必须 >= 1")
     os.nice(10)
 
-    conn = sqlite3.connect(args.db_path)
+    conn = sqlite3.connect(args.db_path, timeout=60.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     cursor = conn.cursor()
 
     # 获取待处理股票列表
