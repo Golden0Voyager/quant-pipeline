@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tui import (
+    CopyPanelScreen,
+    HelpScreen,
     PipelineApp,
     find_latest_log_file,
     get_active_stock_count,
@@ -16,7 +18,9 @@ from tui import (
     get_db_size,
     get_launchd_status,
     get_subprocess_env,
+    load_theme,
     parse_progress,
+    save_theme,
 )
 
 
@@ -35,12 +39,45 @@ async def test_app_title():
 
 @pytest.mark.asyncio
 async def test_widgets_present():
+    from textual.widgets import Footer
     app = PipelineApp()
     async with app.run_test():
         assert app.query_one("#status-dashboard") is not None
         assert app.query_one("#single-task") is not None
         assert app.query_one("#scraping-progress") is not None
         assert app.query_one("#live-logs") is not None
+        assert app.query_one(Footer) is not None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_widget_caches_stock_count():
+    from tui import DashboardWidget
+    app = PipelineApp()
+    async with app.run_test():
+        widget = app.query_one("#status-dashboard", DashboardWidget)
+        with patch("tui.get_active_stock_count", return_value=1234) as mock_count:
+            # 重置缓存时间戳，确保本次会触发查询
+            widget._last_stocks_update = 0.0
+            await widget.update_status()
+            await widget.update_status()
+            # 60 秒内应该只查一次
+            assert mock_count.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_data_completeness_toggles_active_task_class():
+    from tui import DataCompletenessWidget
+    app = PipelineApp()
+    async with app.run_test():
+        widget = app.query_one("#data-completeness", DataCompletenessWidget)
+        widget._counts = {"daily_bars": 1}
+        widget._latest_dates = {"daily_bars": "2026-07-14"}
+        with patch.object(widget, "_get_updating_table", return_value="daily_bars"):
+            widget._rebuild_content()
+            assert "active-task" in widget.classes
+        with patch.object(widget, "_get_updating_table", return_value=None):
+            widget._rebuild_content()
+            assert "active-task" not in widget.classes
 
 
 def test_get_active_stock_count_empty(tmp_path):
@@ -963,16 +1000,26 @@ async def test_stop_daemon_process_timeout():
 
 
 @pytest.mark.asyncio
-async def test_action_copy_panel_empty():
+async def test_action_copy_panel_opens_screen():
     app = PipelineApp()
     async with app.run_test():
-        # Mock the _static_plain to return empty
-        with patch.object(app, "copy_to_clipboard") as mock_copy, \
-             patch.object(app, "notify") as mock_notify:
-            # Set the copy panel index
-            app._copy_panel_index = 0
+        with patch.object(app, "push_screen") as mock_push:
             app.action_copy_panel()
-            assert mock_notify.called or mock_copy.called
+            mock_push.assert_called_once()
+            screen, callback = mock_push.call_args[0]
+            assert isinstance(screen, CopyPanelScreen)
+
+
+@pytest.mark.asyncio
+async def test_copy_panel_screen_dismiss():
+    from textual.widgets import Button
+    screen = CopyPanelScreen()
+    for btn_id, _label in CopyPanelScreen.PANELS:
+        mock_dismiss = MagicMock()
+        screen.dismiss = mock_dismiss
+        btn = Button(id=btn_id)
+        screen.on_button_pressed(Button.Pressed(btn))
+        mock_dismiss.assert_called_once_with(btn_id)
 
 
 @pytest.mark.asyncio
@@ -1013,3 +1060,47 @@ def test_get_updating_table_no_file():
     with patch("os.path.getmtime", side_effect=OSError):
         result = DataCompletenessWidget._get_updating_table()
         assert result is None
+
+
+# ===========================================================================
+# Theme switching and HelpScreen
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_action_toggle_theme():
+    app = PipelineApp()
+    async with app.run_test():
+        with patch("tui.save_theme") as mock_save:
+            await app.action_toggle_theme()
+            assert app._theme_name == "textual-light"
+            assert app.theme == "textual-light"
+            mock_save.assert_called_once_with("textual-light")
+
+            await app.action_toggle_theme()
+            assert app._theme_name == "textual-dark"
+            assert app.theme == "textual-dark"
+            assert mock_save.call_args.args[0] == "textual-dark"
+
+
+@pytest.mark.asyncio
+async def test_help_screen_bindings():
+    screen = HelpScreen()
+    assert any(binding.key == "escape" for binding in screen.BINDINGS)
+    assert any(binding.key == "q" for binding in screen.BINDINGS)
+
+
+@pytest.mark.asyncio
+async def test_show_help_opens_help_screen():
+    app = PipelineApp()
+    async with app.run_test():
+        with patch.object(app, "push_screen") as mock_push:
+            await app.action_show_help()
+            mock_push.assert_called_once()
+            screen = mock_push.call_args[0][0]
+            assert isinstance(screen, HelpScreen)
+
+
+def test_load_save_theme(tmp_path, monkeypatch):
+    monkeypatch.setattr("tui.TUI_CONFIG_PATH", tmp_path / "tui.json")
+    assert load_theme() == "textual-dark"
+    save_theme("textual-light")
+    assert load_theme() == "textual-light"
