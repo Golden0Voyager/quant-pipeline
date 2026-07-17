@@ -491,3 +491,36 @@ class TestMain:
                                       "skipped": 0, "failed": 0, "elapsed": 0.1}
             rwa.main()
             mock_ind.assert_called_once()
+
+
+# ===========================================================================
+# execute_write_with_retry
+# ===========================================================================
+class TestExecuteWriteWithRetry:
+    def test_success_instantly(self, db_conn):
+        mock_func = MagicMock(return_value="done")
+        res = rwa.execute_write_with_retry(db_conn, mock_func)
+        assert res == "done"
+        assert mock_func.call_count == 1
+
+    def test_locked_retry_success(self, db_conn):
+        mock_func = MagicMock()
+        mock_func.side_effect = [
+            sqlite3.OperationalError("database is locked"),
+            "success_val"
+        ]
+        with patch("scripts.reconcile_with_akshare.time.sleep") as mock_sleep, \
+             patch("scripts.reconcile_with_akshare.logger") as mock_logger:
+            res = rwa.execute_write_with_retry(db_conn, mock_func, initial_delay=0.1)
+        assert res == "success_val"
+        assert mock_func.call_count == 2
+        mock_sleep.assert_called_once()
+        mock_logger.warning.assert_called_once()
+
+    def test_max_retries_reached(self, db_conn):
+        mock_func = MagicMock()
+        mock_func.side_effect = sqlite3.OperationalError("database is locked")
+        with patch("scripts.reconcile_with_akshare.time.sleep"), \
+             patch("scripts.reconcile_with_akshare.logger"), pytest.raises(sqlite3.OperationalError):
+            rwa.execute_write_with_retry(db_conn, mock_func, max_retries=3, initial_delay=0.01)
+        assert mock_func.call_count == 3
