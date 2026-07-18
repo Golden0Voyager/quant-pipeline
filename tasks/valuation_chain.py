@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import pandas as pd  # noqa: F401
 from smartmoney_hunter.market_utils import is_beijing_stock
 
+from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
 from core.utils import infer_market, should_skip_beijing  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
@@ -514,7 +515,7 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
         except Exception:
             grouped["fund_inflow_rank"] = None
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = get_expected_latest_trading_day()
         saved = 0
         for _, row in grouped.iterrows():
             try:

@@ -230,7 +230,10 @@ class TestUpdateIndicators:
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
         conn.execute("CREATE TABLE indicators (ts_code TEXT, trade_date TEXT, macd_hist REAL, rsi6 REAL)")
-        conn.execute("INSERT INTO daily_bars (ts_code, trade_date) VALUES ('000001.SZ', '2024-01-02')")
+        # 插入 61 行日线数据，满足 smart detection HAVING COUNT(*) >= 60
+        dates_61 = [f"2024-01-{d:02d}" for d in range(1, 32)] + [f"2024-02-{d:02d}" for d in range(1, 31)]
+        for d in dates_61:
+            conn.execute("INSERT INTO daily_bars (ts_code, trade_date) VALUES ('000001.SZ', ?)", (d,))
         conn.commit()
         conn.close()
         return db_path

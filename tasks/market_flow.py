@@ -34,7 +34,7 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
     logger.info("💰 任务: 批量获取资金流向")
     logger.info("=" * 60)
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_expected_latest_trading_day()
 
     try:
         df = loader.get_market_fund_flow()
