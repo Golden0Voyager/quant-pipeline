@@ -85,6 +85,7 @@ from tasks.financials import (
     update_quarterly_financials,
     update_shareholder_count,
 )
+from tasks.futures import update_futures
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_index_daily,
@@ -190,6 +191,7 @@ def run_all(
     results["fx_rate"] = _safe_task("update_usd", update_usd, db)
     results["global_index"] = _safe_task("update_global_index", update_global_index, db)
     results["us_treasury"] = _safe_task("update_us_treasury", update_us_treasury, db)
+    results["futures"] = _safe_task("update_futures", update_futures, db)
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
     results["health"] = _safe_task("health_check", health_check, db)
 
@@ -349,6 +351,8 @@ def main():
             update_global_index(db)
         elif args.task == "update_us_treasury":
             update_us_treasury(db)
+        elif args.task == "update_futures":
+            update_futures(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":

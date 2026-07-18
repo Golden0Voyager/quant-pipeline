@@ -159,8 +159,12 @@ class MockDatabase:
         self._record("save_us_treasury_batch", records)
         return len(records)
 
+    def save_futures_daily_batch(self, records: list[dict]) -> int:
+        self._record("save_futures_daily_batch", records)
+        return len(records)
+
     def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
-        self._record("watchlist_get_all", date=status)
+        self._record("watchlist_get_all", status=status)
         return pd.DataFrame({"ts_code": ["000001.SZ"], "status": ["active"]})
 
     def save_chip_distribution_batch(self, records: list[dict]) -> int:

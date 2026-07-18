@@ -97,6 +97,7 @@ def update_indicators(
                 SELECT ts_code, MAX(trade_date) as max_bar_date
                 FROM daily_bars
                 GROUP BY ts_code
+                HAVING COUNT(*) >= 60
             ) d
             LEFT JOIN (
                 SELECT ts_code, MAX(trade_date) as max_ind_date
@@ -342,6 +343,7 @@ def update_chip_distribution(
                 SELECT ts_code, MAX(trade_date) as max_bar_date
                 FROM daily_bars
                 GROUP BY ts_code
+                HAVING COUNT(*) >= 60
             ) d
             LEFT JOIN (
                 SELECT ts_code, MAX(trade_date) as max_chip_date

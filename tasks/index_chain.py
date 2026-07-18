@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os  # noqa: F401
-import time  # noqa: F401
+import random
+import time
 
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
+from core.stock_cyq_em import stock_cyq_em
 from core.utils import infer_market  # noqa: F401
 from interface import DatabaseInterface
 
@@ -35,17 +37,19 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
             df = ak.stock_zh_index_daily_tx(symbol=index_code)
             if df is not None and not df.empty:
                 latest = df.iloc[-1]
-                records.append({
-                    "index_code": index_code,
-                    "index_name": index_name,
-                    "trade_date": str(latest.get("date", trade_date))[:10],
-                    "open": float(latest.get("open", 0)),
-                    "high": float(latest.get("high", 0)),
-                    "low": float(latest.get("low", 0)),
-                    "close": float(latest.get("close", 0)),
-                    "volume": float(latest.get("volume", 0)),
-                    "data_source": "akshare",
-                })
+                records.append(
+                    {
+                        "index_code": index_code,
+                        "index_name": index_name,
+                        "trade_date": str(latest.get("date", trade_date))[:10],
+                        "open": float(latest.get("open", 0)),
+                        "high": float(latest.get("high", 0)),
+                        "low": float(latest.get("low", 0)),
+                        "close": float(latest.get("close", 0)),
+                        "volume": float(latest.get("volume", 0)),
+                        "data_source": "akshare",
+                    }
+                )
         except Exception as e:
             logger.warning(f"⚠️ 指数 {index_name}({index_code}) 获取失败: {e}")
     return records
@@ -75,25 +79,24 @@ def update_index_daily(db: DatabaseInterface) -> dict:
 
 
 def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:
-    """调用 AkShare stock_cyq_em 获取单只股票的东方财富筹码分布。"""
+    """调用 core.stock_cyq_em 获取单只股票的东方财富筹码分布。
+
+    使用 ``curl_cffi`` 绕过 ``push2his.eastmoney.com`` 的 TLS 指纹检测。
+    """
     try:
-        import os
-
-        import akshare as ak
-
-        # 部分环境存在系统代理，临时清除后重试一次
+        # 部分环境存在系统代理，临时清除后重试一次（部分代理会干扰 EM 连接）
         proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
         saved = {k: os.environ.pop(k, None) for k in proxy_vars}
 
         ts_code = symbol.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
         try:
-            df = ak.stock_cyq_em(symbol=ts_code, adjust="")
+            df = stock_cyq_em(symbol=ts_code, adjust="")
         except Exception:
-            # 如果失败，试试带代理的请求
+            # 如果失败，试试带原生代理的请求
             for k, v in saved.items():
                 if v is not None:
                     os.environ[k] = v
-            df = ak.stock_cyq_em(symbol=ts_code, adjust="")
+            df = stock_cyq_em(symbol=ts_code, adjust="")
         finally:
             for k, v in saved.items():
                 if v is not None:
@@ -134,8 +137,7 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
 
     try:
         rows = conn.execute(
-            "SELECT DISTINCT ts_code FROM watchlist "
-            "WHERE status = 'tracking' ORDER BY ts_code"
+            "SELECT DISTINCT ts_code FROM watchlist WHERE status = 'tracking' ORDER BY ts_code"
         ).fetchall()
         symbols.update(r[0] for r in rows)
     except Exception:
@@ -154,7 +156,8 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
 
     if len(symbols) < 200:
         try:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT ts_code FROM (
                     SELECT ts_code, COUNT(*) as cnt
                     FROM daily_bars
@@ -166,7 +169,9 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
                 )
                 ORDER BY RANDOM()
                 LIMIT ?
-            """, (500 - len(symbols),)).fetchall()
+            """,
+                (500 - len(symbols),),
+            ).fetchall()
             symbols.update(r[0] for r in rows)
         except Exception:
             pass
@@ -175,9 +180,7 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     return sorted(symbols)
 
 
-def update_chip_distribution_em(
-    db: DatabaseInterface, symbols_to_update: list[str] | None = None
-) -> dict:
+def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[str] | None = None) -> dict:
     """从东方财富线上获取筹码分布数据，写入 chip_distribution_em 表。
 
     限量为：自选股 + 指数成分股，避免全市场 5500 次 HTTP 调用。
@@ -208,27 +211,47 @@ def update_chip_distribution_em(
     success_count = 0
     failed_count = 0
     skipped_count = 0
+    consecutive_failures = 0
+    total_retry_delay = 0.0
 
     for i, symbol in enumerate(symbols, 1):
+        # ── 熔断：连续失败超过阈值，冷却一段时间 ──
+        if consecutive_failures >= 5 and consecutive_failures % 5 == 0:
+            cool_sec = min(120, 15 * (consecutive_failures // 5))
+            logger.warning(
+                f"  🔥 连续 {consecutive_failures} 次失败，冷却 {cool_sec}s (已耗时 {total_retry_delay:.0f}s)"
+            )
+            time.sleep(cool_sec)
+
+        # ── 股票间至少间隔 1-2s，避免爆发式请求 ──
+        if i > 1:
+            time.sleep(random.uniform(1.0, 2.0))
+
         df = _fetch_cyq_em(symbol)
         if df is None:
             failed_count += 1
+            consecutive_failures += 1
             continue
+
+        # 成功一次就重置熔断计数器
+        consecutive_failures = 0
 
         records = []
         for _, row in df.iterrows():
-            records.append({
-                "ts_code": symbol,
-                "trade_date": str(row["trade_date"]),
-                "profit_ratio": float(row["profit_ratio"]),
-                "avg_cost": float(row["avg_cost"]),
-                "cost_90_low": float(row["cost_90_low"]),
-                "cost_90_high": float(row["cost_90_high"]),
-                "concentration_90": float(row["concentration_90"]),
-                "cost_70_low": float(row["cost_70_low"]),
-                "cost_70_high": float(row["cost_70_high"]),
-                "concentration_70": float(row["concentration_70"]),
-            })
+            records.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": str(row["trade_date"]),
+                    "profit_ratio": float(row["profit_ratio"]),
+                    "avg_cost": float(row["avg_cost"]),
+                    "cost_90_low": float(row["cost_90_low"]),
+                    "cost_90_high": float(row["cost_90_high"]),
+                    "concentration_90": float(row["concentration_90"]),
+                    "cost_70_low": float(row["cost_70_low"]),
+                    "cost_70_high": float(row["cost_70_high"]),
+                    "concentration_70": float(row["concentration_70"]),
+                }
+            )
 
         try:
             db.save_chip_distribution_em_batch(records)
