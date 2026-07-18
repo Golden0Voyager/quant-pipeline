@@ -8,16 +8,17 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TextIO
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Header, Label, RichLog, Select, Static
+from textual.widgets import Button, Footer, Header, Label, RichLog, Select, Static
 
 from core.calendar import get_expected_latest_trading_day
 
@@ -29,6 +30,40 @@ PIPELINE_PID_PATH = "/tmp/daily_pipeline.pid"
 PROGRESS_JSON_PATH = Path.home() / "Code/quant_data/progress.json"
 LOGS_DIR_PATH = Path.home() / "Code/quant_data/logs"
 WATCHLIST_DIR = Path.home() / "Code/quant_agents/watchlists"
+TUI_CONFIG_PATH = Path(
+    os.environ.get("QUANT_TUI_CONFIG_PATH", Path.home() / ".config/quant_pipeline/tui.json")
+)
+
+
+def _load_tui_config() -> dict:
+    """加载 TUI 配置（主题等）。"""
+    try:
+        if TUI_CONFIG_PATH.exists():
+            return json.loads(TUI_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_tui_config(config: dict) -> None:
+    """保存 TUI 配置。"""
+    try:
+        TUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TUI_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_theme() -> str:
+    """返回保存的主题名称，默认 dark。"""
+    return _load_tui_config().get("theme", "textual-dark")
+
+
+def save_theme(theme_name: str) -> None:
+    """保存主题名称。"""
+    config = _load_tui_config()
+    config["theme"] = theme_name
+    _save_tui_config(config)
 
 
 def find_latest_log_file(logs_dir: str) -> str | None:
@@ -81,7 +116,7 @@ def find_running_pipeline_processes(
     Args:
         skip_ppid_check: 为 True 时不过滤 TUI 子进程（用于 X 键停止场景）。
     """
-    processes = []
+    processes: list[dict[str, str | int]] = []
     # 1. 检查 pidfile
     pidfile = Path(PIPELINE_PID_PATH)
     if pidfile.exists():
@@ -240,6 +275,106 @@ class ConfirmRunScreen(ModalScreen[str]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id)
+
+
+class CopyPanelScreen(ModalScreen[str]):
+    """弹窗：选择要复制的面板。"""
+
+    CSS = """
+    CopyPanelScreen {
+        align: center middle;
+    }
+    #copy-dialog {
+        width: 60;
+        height: auto;
+        max-height: 16;
+        background: $surface;
+        border: round $success;
+        padding: 1 2;
+    }
+    #copy-dialog Label {
+        width: 100%;
+        text-align: center;
+    }
+    #copy-buttons {
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+        align: center middle;
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 1;
+    }
+    #copy-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    PANELS: list[tuple[str, str]] = [
+        ("data-completeness", "📀 数据完整度"),
+        ("status-dashboard", "📊 Dashboard"),
+        ("scraping-progress", "📈 Progress"),
+        ("live-logs", "📋 日志"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="copy-dialog"):
+            yield Label("[bold]选择要复制的面板[/bold]")
+            yield Label("")
+            with Grid(id="copy-buttons"):
+                for panel_id, label in self.PANELS:
+                    yield Button(label, id=panel_id)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+
+class HelpScreen(ModalScreen[None]):
+    """弹窗：显示快捷键帮助。"""
+
+    CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+    #help-dialog {
+        width: 70;
+        height: auto;
+        max-height: 24;
+        background: $surface;
+        border: round $primary;
+        padding: 1 2;
+    }
+    #help-dialog Label {
+        width: 100%;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog"):
+            yield Label("[bold]快捷键帮助[/bold]")
+            yield Label("")
+            yield Label("[bold]S[/bold] — 全量更新")
+            yield Label("[bold]R[/bold] — 断点续传")
+            yield Label("[bold]X[/bold] — 停止任务")
+            yield Label("[bold]D[/bold] — 启动守护进程")
+            yield Label("[bold]Z[/bold] — 停止守护进程")
+            yield Label("[bold]H[/bold] — 健康检查")
+            yield Label("[bold]F[/bold] — 数据修复")
+            yield Label("[bold]C[/bold] — 复制面板")
+            yield Label("[bold]T[/bold] — 切换主题")
+            yield Label("[bold]F5[/bold] — 刷新数据完整度")
+            yield Label("[bold]?[/bold] — 显示帮助")
+            yield Label("[bold]Ctrl+C / Q[/bold] — 退出")
+            yield Label("")
+            yield Label("[dim]按 Esc 或 Q 关闭[/dim]")
+
+    async def action_dismiss(self, result: None = None) -> None:
+        self.dismiss(result)
 
 
 def _seconds_until_safe() -> int:
@@ -627,12 +762,16 @@ def sync_watchlists_from_files(db_path: str) -> WatchlistSyncResult:
 class DashboardWidget(Static):
     async def on_mount(self) -> None:
         self.border_title = "📊 Dashboard"
+        # 缓存股票数量，避免每次刷新都查询数据库
+        self._cached_stocks: int = 0
+        self._last_stocks_update: float = 0.0
+        self._stocks_cache_ttl: float = 60.0
         await self.update_status()
         self.set_interval(2.0, self.update_status)
 
     async def update_status(self) -> None:
         db_size = get_db_size(str(DEFAULT_DB_PATH))
-        active_stocks = await asyncio.to_thread(get_active_stock_count, str(DEFAULT_DB_PATH))
+        active_stocks = await self._get_active_stock_count_cached()
         daemon_status, daemon_pid = await asyncio.to_thread(get_daemon_status, DAEMON_PID_PATH)
         launchd_active = await get_launchd_status()
 
@@ -646,6 +785,15 @@ class DashboardWidget(Static):
             f" • [bold gray]Scheduler:  [/bold gray] {launchd_str}\n"
         )
         self.update(text)
+
+    async def _get_active_stock_count_cached(self) -> int:
+        now = time.time()
+        if now - self._last_stocks_update > self._stocks_cache_ttl:
+            self._cached_stocks = await asyncio.to_thread(
+                get_active_stock_count, str(DEFAULT_DB_PATH)
+            )
+            self._last_stocks_update = now
+        return self._cached_stocks
 
 
 class SingleTaskWidget(Static):
@@ -693,7 +841,8 @@ class SingleTaskWidget(Static):
         # event.value 在 clear() 后为 Select.NULL（NoSelection 对象），
         # 只有 str 类型才是真实任务名，避免误触发导致杀进程
         if isinstance(event.value, str) and event.value:
-            await self.app.action_run_single_task(event.value)
+            from typing import cast
+            await cast(PipelineApp, self.app).action_run_single_task(event.value)
             # 重置回提示状态（会触发新的 Select.Changed 但被上面过滤掉）
             self.query_one("#task-select", Select).clear()
 
@@ -770,6 +919,7 @@ class DataCompletenessWidget(VerticalScroll):
         self._latest_dates: dict[str, str | None] = {}
         self._daily_coverage: tuple[int, int] = (0, 0)
         self._bg_tasks: set[asyncio.Task] = set()
+        self._last_updating_table: str | None = None
         # 挂载内容子组件
         self._content = Static(id="dc-content")
         await self.mount(self._content)
@@ -860,6 +1010,12 @@ class DataCompletenessWidget(VerticalScroll):
         counts = self._counts
         latest_dates = self._latest_dates
         updating_table = self._get_updating_table()
+        if updating_table != self._last_updating_table:
+            self._last_updating_table = updating_table
+            if updating_table:
+                self.add_class("active-task")
+            else:
+                self.remove_class("active-task")
         if not counts:
             self._content.update(" 等待数据库连接...")
             return
@@ -898,6 +1054,7 @@ class DataCompletenessWidget(VerticalScroll):
             emoji, status = self._get_status_for_table(
                 tbl, latest, expected_date, updating_table
             )
+
             order = self._STATUS_ORDER.get(status, 3)
             items.append((order, idx, tbl, label, n, latest, emoji, status))
 
@@ -954,6 +1111,7 @@ class ProgressWidget(Static):
         progress = parse_progress(str(PROGRESS_JSON_PATH))
         if not progress:
             self.update(" 当前无运行中的任务，或未生成进度文件。")
+            self.remove_class("active-task")
             return
 
         processed = progress.get("processed", 0)
@@ -974,6 +1132,7 @@ class ProgressWidget(Static):
             f" • [bold gray]失败数量：[/bold gray]  [bold red]{failed_count}[/bold red]\n"
         )
         self.update(text)
+        self.add_class("active-task")
 
 
 class LogsWidget(RichLog):
@@ -988,7 +1147,7 @@ class LogsWidget(RichLog):
     def on_mount(self) -> None:
         self.border_title = "📋 Live Logs"
         self.active_log: str | None = None
-        self.file_handle = None
+        self.file_handle: TextIO | None = None
         self.set_interval(1.0, self.tail_log)
 
     def on_unmount(self) -> None:
@@ -1073,6 +1232,9 @@ class PipelineApp(App):
         Binding("h", "run_health", "Health Check"),
         Binding("f", "run_reconcile", "Data Repair", show=True),
         Binding("c", "copy_panel", "Copy Panel", show=True),
+        Binding("t", "toggle_theme", "Toggle Theme", show=True),
+        Binding("f5", "refresh_data", "Refresh", show=True),
+        Binding("?", "show_help", "Help", show=True),
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("q", "quit", "Quit", show=False),
     ]
@@ -1081,9 +1243,12 @@ class PipelineApp(App):
         super().__init__(**kwargs)
         self._background_tasks: set[asyncio.Task] = set()
         self._current_process: asyncio.subprocess.Process | None = None
+        self._theme_name = load_theme()
 
     async def on_mount(self) -> None:
-        """启动时同步自选股，然后检测后台进程询问是否终止。"""
+        """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
+        # 应用保存的主题
+        self.theme = self._theme_name
         # 无论是否有后台进程，都调度自选股同步
         self._create_background_task(self._sync_watchlists())
 
@@ -1094,7 +1259,7 @@ class PipelineApp(App):
         if should_stop:
             for p in processes:
                 with contextlib.suppress(OSError):
-                    os.kill(p["pid"], signal.SIGTERM)
+                    os.kill(int(p["pid"]), signal.SIGTERM)
             self.notify(
                 f"Sent SIGTERM to {len(processes)} process(es)",
                 severity="information",
@@ -1151,9 +1316,6 @@ class PipelineApp(App):
         self.push_screen(ConfirmRunScreen(action_name), _on_dismiss)
 
     CSS = """
-    $bg-panel: #111827;
-    $bg-screen: #030712;
-
     $blue-normal: #1d4ed8;
     $blue-hover: #3b82f6;
     $blue-focus: #60a5fa;
@@ -1163,7 +1325,7 @@ class PipelineApp(App):
     $rose-focus: #fb7185;
 
     Screen {
-        background: $bg-screen;
+        background: $background;
     }
     #main-grid {
         layout: grid;
@@ -1175,7 +1337,7 @@ class PipelineApp(App):
     }
     #single-task {
         border: round $blue-normal;
-        background: $bg-panel;
+        background: $surface;
         padding: 0 2;
         border-title-align: left;
         border-title-color: #60a5fa;
@@ -1195,20 +1357,20 @@ class PipelineApp(App):
         background: transparent;
     }
     Select > .select-list {
-        background: #1e293b;
-        border: round #1d4ed8;
+        background: $surface;
+        border: round $blue-normal;
         max-height: 14;
         overflow-y: auto;
     }
     Select > .select-list > .select-list-item:hover {
-        background: #1d4ed8;
+        background: $blue-normal;
     }
     Select > .select-list > .select-list-item.button {
         background: #2563eb;
     }
     #status-dashboard, #scraping-progress {
         border: round $blue-normal;
-        background: $bg-panel;
+        background: $surface;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
@@ -1216,7 +1378,7 @@ class PipelineApp(App):
     }
     #data-completeness {
         border: round $blue-normal;
-        background: $bg-panel;
+        background: $surface;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #60a5fa;
@@ -1246,7 +1408,7 @@ class PipelineApp(App):
 
     #live-logs {
         border: round $rose-normal;
-        background: $bg-panel;
+        background: $surface;
         padding: 1 2;
         border-title-align: left;
         border-title-color: #fb7185;
@@ -1260,13 +1422,9 @@ class PipelineApp(App):
         border: round $rose-focus;
         border-title-color: #e11d48;
     }
-    #key-bindings {
-        dock: bottom;
-        height: 1;
-        background: #1e293b;
-        color: #94a3b8;
-        padding: 0 2;
-        text-align: center;
+    .active-task {
+        border: thick #f59e0b !important;
+        border-title-color: #fbd38d !important;
     }
     """
 
@@ -1278,10 +1436,7 @@ class PipelineApp(App):
             yield SingleTaskWidget(id="single-task")
             yield ProgressWidget(id="scraping-progress")
             yield DataCompletenessWidget(id="data-completeness")
-        yield Static(
-            " S:全量更新  R:续传  X:停止  D:启动守护  Z:停止守护  H:健康检查  F:数据修复  C:复制面板  Ctrl+C:退出",
-            id="key-bindings",
-        )
+        yield Footer()
 
     async def _stop_current_process(self) -> None:
         """终止当前正在运行的子进程及其整个进程组。"""
@@ -1444,6 +1599,24 @@ class PipelineApp(App):
             sys.executable, pipeline_path, "--task", task, "--force",
         )
 
+    async def action_toggle_theme(self) -> None:
+        """切换深色/浅色主题并持久化。"""
+        new_theme = "textual-light" if self._theme_name == "textual-dark" else "textual-dark"
+        self._theme_name = new_theme
+        self.theme = new_theme
+        save_theme(new_theme)
+        self.notify(f"主题已切换为: {new_theme}", timeout=3.0)
+
+    async def action_show_help(self) -> None:
+        """显示快捷键帮助弹窗。"""
+        self.push_screen(HelpScreen())
+
+    async def action_refresh_data(self) -> None:
+        """手动刷新数据完整度面板。"""
+        dc = self.query_one("#data-completeness", DataCompletenessWidget)
+        self._create_background_task(dc._refresh_exact())
+        self.notify("数据完整度刷新中...", timeout=2.0)
+
     def action_copy_panel(self) -> None:
         from rich.text import Text
 
@@ -1451,40 +1624,38 @@ class PipelineApp(App):
             raw = str(getattr(w, "_Static__content", ""))
             return Text.from_markup(raw).plain if raw else ""
 
-        dc = self.query_one("#data-completeness", DataCompletenessWidget)
-        dc_plain = _static_plain(dc._content)
+        def _on_dismiss(choice: str | None) -> None:
+            if not choice:
+                return
 
-        dash = self.query_one("#status-dashboard", DashboardWidget)
-        dash_plain = _static_plain(dash)
+            panel_text = ""
+            label = ""
+            if choice == "data-completeness":
+                dc = self.query_one("#data-completeness", DataCompletenessWidget)
+                panel_text = _static_plain(dc._content).strip()
+                label = "📀 数据完整度"
+            elif choice == "status-dashboard":
+                dash = self.query_one("#status-dashboard", DashboardWidget)
+                panel_text = _static_plain(dash).strip()
+                label = "📊 Dashboard"
+            elif choice == "scraping-progress":
+                prog = self.query_one("#scraping-progress", ProgressWidget)
+                panel_text = _static_plain(prog).strip()
+                label = "📈 Progress"
+            elif choice == "live-logs":
+                logs = self.query_one("#live-logs", LogsWidget)
+                panel_text = logs.copy_recent_logs(line_count=500).strip()
+                label = "📋 日志"
 
-        prog = self.query_one("#scraping-progress", ProgressWidget)
-        prog_plain = _static_plain(prog)
+            if not panel_text:
+                self.notify(f"{label} — 内容为空", timeout=2.0)
+                return
 
-        logs = self.query_one("#live-logs", LogsWidget)
-        logs_text = logs.copy_recent_logs(line_count=500)
+            full = f"=== {label} ===\n{panel_text}"
+            self.copy_to_clipboard(full)
+            self.notify(f"✓ {label} 已复制到剪贴板", timeout=3.0)
 
-        sources = [
-            ("📀 Data Completeness", dc_plain.strip()),
-            ("📊 Dashboard", dash_plain.strip()),
-            ("📈 Progress", prog_plain.strip()),
-            ("📋 Live Logs", logs_text.strip() if logs_text else ""),
-        ]
-
-        idx = getattr(self, "_copy_panel_index", 0)
-        self._copy_panel_index = (idx + 1) % len(sources)
-        label, text = sources[idx]
-
-        if not text:
-            self.notify(f"{label} — 内容为空", timeout=2.0)
-            return
-
-        full = f"=== {label} ===\n{text}"
-        self.copy_to_clipboard(full)
-        remaining = [s[0] for i, s in enumerate(sources) if i != self._copy_panel_index]
-        self.notify(
-            f"✓ {label} 已复制 | 下次 C: {remaining[0]}",
-            timeout=3.0,
-        )
+        self.push_screen(CopyPanelScreen(), _on_dismiss)
 
 if __name__ == "__main__":
     app = PipelineApp()
