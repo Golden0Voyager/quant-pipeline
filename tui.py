@@ -21,6 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Label, RichLog, Select, Static
 
 from core.calendar import get_expected_latest_trading_day
+from core.log_cleanup import cleanup_logs
 
 logger = logging.getLogger(__name__)
 
@@ -184,13 +185,14 @@ class ConfirmStopScreen(ModalScreen[bool]):
     CSS = """
     ConfirmStopScreen {
         align: center middle;
+        background: $background 60%;
     }
     #confirm-dialog {
         width: 70;
         height: auto;
         max-height: 20;
-        background: #1e293b;
-        border: thick #f59e0b;
+        background: $surface;
+        border: round $error;
         padding: 1 2;
     }
     #confirm-dialog Label {
@@ -210,17 +212,19 @@ class ConfirmStopScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
-            yield Label("[bold yellow]⚠️  Background pipeline processes detected:[/bold yellow]")
+            yield Label("[bold red]⚠️  检测到后台进程[/bold red]")
             for p in self._processes:
                 yield Label(
                     f"  PID {p['pid']}  |  已运行 {p['elapsed']}  |  {p['command']}"
                 )
             yield Label("")
-            yield Label("Stop these processes?")
+            yield Label("终止这些进程？")
             with Horizontal(id="confirm-buttons"):
-                yield Label("[bold green]  Y = Stop & Start  [/bold green]")
-                yield Label("     ")
-                yield Label("[bold red]  N = Keep Running  [/bold red]")
+                yield Button("终止并继续 (Y)", variant="error", id="stop-yes")
+                yield Button("保留运行 (N)", variant="primary", id="stop-no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "stop-yes")
 
     def on_key(self, event) -> None:
         if event.key.lower() == "y":
@@ -235,26 +239,25 @@ class ConfirmRunScreen(ModalScreen[str]):
     CSS = """
     ConfirmRunScreen {
         align: center middle;
+        background: $background 60%;
     }
     #confirm-dialog {
         width: 66;
         height: auto;
         max-height: 14;
-        background: #1e293b;
-        border: round #1d4ed8;
+        background: $surface;
+        border: round $primary;
         padding: 1 2;
     }
     #confirm-dialog Label {
         width: 100%;
+        text-align: center;
     }
     #confirm-buttons {
         margin-top: 1;
         width: 100%;
         height: auto;
         align: center middle;
-    }
-    Button {
-        margin: 0 1;
     }
     """
 
@@ -283,13 +286,14 @@ class CopyPanelScreen(ModalScreen[str]):
     CSS = """
     CopyPanelScreen {
         align: center middle;
+        background: $background 60%;
     }
     #copy-dialog {
         width: 60;
         height: auto;
         max-height: 16;
         background: $surface;
-        border: round $success;
+        border: round $primary;
         padding: 1 2;
     }
     #copy-dialog Label {
@@ -304,9 +308,6 @@ class CopyPanelScreen(ModalScreen[str]):
         layout: grid;
         grid-size: 2;
         grid-gutter: 1;
-    }
-    #copy-buttons Button {
-        margin: 0 1;
     }
     """
 
@@ -335,6 +336,7 @@ class HelpScreen(ModalScreen[None]):
     CSS = """
     HelpScreen {
         align: center middle;
+        background: $background 60%;
     }
     #help-dialog {
         width: 70;
@@ -366,6 +368,7 @@ class HelpScreen(ModalScreen[None]):
             yield Label("[bold]H[/bold] — 健康检查")
             yield Label("[bold]F[/bold] — 数据修复")
             yield Label("[bold]C[/bold] — 复制面板")
+            yield Label("[bold]L[/bold] — 清理日志")
             yield Label("[bold]T[/bold] — 切换主题")
             yield Label("[bold]F5[/bold] — 刷新数据完整度")
             yield Label("[bold]?[/bold] — 显示帮助")
@@ -375,6 +378,53 @@ class HelpScreen(ModalScreen[None]):
 
     async def action_dismiss(self, result: None = None) -> None:
         self.dismiss(result)
+
+
+class LogCleanupScreen(ModalScreen[str]):
+    """弹窗：选择日志清理策略。"""
+
+    CSS = """
+    LogCleanupScreen {
+        align: center middle;
+        background: $background 60%;
+    }
+    #logclean-dialog {
+        width: 56;
+        height: auto;
+        max-height: 16;
+        background: $surface;
+        border: round $warning;
+        padding: 1 2;
+    }
+    #logclean-dialog Label {
+        width: 100%;
+        text-align: center;
+    }
+    #logclean-buttons {
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+        align: center middle;
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="logclean-dialog"):
+            yield Label("[bold]清理日志文件[/bold]")
+            yield Label("")
+            yield Label("[dim]当前正在写入的活跃日志会被保留[/dim]")
+            yield Label("")
+            with Grid(id="logclean-buttons"):
+                yield Button("全部清理", variant="error", id="all")
+                yield Button("保留最近 7 天", variant="primary", id="keep-7")
+                yield Button("保留最近 30 天", variant="default", id="keep-30")
+                yield Button("取消", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
 
 
 def _seconds_until_safe() -> int:
@@ -1233,6 +1283,7 @@ class PipelineApp(App):
         Binding("f", "run_reconcile", "Data Repair", show=True),
         Binding("c", "copy_panel", "Copy Panel", show=True),
         Binding("t", "toggle_theme", "Toggle Theme", show=True),
+        Binding("l", "clean_logs", "Clean Logs", show=True),
         Binding("f5", "refresh_data", "Refresh", show=True),
         Binding("?", "show_help", "Help", show=True),
         Binding("ctrl+c", "quit", "Quit", priority=True),
@@ -1324,7 +1375,7 @@ class PipelineApp(App):
     $rose-hover: #e11d48;
     $rose-focus: #fb7185;
 
-    Screen {
+    PipelineApp {
         background: $background;
     }
     #main-grid {
@@ -1423,8 +1474,48 @@ class PipelineApp(App):
         border-title-color: #e11d48;
     }
     .active-task {
-        border: thick #f59e0b !important;
-        border-title-color: #fbd38d !important;
+        border-left: thick #f59e0b;
+        border-title-color: #fbbf24;
+    }
+
+    /* 弹窗按钮统一主题 */
+    ModalScreen Button {
+        margin: 1 1;
+        min-width: 16;
+        border: none;
+    }
+    ModalScreen Button.-primary {
+        background: $blue-normal;
+        color: white;
+    }
+    ModalScreen Button.-primary:hover {
+        background: $blue-hover;
+    }
+    ModalScreen Button.-primary:focus {
+        background: $blue-focus;
+        text-style: bold;
+    }
+    ModalScreen Button.-error {
+        background: $rose-normal;
+        color: white;
+    }
+    ModalScreen Button.-error:hover {
+        background: $rose-hover;
+    }
+    ModalScreen Button.-error:focus {
+        background: $rose-focus;
+        text-style: bold;
+    }
+    ModalScreen Button.-default {
+        background: #334155;
+        color: white;
+    }
+    ModalScreen Button.-default:hover {
+        background: #475569;
+    }
+    ModalScreen Button.-default:focus {
+        background: #64748b;
+        text-style: bold;
     }
     """
 
@@ -1656,6 +1747,42 @@ class PipelineApp(App):
             self.notify(f"✓ {label} 已复制到剪贴板", timeout=3.0)
 
         self.push_screen(CopyPanelScreen(), _on_dismiss)
+
+    async def action_clean_logs(self) -> None:
+        """清理日志文件：弹窗选择「全部 / 保留 7 天 / 保留 30 天」。"""
+        active_log = find_latest_log_file(str(LOGS_DIR_PATH))
+
+        def _on_dismiss(choice: str | None) -> None:
+            if not choice or choice == "cancel":
+                return
+            keep_days = 0 if choice == "all" else int(choice.removeprefix("keep-"))
+            self._create_background_task(self._clean_logs(keep_days, active_log))
+
+        self.push_screen(LogCleanupScreen(), _on_dismiss)
+
+    async def _clean_logs(self, keep_days: int, active_log: str | None) -> None:
+        """后台执行日志清理并通过通知反馈结果。"""
+        exclude = {active_log} if active_log else set()
+        try:
+            result = await asyncio.to_thread(
+                cleanup_logs, str(LOGS_DIR_PATH), keep_days, exclude
+            )
+        except Exception as exc:  # pragma: no cover - 防御性兜底
+            self.notify(f"日志清理失败: {exc}", severity="error", timeout=5.0)
+            return
+
+        for err in result.errors:
+            self.notify(f"⚠️  {err}", severity="warning", timeout=4.0)
+        if result.deleted_count == 0:
+            self.notify("没有需要清理的日志文件", severity="information", timeout=3.0)
+            return
+        size_mb = result.freed_bytes / (1024 * 1024)
+        size_str = f"{size_mb:.1f} MB" if size_mb < 1024 else f"{size_mb / 1024:.2f} GB"
+        self.notify(
+            f"已清理 {result.deleted_count} 个日志文件，释放 {size_str}",
+            severity="information",
+            timeout=4.0,
+        )
 
 if __name__ == "__main__":
     app = PipelineApp()
