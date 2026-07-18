@@ -11,6 +11,7 @@ import pytest
 from tui import (
     CopyPanelScreen,
     HelpScreen,
+    LogCleanupScreen,
     PipelineApp,
     find_latest_log_file,
     get_active_stock_count,
@@ -1104,3 +1105,27 @@ def test_load_save_theme(tmp_path, monkeypatch):
     assert load_theme() == "textual-dark"
     save_theme("textual-light")
     assert load_theme() == "textual-light"
+
+
+@pytest.mark.asyncio
+async def test_log_cleanup_screen_buttons():
+    app = PipelineApp()
+    async with app.run_test() as pilot:
+        await pilot.press("l")
+        screen = app.screen
+        assert isinstance(screen, LogCleanupScreen)
+        labels = [str(b.label) for b in screen.query("Button")]
+        assert "全部清理" in labels
+        assert "保留最近 7 天" in labels
+        assert "保留最近 30 天" in labels
+        assert "取消" in labels
+
+
+@pytest.mark.asyncio
+async def test_action_clean_logs_opens_screen():
+    app = PipelineApp()
+    async with app.run_test():
+        with patch.object(app, "push_screen") as mock_push:
+            await app.action_clean_logs()
+            mock_push.assert_called_once()
+            assert isinstance(mock_push.call_args[0][0], LogCleanupScreen)
