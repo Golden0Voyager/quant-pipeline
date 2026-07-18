@@ -40,7 +40,7 @@ class SmartMoneyDBProvider:
         必须在 self._write_lock 保护下使用。
         """
         if self._write_conn is None:
-            conn = sqlite3.connect(str(self._db.db_path), timeout=30.0)
+            conn = sqlite3.connect(str(self._db.db_path), timeout=30.0, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
@@ -284,6 +284,9 @@ class SmartMoneyDBProvider:
 
     def save_us_treasury_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_us_treasury_batch(records)
+
+    def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_futures_daily_batch(records)
 
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
