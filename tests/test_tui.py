@@ -33,7 +33,8 @@ def _close_coro(coro, **_kwargs):
 
 
 @pytest.mark.asyncio
-async def test_app_title():
+@patch("tui.find_running_pipeline_processes", return_value=[])
+async def test_app_title(mock_find):
     app = PipelineApp()
     async with app.run_test():
         assert app.title == "SmartMoney Pipeline Manager"
@@ -400,10 +401,10 @@ def test_get_expected_latest_trading_day_is_weekday():
 
 def test_date_status():
     from tui import _date_status
-    assert _date_status("2026-07-07", "2026-07-07") == ("[green]●[/green]", "最新")
-    assert _date_status(None, "2026-07-07") == ("[red]●[/red]", "无数据")
-    assert _date_status("2026-07-06", "2026-07-07") == ("[yellow]●[/yellow]", "略滞后")
-    assert _date_status("2026-07-01", "2026-07-07") == ("[red]●[/red]", "滞后")
+    assert _date_status("2026-07-07", "2026-07-07") == "最新"
+    assert _date_status(None, "2026-07-07") == "无数据"
+    assert _date_status("2026-07-06", "2026-07-07") == "略滞后"
+    assert _date_status("2026-07-01", "2026-07-07") == "滞后"
 
 
 def test_normalize_date():
@@ -536,18 +537,20 @@ async def test_data_completeness_shows_freshness_and_dates():
             widget._rebuild_content()
         text = "\n".join(captured)
         assert "期望最新日期" in text
-        assert "[green]●[/green]" in text or "[yellow]●[/yellow]" in text
+        # 新设计使用 hex 颜色 + 图标 + 状态文本，检查任一状态颜色标签
+        from tui import DataCompletenessWidget
+        expected_colors = [f"[{color}]" for _icon, color in DataCompletenessWidget.STATUS_STYLES.values()]
+        assert any(tag in text for tag in expected_colors)
         assert "2026-07-09" in text
 
 
 def test_status_for_table_with_timestamp():
     from tui import DataCompletenessWidget
     # chip_distribution 等表返回带时间戳的日期，只落后 1 天应判定为略滞后
-    emoji, status = DataCompletenessWidget._get_status_for_table(
+    status = DataCompletenessWidget._get_status_for_table(
         "chip_distribution", "2026-07-13", "2026-07-14", None
     )
     assert status == "略滞后"
-    assert emoji == "[yellow]●[/yellow]"
 
 
 
@@ -1015,12 +1018,30 @@ async def test_action_copy_panel_opens_screen():
 async def test_copy_panel_screen_dismiss():
     from textual.widgets import Button
     screen = CopyPanelScreen()
-    for btn_id, _label in CopyPanelScreen.PANELS:
+    for btn_id, _key, _label in CopyPanelScreen.PANELS:
         mock_dismiss = MagicMock()
         screen.dismiss = mock_dismiss
-        btn = Button(id=btn_id)
+        btn = Button("test", id=btn_id)
         screen.on_button_pressed(Button.Pressed(btn))
         mock_dismiss.assert_called_once_with(btn_id)
+
+
+@pytest.mark.asyncio
+async def test_copy_panel_screen_composes_four_buttons() -> None:
+    from textual.widgets import Button
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test() as pilot:
+            screen = CopyPanelScreen()
+            app.push_screen(screen)
+            await pilot.pause()
+            buttons = list(screen.query(Button))
+            assert len(buttons) == 4
+            expected_ids = {panel_id for panel_id, _key, _label in CopyPanelScreen.PANELS}
+            assert {btn.id for btn in buttons} == expected_ids
+            # 每个按钮都应该有可见高度，确保不会被布局裁剪
+            for btn in buttons:
+                assert btn.region.height > 0
 
 
 @pytest.mark.asyncio

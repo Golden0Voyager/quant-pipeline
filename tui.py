@@ -18,12 +18,31 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Label, RichLog, Select, Static
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Label,
+    RichLog,
+    Select,
+    Static,
+)
 
 from core.calendar import get_expected_latest_trading_day
 from core.log_cleanup import cleanup_logs
 
 logger = logging.getLogger(__name__)
+
+# 共享 CSS 变量：蓝/玫瑰主题色，供 PipelineApp 与各 ModalScreen 共用
+_SHARED_CSS = """
+$blue-normal: #1d4ed8;
+$blue-hover: #3b82f6;
+$blue-focus: #60a5fa;
+
+$rose-normal: #be123c;
+$rose-hover: #e11d48;
+$rose-focus: #fb7185;
+"""
 
 DEFAULT_DB_PATH = Path.home() / "Code/quant_data/quant_core.db"
 DAEMON_PID_PATH = "/tmp/smartmoney_daemon.pid"
@@ -125,7 +144,7 @@ def find_running_pipeline_processes(
             pid = int(pidfile.read_text().strip())
             os.kill(pid, 0)
             res = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "pid,etime,command="],
+                ["ps", "-p", str(pid), "-o", "pid=,etime=,command="],
                 capture_output=True, text=True, timeout=2.0,
             )
             if "daily_pipeline.py" in res.stdout:
@@ -163,7 +182,7 @@ def find_running_pipeline_processes(
                 except Exception:
                     continue
             res2 = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "pid,etime,command="],
+                ["ps", "-p", str(pid), "-o", "pid=,etime=,command="],
                 capture_output=True, text=True, timeout=2.0,
             )
             if res2.stdout.strip():
@@ -283,51 +302,95 @@ class ConfirmRunScreen(ModalScreen[str]):
 class CopyPanelScreen(ModalScreen[str]):
     """弹窗：选择要复制的面板。"""
 
-    CSS = """
+    CSS = _SHARED_CSS + """
     CopyPanelScreen {
         align: center middle;
-        background: $background 60%;
+        background: $background 30%;
     }
     #copy-dialog {
-        width: 60;
+        width: 50;
         height: auto;
-        max-height: 16;
-        background: $surface;
+        background: $surface 95%;
         border: round $primary;
         padding: 1 2;
     }
-    #copy-dialog Label {
+    #copy-dialog > Label {
         width: 100%;
         text-align: center;
+        margin-bottom: 0;
+        color: $text;
+        text-style: bold;
     }
-    #copy-buttons {
-        margin-top: 1;
+    #copy-list {
         width: 100%;
         height: auto;
-        align: center middle;
-        layout: grid;
-        grid-size: 2;
-        grid-gutter: 1;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+    #copy-list Button {
+        width: 100%;
+        height: 1;
+        min-height: 1;
+        max-height: 1;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        border: none;
+        background: transparent;
+        color: $text;
+        text-align: left;
+        content-align: left middle;
+    }
+    #copy-list Button:hover {
+        background: $blue-hover 25%;
+    }
+    #copy-list Button:focus {
+        background: $blue-focus 35%;
+        text-style: bold;
+    }
+    #copy-list Button.-default {
+        background: transparent;
+    }
+    #copy-hint {
+        width: 100%;
+        text-align: center;
+        margin-top: 0;
+        color: $text;
+        text-style: dim;
     }
     """
 
-    PANELS: list[tuple[str, str]] = [
-        ("data-completeness", "📀 数据完整度"),
-        ("status-dashboard", "📊 Dashboard"),
-        ("scraping-progress", "📈 Progress"),
-        ("live-logs", "📋 日志"),
+    PANELS: list[tuple[str, str, str]] = [
+        ("data-completeness", "1", "📀 数据完整度"),
+        ("status-dashboard", "2", "📊 Dashboard"),
+        ("scraping-progress", "3", "📈 Progress"),
+        ("live-logs", "4", "📋 日志"),
     ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._panel_ids: set[str] = {panel_id for panel_id, _key, _label in self.PANELS}
+        self._key_map = {key: panel_id for panel_id, key, _label in self.PANELS}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="copy-dialog"):
-            yield Label("[bold]选择要复制的面板[/bold]")
-            yield Label("")
-            with Grid(id="copy-buttons"):
-                for panel_id, label in self.PANELS:
-                    yield Button(label, id=panel_id)
+            yield Label("选择要复制的面板")
+            with Vertical(id="copy-list"):
+                for panel_id, key, label in self.PANELS:
+                    yield Button(f"[dim][{key}][/dim] {label}", id=panel_id, variant="default")
+            yield Label("按 1-4 / Enter 选择 · Esc 取消", id="copy-hint")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id)
+        """处理 Button 项选择。"""
+        if event.button.id in self._panel_ids:
+            self.dismiss(event.button.id)
+
+    def on_key(self, event) -> None:
+        if event.key in ("escape", "q"):
+            self.dismiss(None)
+            return
+        if event.key in self._key_map:
+            self.dismiss(self._key_map[event.key])
 
 
 class HelpScreen(ModalScreen[None]):
@@ -538,6 +601,7 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "us_treasury": "trade_date",
     "chip_distribution": "trade_date",
     "chip_distribution_em": "trade_date",
+    "dividend_summary": "updated_at",
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
@@ -551,16 +615,14 @@ QUARTERLY_TABLES: set[str] = {
     "quarterly_financials",
 }
 
-# 延迟发布的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
+# T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
 DELAYED_PUBLISH_TABLES: set[str] = {
     "fx_rate",
     "us_treasury",
 }
 
 # 无有意义日期列的表（不显示新鲜度标记，只显示行数）
-NO_DATE_TABLES: set[str] = {
-    "dividend_summary",
-}
+NO_DATE_TABLES: set[str] = set()
 
 
 
@@ -641,25 +703,22 @@ def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]
             conn.close()
 
 
-def _date_status(latest: str | None, expected: str) -> tuple[str, str]:
-    """返回日期新鲜度标记和状态标签。
-
-    使用 Rich 颜色标记替代 emoji，避免终端字体大小不一致导致图标过大。
-    """
+def _date_status(latest: str | None, expected: str) -> str:
+    """返回日期新鲜度状态标签（纯文本，颜色由调用方根据 STATUS_STYLES 渲染）。"""
     if not latest:
-        return "[red]●[/red]", "无数据"
+        return "无数据"
     if latest == expected:
-        return "[green]●[/green]", "最新"
+        return "最新"
     try:
         from datetime import datetime, timedelta
 
         latest_dt = datetime.strptime(latest, "%Y-%m-%d")
         expected_dt = datetime.strptime(expected, "%Y-%m-%d")
         if latest_dt >= expected_dt - timedelta(days=2):
-            return "[yellow]●[/yellow]", "略滞后"
+            return "略滞后"
     except Exception:
         pass
-    return "[red]●[/red]", "滞后"
+    return "滞后"
 
 
 def format_count(n: int) -> str:
@@ -850,32 +909,43 @@ class SingleTaskWidget(Static):
     """Single task selector with a dropdown."""
 
     SINGLE_TASKS: list[tuple[str, str]] = [
-        ("Full Update (All)", "all"),
-        ("Daily Bars", "update_bars"),
-        ("Indicators", "update_indicators"),
-        ("Fundamentals", "update_fundamentals"),
-        ("Market Snapshot (雪球)", "update_market_snapshot"),
-        ("Fund Flow", "update_fund_flow"),
-        ("Margin Trading", "update_margin_trading"),
-        ("Dragon Tiger", "update_dragon_tiger"),
-        ("Block Trade", "update_block_trade"),
-        ("Sector Fund Flow", "update_sector_fund_flow"),
-        ("Shareholder Count", "update_shareholder_count"),
-        ("Quarterly Financials", "update_quarterly_financials"),
-        ("Historical Valuation", "update_historical_valuation"),
-        ("Sector Industry", "update_sector_industry"),
-        ("Industry", "update_industry"),
-        ("North Flow", "update_north_flow"),
-        ("Index Daily", "update_index_daily"),
-        ("Limit U/D", "update_limit_up_down"),
-        ("Dividends", "update_dividend_summary"),
-        ("Gold Price", "update_gold_price"),
-        ("Crude Oil", "update_crude_oil"),
-        ("USD/CNY", "update_usd"),
-        ("Global Index", "update_global_index"),
-        ("US Treasury", "update_us_treasury"),
-        ("Chip Distribution (Local)", "update_chip_distribution"),
-        ("Chip Distribution (Online)", "update_chip_distribution_em"),
+        # ── 全量 ──
+        ("全量更新 (Full Update)", "all"),
+        # ── 核心行情 ──
+        ("日线行情 (Daily Bars)", "update_bars"),
+        ("技术指标 (Indicators)", "update_indicators"),
+        ("筹码分布 (Chip Dist.)", "update_chip_distribution"),
+        ("筹码分布线上 (Chip EM)", "update_chip_distribution_em"),
+        ("基本面数据 (Fundamentals)", "update_fundamentals"),
+        ("行情快照 (Market Snapshot)", "update_market_snapshot"),
+        # ── 资金面 ──
+        ("资金流向 (Fund Flow)", "update_fund_flow"),
+        ("板块资金 (Sector Fund Flow)", "update_sector_fund_flow"),
+        ("北向资金 (North Flow)", "update_north_flow"),
+        ("融资融券 (Margin Trading)", "update_margin_trading"),
+        ("龙虎榜 (Dragon Tiger)", "update_dragon_tiger"),
+        ("大宗交易 (Block Trade)", "update_block_trade"),
+        # ── 行业/大盘 ──
+        ("行业分类 (Sector Industry)", "update_sector_industry"),
+        ("行业更新 (Industry)", "update_industry"),
+        ("大盘指数 (Index Daily)", "update_index_daily"),
+        ("涨跌停 (Limit U/D)", "update_limit_up_down"),
+        # ── 估值/财务 ──
+        ("历史估值 (Valuation)", "update_historical_valuation"),
+        ("季度财务 (Quarterly Fin.)", "update_quarterly_financials"),
+        ("股东户数 (Shareholders)", "update_shareholder_count"),
+        ("分红信息 (Dividends)", "update_dividend_summary"),
+        # ── 宏观 ──
+        ("黄金价格 (Gold Price)", "update_gold_price"),
+        ("原油价格 (Crude Oil)", "update_crude_oil"),
+        ("汇率 (USD/CNY)", "update_usd"),
+        ("全球指数 (Global Index)", "update_global_index"),
+        ("美债收益率 (US Treasury)", "update_us_treasury"),
+        ("期货日线 (Futures)", "update_futures"),
+        # ── 工具 ──
+        ("股票列表 (Stock List)", "update_stock_list"),
+        ("重试失败 (Retry Failed)", "retry"),
+        ("健康检查 (Health Check)", "health_check"),
     ]
 
     def on_mount(self) -> None:
@@ -923,6 +993,7 @@ class DataCompletenessWidget(VerticalScroll):
         "update_usd": "fx_rate",
         "update_global_index": "global_index",
         "update_us_treasury": "us_treasury",
+        "update_futures": "futures_daily",
         "update_chip_distribution": "chip_distribution",
         "update_chip_distribution_em": "chip_distribution_em",
     }
@@ -959,8 +1030,48 @@ class DataCompletenessWidget(VerticalScroll):
         "fx_rate": "USD/CNY",
         "global_index": "Global Index",
         "us_treasury": "US Treasury",
+        # 期货
+        "futures_daily": "Futures",
         # 总览
         "stock_list": "Stock List",
+    }
+
+    TABLE_LABELS_CN: dict[str, str] = {
+        # 行情核心
+        "daily_bars": "日线行情",
+        "indicators": "技术指标",
+        # 基本面
+        "fundamentals": "基本面数据",
+        "historical_valuation": "历史估值",
+        "quarterly_financials": "季度财务",
+        "dividend_summary": "分红信息",
+        # 资金面
+        "fund_flow": "资金流向",
+        "margin_trading": "融资融券",
+        "dragon_tiger": "龙虎榜",
+        "block_trade": "大宗交易",
+        "sector_fund_flow": "板块资金",
+        "north_flow": "北向资金",
+        # 行业/大盘
+        "sector_industry": "行业分类",
+        "index_daily": "大盘指数",
+        "limit_up_down": "涨跌停",
+        # 股东
+        "shareholder_count": "股东户数",
+        "institutional_holdings": "机构持仓",
+        # 筹码分布
+        "chip_distribution": "筹码分布",
+        "chip_distribution_em": "筹码分布(EM)",
+        # 宏观
+        "gold_price": "黄金价格",
+        "crude_oil": "原油价格",
+        "fx_rate": "汇率",
+        "global_index": "全球指数",
+        "us_treasury": "美债收益率",
+        # 期货
+        "futures_daily": "期货日线",
+        # 总览
+        "stock_list": "股票列表",
     }
 
     async def on_mount(self) -> None:
@@ -1025,16 +1136,28 @@ class DataCompletenessWidget(VerticalScroll):
             return None
 
     # 数据新鲜度排序权重：数字越小越靠前。
-    # 用户指定顺序：最新 → 延迟发布 → 略滞后 → 滞后 → 按月更新 → 按季更新 → 无数据
+    # 用户指定顺序：最新 → T+1 → 略滞后 → 滞后 → 按月更新 → 按季更新 → 无数据
     _STATUS_ORDER: dict[str, int] = {
         "更新中": 0,
         "最新": 1,
-        "延迟发布": 2,
+        "T+1": 2,
         "略滞后": 3,
         "滞后": 4,
         "按月更新": 5,
         "按季更新": 6,
         "无数据": 7,
+    }
+
+    # 状态 → (图标, 颜色)。使用高对比度 hex 色，确保在深色主题下清晰可辨。
+    STATUS_STYLES: dict[str, tuple[str, str]] = {
+        "更新中": ("↻", "#22d3ee"),
+        "最新": ("●", "#10b981"),
+        "T+1": ("◐", "#3b82f6"),
+        "按月更新": ("◈", "#8b5cf6"),
+        "按季更新": ("◆", "#d946ef"),
+        "略滞后": ("▲", "#f59e0b"),
+        "滞后": ("▼", "#ef4444"),
+        "无数据": ("○", "#737373"),
     }
 
     @classmethod
@@ -1044,16 +1167,16 @@ class DataCompletenessWidget(VerticalScroll):
         latest: str | None,
         expected_date: str,
         updating_table: str | None,
-    ) -> tuple[str, str]:
-        """返回指定表的新鲜度标记和状态标签。"""
+    ) -> str:
+        """返回指定表的新鲜度状态标签（纯文本）。"""
         if tbl == updating_table:
-            return "[cyan]●[/cyan]", "更新中"
+            return "更新中"
         if tbl in MONTHLY_TABLES and latest:
-            return "[yellow]●[/yellow]", "按月更新"
+            return "按月更新"
         if tbl in QUARTERLY_TABLES and latest:
-            return "[dark_orange]●[/dark_orange]", "按季更新"
+            return "按季更新"
         if tbl in DELAYED_PUBLISH_TABLES and latest:
-            return "[green]●[/green]", "延迟发布"
+            return "T+1"
         return _date_status(latest, expected_date)
 
     def _rebuild_content(self) -> None:
@@ -1075,11 +1198,11 @@ class DataCompletenessWidget(VerticalScroll):
         if estimated_total and sum(counts.get(k, 0) for k in self.TABLE_LABELS) == 0:
             db_size = get_db_size(str(DEFAULT_DB_PATH))
             lines = [
-                f" • [bold]数据库：[/bold][cyan]{db_size}[/cyan]  [dim]行数加载中...[/dim]",
+                f" - [bold]数据库：[/bold][cyan]{db_size}[/cyan]  [dim]行数加载中...[/dim]",
                 "",
             ]
             for _tbl, label in self.TABLE_LABELS.items():
-                lines.append(f" • [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
+                lines.append(f" - [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
             self._content.update("\n".join(lines))
             return
 
@@ -1097,48 +1220,46 @@ class DataCompletenessWidget(VerticalScroll):
         ]
 
         # 先计算每个表的状态与排序键，再按新鲜度排序（滞后/无数据沉底）
-        items: list[tuple[int, int, str, str, int, str | None, str, str]] = []
+        items: list[tuple[int, int, str, str, int, str | None, str]] = []
         for idx, (tbl, label) in enumerate(self.TABLE_LABELS.items()):
             n = counts.get(tbl, 0)
             latest = latest_dates.get(tbl)
-            emoji, status = self._get_status_for_table(
+            status = self._get_status_for_table(
                 tbl, latest, expected_date, updating_table
             )
 
             order = self._STATUS_ORDER.get(status, 3)
-            items.append((order, idx, tbl, label, n, latest, emoji, status))
+            items.append((order, idx, tbl, label, n, latest, status))
 
         items.sort(key=lambda x: (x[0], x[1]))
 
-        for _, _, tbl, label, n, latest, emoji, status in items:
+        for _, _, tbl, label, n, latest, status in items:
             formatted = format_count(n)
-            cn_formatted = format_chinese_magnitude(n)
             date_str = f"[gray]{latest or '—'}[/gray]"
-            status_str = f"{emoji} [bold]{status}[/bold]".strip()
+            icon, color = self.STATUS_STYLES.get(status, ("●", "white"))
+            status_str = f"[{color}]{icon} [bold]{status}[/bold][/]"
+            label_cn = self.TABLE_LABELS_CN.get(tbl, label)
 
-            if tbl == "daily_bars":
-                pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
+            if tbl in ("daily_bars", "indicators"):
+                if tbl == "daily_bars":
+                    pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
+                else:
+                    pct = n / daily_bars * 100 if daily_bars else 0
                 bar, pct_int = self._mini_bar(pct)
+                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
                 lines.append(
-                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
-                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray] {bar} [dim]{pct_int}%[/dim]"
-                )
-            elif tbl == "indicators":
-                pct = n / daily_bars * 100 if daily_bars else 0
-                bar, pct_int = self._mini_bar(pct)
-                lines.append(
-                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
-                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray] {bar} [dim]{pct_int}%[/dim]"
+                    f"  [dim]{label_cn}[/dim]  {status_str}  {date_str}  "
+                    f"{bar} [dim]{pct_int}%[/dim]"
                 )
             elif tbl in NO_DATE_TABLES:
-                lines.append(f" • [bold gray]{label}[/bold gray]: [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]")
+                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
+                lines.append(f"  [dim]{label_cn}[/dim]  [dim]无日期列[/dim]")
             elif tbl == "stock_list":
-                lines.append(f" • [bold gray]{label}[/bold gray]: [cyan]{formatted}[/cyan] 只")
+                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan] 只")
+                lines.append(f"  [dim]{label_cn}[/dim]")
             else:
-                lines.append(
-                    f" • [bold gray]{label}[/bold gray]: {status_str}  {date_str}\n"
-                    f"   [cyan]{formatted}[/cyan] [gray]({cn_formatted})[/gray]"
-                )
+                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
+                lines.append(f"  [dim]{label_cn}[/dim]  {status_str}  {date_str}")
 
         self._content.update("\n".join(lines))
 
@@ -1366,15 +1487,7 @@ class PipelineApp(App):
 
         self.push_screen(ConfirmRunScreen(action_name), _on_dismiss)
 
-    CSS = """
-    $blue-normal: #1d4ed8;
-    $blue-hover: #3b82f6;
-    $blue-focus: #60a5fa;
-
-    $rose-normal: #be123c;
-    $rose-hover: #e11d48;
-    $rose-focus: #fb7185;
-
+    CSS = _SHARED_CSS + """
     PipelineApp {
         background: $background;
     }
