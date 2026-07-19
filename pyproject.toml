@@ -50,7 +50,6 @@ ignore = ["E501"]
 asyncio_mode = "auto"
 
 [tool.coverage.report]
-# 84 → 82：PR #21 引入 core/stock_cyq_em.py(12%)、tasks/futures.py(19%)
-# 等网络抓取 / 期货模块，单测需大量 mock，整体覆盖自然落在 ~83%。
-# 82 在保留"测试全绿即过关"约束的同时，匹配当前代码库真实覆盖水平。
-fail_under = 82
+# 覆盖率门槛 85%。需为低覆盖模块（网络抓取 / 期货 / 指标计算等）
+# 补单测以达到该标准。
+fail_under = 85
