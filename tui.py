@@ -23,6 +23,8 @@ from textual.widgets import (
     Footer,
     Header,
     Label,
+    ListItem,
+    ListView,
     RichLog,
     Select,
     Static,
@@ -328,29 +330,36 @@ class CopyPanelScreen(ModalScreen[str]):
         background: transparent;
         padding: 0;
     }
-    #copy-list Button {
+    #copy-list ListView {
         width: 100%;
-        height: 1;
+        height: auto;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+    #copy-list ListView > ListItem {
+        width: 100%;
+        height: auto;
         min-height: 1;
-        max-height: 1;
         padding: 0 1;
         margin: 0 0 1 0;
         border: none;
         background: transparent;
         color: $text;
         text-align: left;
-        content-align: left middle;
     }
-    #copy-list Button:hover {
+    #copy-list ListView > ListItem:hover {
         background: $blue-hover 25%;
     }
-    #copy-list Button:focus {
+    #copy-list ListView > ListItem:focus {
         background: $blue-focus 35%;
         text-style: bold;
     }
-    #copy-list Button.-default {
-        background: transparent;
+    #copy-list ListView > ListItem > Label {
+        width: 100%;
+        text-align: left;
     }
+
     #copy-hint {
         width: 100%;
         text-align: center;
@@ -376,14 +385,18 @@ class CopyPanelScreen(ModalScreen[str]):
         with Vertical(id="copy-dialog"):
             yield Label("选择要复制的面板")
             with Vertical(id="copy-list"):
+                list_items = []
                 for panel_id, key, label in self.PANELS:
-                    yield Button(f"[dim][{key}][/dim] {label}", id=panel_id, variant="default")
+                    list_items.append(
+                        ListItem(Label(f"[dim][{key}][/dim] {label}"), id=panel_id)
+                    )
+                yield ListView(*list_items, id="copy-list-view")
             yield Label("按 1-4 / Enter 选择 · Esc 取消", id="copy-hint")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """处理 Button 项选择。"""
-        if event.button.id in self._panel_ids:
-            self.dismiss(event.button.id)
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """处理 ListView 项选择。"""
+        if event.item and event.item.id in self._panel_ids:
+            self.dismiss(event.item.id)
 
     def on_key(self, event) -> None:
         if event.key in ("escape", "q"):
@@ -427,14 +440,15 @@ class HelpScreen(ModalScreen[None]):
             yield Label("[bold]R[/bold] — 断点续传")
             yield Label("[bold]X[/bold] — 停止任务")
             yield Label("[bold]D[/bold] — 启动守护进程")
-            yield Label("[bold]Z[/bold] — 停止守护进程")
             yield Label("[bold]H[/bold] — 健康检查")
+            yield Label("")
+            yield Label("[dim]更多快捷键[/dim]")
+            yield Label("[bold]Z[/bold] — 停止守护进程")
             yield Label("[bold]F[/bold] — 数据修复")
-            yield Label("[bold]C[/bold] — 复制面板")
+            yield Label("[bold]C[/bold] — 复制面板内容")
             yield Label("[bold]L[/bold] — 清理日志")
             yield Label("[bold]T[/bold] — 切换主题")
-            yield Label("[bold]F5[/bold] — 刷新数据完整度")
-            yield Label("[bold]?[/bold] — 显示帮助")
+            yield Label("[bold]F5[/bold] — 刷新数据")
             yield Label("[bold]Ctrl+C / Q[/bold] — 退出")
             yield Label("")
             yield Label("[dim]按 Esc 或 Q 关闭[/dim]")
@@ -547,6 +561,7 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "north_flow", "index_daily", "limit_up_down", "dividend_summary",
             "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
             "chip_distribution", "chip_distribution_em",
+            "futures_daily",
         ]
         result = {}
         if fast:
@@ -602,6 +617,7 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "chip_distribution": "trade_date",
     "chip_distribution_em": "trade_date",
     "dividend_summary": "updated_at",
+    "futures_daily": "trade_date",
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
@@ -714,6 +730,9 @@ def _date_status(latest: str | None, expected: str) -> str:
 
         latest_dt = datetime.strptime(latest, "%Y-%m-%d")
         expected_dt = datetime.strptime(expected, "%Y-%m-%d")
+        # 数据日期 >= 期望日期 → 已更新到或超过预期（非交易日也有数据）
+        if latest_dt >= expected_dt:
+            return "最新"
         if latest_dt >= expected_dt - timedelta(days=2):
             return "略滞后"
     except Exception:
@@ -728,6 +747,16 @@ def format_count(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}K"
     return str(n)
+
+
+def _vis_width(text: str) -> int:
+    """计算字符串在终端中的可见宽度（CJK=2, ASCII=1）。"""
+    return sum(2 if "\u4e00" <= ch <= "\u9fff" else 1 for ch in text)
+
+
+def _ljust_vis(text: str, width: int) -> str:
+    """按可见宽度左对齐填充空格。"""
+    return text + " " * max(0, width - _vis_width(text))
 
 
 def format_chinese_magnitude(n: int) -> str:
@@ -870,7 +899,7 @@ def sync_watchlists_from_files(db_path: str) -> WatchlistSyncResult:
 
 class DashboardWidget(Static):
     async def on_mount(self) -> None:
-        self.border_title = "📊 Dashboard"
+        self.border_title = "Dashboard"
         # 缓存股票数量，避免每次刷新都查询数据库
         self._cached_stocks: int = 0
         self._last_stocks_update: float = 0.0
@@ -1075,7 +1104,7 @@ class DataCompletenessWidget(VerticalScroll):
     }
 
     async def on_mount(self) -> None:
-        self.border_title = "📀 Data Completeness"
+        self.border_title = "Data Completeness"
         self._counts: dict[str, int] = {}
         self._latest_dates: dict[str, str | None] = {}
         self._daily_coverage: tuple[int, int] = (0, 0)
@@ -1213,10 +1242,12 @@ class DataCompletenessWidget(VerticalScroll):
         total_rows = sum(v for k, v in counts.items() if not k.startswith("_"))
         db_size = get_db_size(str(DEFAULT_DB_PATH))
 
+        stock_count = counts.get("stock_list", 0)
+
         lines = [
-            f" • [bold]总数据量：[/bold][cyan]{format_chinese_magnitude(total_rows)}[/cyan] 行  [gray]({db_size})[/gray]",
-            f" • [bold]期望最新日期：[/bold][cyan]{expected_date}[/cyan]",
-            "",
+            f" [cyan]{stock_count}[/cyan] [bold]只股票[/bold]    "
+            f"[bold]总数据 [/bold][cyan]{format_chinese_magnitude(total_rows)}[/cyan]  "
+            f"[bold]期望 [/bold][cyan]{expected_date}[/cyan]",
         ]
 
         # 先计算每个表的状态与排序键，再按新鲜度排序（滞后/无数据沉底）
@@ -1233,12 +1264,19 @@ class DataCompletenessWidget(VerticalScroll):
 
         items.sort(key=lambda x: (x[0], x[1]))
 
+        max_label_w = max(_vis_width(cn) for cn in self.TABLE_LABELS_CN.values())
+        max_count_w = max(len(format_count(counts.get(tbl, 0))) for tbl in self.TABLE_LABELS)
+
         for _, _, tbl, label, n, latest, status in items:
+            if tbl == "stock_list":
+                continue
             formatted = format_count(n)
+            rjust_count = formatted.rjust(max_count_w)
             date_str = f"[gray]{latest or '—'}[/gray]"
             icon, color = self.STATUS_STYLES.get(status, ("●", "white"))
-            status_str = f"[{color}]{icon} [bold]{status}[/bold][/]"
+            status_str = f"[{color}]{icon} {status}[/{color}]"
             label_cn = self.TABLE_LABELS_CN.get(tbl, label)
+            padded_label = _ljust_vis(label_cn, max_label_w)
 
             if tbl in ("daily_bars", "indicators"):
                 if tbl == "daily_bars":
@@ -1246,20 +1284,17 @@ class DataCompletenessWidget(VerticalScroll):
                 else:
                     pct = n / daily_bars * 100 if daily_bars else 0
                 bar, pct_int = self._mini_bar(pct)
-                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
                 lines.append(
-                    f"  [dim]{label_cn}[/dim]  {status_str}  {date_str}  "
-                    f"{bar} [dim]{pct_int}%[/dim]"
+                    f" [dim]{padded_label}[/dim]  {status_str} [cyan]{rjust_count}[/cyan]  {date_str}  {bar} [dim]{pct_int}%[/dim]"
                 )
             elif tbl in NO_DATE_TABLES:
-                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
-                lines.append(f"  [dim]{label_cn}[/dim]  [dim]无日期列[/dim]")
-            elif tbl == "stock_list":
-                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan] 只")
-                lines.append(f"  [dim]{label_cn}[/dim]")
+                lines.append(
+                    f" [dim]{padded_label}[/dim]  [cyan]{rjust_count}[/cyan]  [dim]无日期列[/dim]"
+                )
             else:
-                lines.append(f" - [bold gray]{label}[/bold gray]  [cyan]{formatted}[/cyan]")
-                lines.append(f"  [dim]{label_cn}[/dim]  {status_str}  {date_str}")
+                lines.append(
+                    f" [dim]{padded_label}[/dim]  {status_str} [cyan]{rjust_count}[/cyan]  {date_str}"
+                )
 
         self._content.update("\n".join(lines))
 
@@ -1274,14 +1309,14 @@ class DataCompletenessWidget(VerticalScroll):
 
 class ProgressWidget(Static):
     def on_mount(self) -> None:
-        self.border_title = "📈 Progress"
+        self.border_title = "Progress"
         self.update_progress()
         self.set_interval(2.0, self.update_progress)
 
     def update_progress(self) -> None:
         progress = parse_progress(str(PROGRESS_JSON_PATH))
         if not progress:
-            self.update(" 当前无运行中的任务，或未生成进度文件。")
+            self.update(" [dim]当前无运行中的任务[/dim]")
             self.remove_class("active-task")
             return
 
@@ -1296,11 +1331,12 @@ class ProgressWidget(Static):
         bar = "█" * filled + "░" * (bar_length - filled)
 
         text = (
-            f" • [bold gray]当前任务：[/bold gray]  [yellow]{progress.get('task')}[/yellow]\n"
-            f" • [bold gray]更新进度：[/bold gray]  [bold #e2e8f0]{pct:.1f}%[/bold #e2e8f0] ([cyan]{processed}[/cyan]/[cyan]{total}[/cyan])\n"
-            f"            [bold #c084fc]{bar}[/bold #c084fc]\n"
-            f" • [bold gray]当前股票：[/bold gray]  [cyan]{last_symbol}[/cyan]\n"
-            f" • [bold gray]失败数量：[/bold gray]  [bold red]{failed_count}[/bold red]\n"
+            f" [yellow]{progress.get('task')}[/yellow]  "
+            f"[bold #e2e8f0]{pct:.1f}%[/bold #e2e8f0] "
+            f"([cyan]{processed}[/cyan]/[cyan]{total}[/cyan])  "
+            f"[bold #c084fc]{bar}[/bold #c084fc]\n"
+            f" [dim]当前股票：[/dim][cyan]{last_symbol}[/cyan]  "
+            f"[dim]失败：[/dim][bold red]{failed_count}[/bold red]\n"
         )
         self.update(text)
         self.add_class("active-task")
@@ -1316,7 +1352,7 @@ class LogsWidget(RichLog):
         super().__init__(*args, **kwargs)
 
     def on_mount(self) -> None:
-        self.border_title = "📋 Live Logs"
+        self.border_title = "Live Logs"
         self.active_log: str | None = None
         self.file_handle: TextIO | None = None
         self.set_interval(1.0, self.tail_log)
@@ -1398,16 +1434,16 @@ class PipelineApp(App):
         Binding("s", "run_pipeline", "Full Update"),
         Binding("r", "resume_pipeline", "Resume"),
         Binding("x", "stop_pipeline", "Stop"),
-        Binding("d", "start_daemon", "Start Daemon"),
-        Binding("z", "stop_daemon", "Stop Daemon"),
-        Binding("h", "run_health", "Health Check"),
-        Binding("f", "run_reconcile", "Data Repair", show=True),
-        Binding("c", "copy_panel", "Copy Panel", show=True),
-        Binding("t", "toggle_theme", "Toggle Theme", show=True),
-        Binding("l", "clean_logs", "Clean Logs", show=True),
-        Binding("f5", "refresh_data", "Refresh", show=True),
-        Binding("?", "show_help", "Help", show=True),
-        Binding("ctrl+c", "quit", "Quit", priority=True),
+        Binding("d", "start_daemon", "Daemon"),
+        Binding("h", "run_health", "Health"),
+        Binding("?", "show_help", "More"),
+        Binding("z", "stop_daemon", "Stop Daemon", show=False),
+        Binding("f", "run_reconcile", "Data Repair", show=False),
+        Binding("c", "copy_panel", "Copy Panel", show=False),
+        Binding("t", "toggle_theme", "Toggle Theme", show=False),
+        Binding("l", "clean_logs", "Clean Logs", show=False),
+        Binding("f5", "refresh_data", "Refresh", show=False),
+        Binding("ctrl+c", "quit", "Quit", priority=True, show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
 
@@ -1419,15 +1455,17 @@ class PipelineApp(App):
 
     async def on_mount(self) -> None:
         """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
-        # 应用保存的主题
         self.theme = self._theme_name
-        # 无论是否有后台进程，都调度自选股同步
         self._create_background_task(self._sync_watchlists())
 
         processes = find_running_pipeline_processes()
-        if not processes:
-            return
-        should_stop = await self.push_screen_wait(ConfirmStopScreen(processes))
+        if processes:
+            self.push_screen(
+                ConfirmStopScreen(processes),
+                callback=lambda should_stop: self._on_stop_confirm(should_stop, processes),
+            )
+
+    def _on_stop_confirm(self, should_stop: bool, processes: list[dict]) -> None:
         if should_stop:
             for p in processes:
                 with contextlib.suppress(OSError):
@@ -1438,7 +1476,11 @@ class PipelineApp(App):
                 timeout=3.0,
             )
         else:
-            self.notify("Background processes kept running", severity="information", timeout=3.0)
+            self.notify(
+                "Background processes kept running",
+                severity="information",
+                timeout=3.0,
+            )
 
     async def _sync_watchlists(self) -> None:
         try:
@@ -1535,7 +1577,7 @@ class PipelineApp(App):
     #status-dashboard, #scraping-progress {
         border: round $blue-normal;
         background: $surface;
-        padding: 1 2;
+        padding: 0 1;
         border-title-align: left;
         border-title-color: #60a5fa;
         height: 1fr;
@@ -1543,7 +1585,7 @@ class PipelineApp(App):
     #data-completeness {
         border: round $blue-normal;
         background: $surface;
-        padding: 1 2;
+        padding: 0 1;
         border-title-align: left;
         border-title-color: #60a5fa;
         scrollbar-color: #475569 #1e293b;
@@ -1630,6 +1672,10 @@ class PipelineApp(App):
         background: #64748b;
         text-style: bold;
     }
+
+    Footer {
+        align: center middle;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -1640,7 +1686,7 @@ class PipelineApp(App):
             yield SingleTaskWidget(id="single-task")
             yield ProgressWidget(id="scraping-progress")
             yield DataCompletenessWidget(id="data-completeness")
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     async def _stop_current_process(self) -> None:
         """终止当前正在运行的子进程及其整个进程组。"""
@@ -1804,12 +1850,16 @@ class PipelineApp(App):
         )
 
     async def action_toggle_theme(self) -> None:
-        """切换深色/浅色主题并持久化。"""
-        new_theme = "textual-light" if self._theme_name == "textual-dark" else "textual-dark"
+        """轮换主题并持久化。"""
+        from textual.theme import BUILTIN_THEMES
+
+        themes = sorted(BUILTIN_THEMES)
+        idx = themes.index(self._theme_name) if self._theme_name in themes else -1
+        new_theme = themes[(idx + 1) % len(themes)]
         self._theme_name = new_theme
         self.theme = new_theme
         save_theme(new_theme)
-        self.notify(f"主题已切换为: {new_theme}", timeout=3.0)
+        self.notify(f"主题已切换: {new_theme} ({idx + 2}/{len(themes)})", timeout=3.0)
 
     async def action_show_help(self) -> None:
         """显示快捷键帮助弹窗。"""
