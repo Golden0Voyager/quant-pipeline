@@ -4,6 +4,7 @@ fcntl / os / sys / atexit / signal 全部 mock，避免真实写 PID 文件或�
 """
 from __future__ import annotations
 
+import contextlib
 import io
 from unittest.mock import MagicMock, patch
 
@@ -87,7 +88,7 @@ def test_acquire_alive_lock_exits():
     pidfile = _make_pidfile()
     fake_fd = MagicMock(spec=io.TextIOWrapper)
 
-    class _Exit(Exception):
+    class _ExitError(Exception):
         pass
 
     with patch.object(lock_mod, "_PIDFILE", pidfile), patch(
@@ -98,11 +99,9 @@ def test_acquire_alive_lock_exits():
         # 第一个锁由别的存活进程持有：flock 抛 OSError，pid 存活
         mock_fcntl.flock.side_effect = OSError("locked")
         mock_os.kill.return_value = None  # 不抛异常 → alive=True
-        mock_sys.exit.side_effect = _Exit()
-        try:
+        mock_sys.exit.side_effect = _ExitError()
+        with contextlib.suppress(_ExitError):
             ProcessLock.acquire()
-        except _Exit:
-            pass
         mock_sys.exit.assert_called_once_with(1)
 
 

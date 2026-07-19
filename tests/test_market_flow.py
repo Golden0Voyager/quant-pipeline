@@ -106,9 +106,10 @@ def test_safe_fetch_margin_detail_other_value_error_raises():
     fetcher.side_effect = ValueError("something else")
     try:
         mf._safe_fetch_margin_detail(fetcher, "20260720", "sh")
-        assert False, "should have raised"
     except ValueError:
         pass
+    else:
+        raise AssertionError("should have raised")
 
 
 def _margin_df(exchange: str) -> pd.DataFrame:

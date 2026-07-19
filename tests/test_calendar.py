@@ -102,7 +102,7 @@ def test_load_cached_calendar_expired(tmp_path: Path):
     cache = tmp_path / "trading_calendar.json"
     old = (datetime.now() - timedelta(days=cal.CALENDAR_CACHE_DAYS + 1)).isoformat()
     cache.write_text(
-        '{"cached_at": "%s", "trade_dates": ["2026-07-20"]}' % old, encoding="utf-8"
+        f'{{"cached_at": "{old}", "trade_dates": ["2026-07-20"]}}', encoding="utf-8"
     )
     with patch.object(cal, "CALENDAR_CACHE", cache):
         # 超期 → 返回 None，触发重新获取
