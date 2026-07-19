@@ -536,12 +536,13 @@ async def test_data_completeness_shows_freshness_and_dates():
              patch("tui.get_expected_latest_trading_day", return_value="2026-07-09"):
             widget._rebuild_content()
         text = "\n".join(captured)
-        assert "期望最新日期" in text
+        # 顶部摘要行使用简洁标签 "期望 " + 期望日期
+        assert "期望" in text
+        assert "2026-07-09" in text
         # 新设计使用 hex 颜色 + 图标 + 状态文本，检查任一状态颜色标签
         from tui import DataCompletenessWidget
         expected_colors = [f"[{color}]" for _icon, color in DataCompletenessWidget.STATUS_STYLES.values()]
         assert any(tag in text for tag in expected_colors)
-        assert "2026-07-09" in text
 
 
 def test_status_for_table_with_timestamp():
@@ -582,15 +583,24 @@ async def test_data_completeness_sorts_by_freshness():
         with patch.object(widget._content, "update", side_effect=captured.append), patch("tui.get_expected_latest_trading_day", return_value="2026-07-14"):
             widget._rebuild_content()
         text = "\n".join(captured)
+        # UI 渲染用中文标签（TABLE_LABELS_CN），按位置验证排序：最新 → T+1 → 略滞后 → 滞后 → 按月 → 按季
         positions = {
-            "Daily Bars": text.find("Daily Bars"),
-            "USD/CNY": text.find("USD/CNY"),
-            "Margin Trading": text.find("Margin Trading"),
-            "Global Index": text.find("Global Index"),
-            "Inst. Holdings": text.find("Inst. Holdings"),
-            "Quarterly Fin.": text.find("Quarterly Fin."),
+            "日线行情": text.find("日线行情"),
+            "汇率": text.find("汇率"),
+            "融资融券": text.find("融资融券"),
+            "全球指数": text.find("全球指数"),
+            "机构持仓": text.find("机构持仓"),
+            "季度财务": text.find("季度财务"),
         }
-        assert positions["Daily Bars"] < positions["USD/CNY"] < positions["Margin Trading"] < positions["Global Index"] < positions["Inst. Holdings"] < positions["Quarterly Fin."]
+        assert -1 not in positions.values(), f"标签缺失: {positions}"
+        assert (
+            positions["日线行情"]
+            < positions["汇率"]
+            < positions["融资融券"]
+            < positions["全球指数"]
+            < positions["机构持仓"]
+            < positions["季度财务"]
+        )
 
 
 def test_parse_progress_valid(tmp_path):
@@ -1016,14 +1026,16 @@ async def test_action_copy_panel_opens_screen():
 
 @pytest.mark.asyncio
 async def test_copy_panel_screen_dismiss():
-    from textual.widgets import Label as TextualLabel
-    from textual.widgets import ListItem, ListView
     screen = CopyPanelScreen()
     for btn_id, _key, _label in CopyPanelScreen.PANELS:
         mock_dismiss = MagicMock()
         screen.dismiss = mock_dismiss
-        item = ListItem(TextualLabel("test"), id=btn_id)
-        screen.on_list_view_selected(ListView.Selected(item))
+        # on_list_view_selected 只访问 event.item.id，用一个轻量 stub 即可
+        item = MagicMock()
+        item.id = btn_id
+        event = MagicMock()
+        event.item = item
+        screen.on_list_view_selected(event)
         mock_dismiss.assert_called_once_with(btn_id)
 
 
@@ -1090,18 +1102,24 @@ def test_get_updating_table_no_file():
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_action_toggle_theme():
+    """验证主题在 BUILTIN_THEMES 中轮换并持久化。"""
+    from textual.theme import BUILTIN_THEMES
     app = PipelineApp()
     async with app.run_test():
         with patch("tui.save_theme") as mock_save:
+            themes_sorted = sorted(BUILTIN_THEMES)
+            initial_idx = themes_sorted.index(app._theme_name) if app._theme_name in themes_sorted else -1
             await app.action_toggle_theme()
-            assert app._theme_name == "textual-light"
-            assert app.theme == "textual-light"
-            mock_save.assert_called_once_with("textual-light")
+            next_idx = (initial_idx + 1) % len(themes_sorted)
+            assert app._theme_name == themes_sorted[next_idx]
+            assert app.theme == themes_sorted[next_idx]
+            mock_save.assert_called_once_with(themes_sorted[next_idx])
 
             await app.action_toggle_theme()
-            assert app._theme_name == "textual-dark"
-            assert app.theme == "textual-dark"
-            assert mock_save.call_args.args[0] == "textual-dark"
+            after_idx = (next_idx + 1) % len(themes_sorted)
+            assert app._theme_name == themes_sorted[after_idx]
+            assert app.theme == themes_sorted[after_idx]
+            assert mock_save.call_args.args[0] == themes_sorted[after_idx]
 
 
 @pytest.mark.asyncio
