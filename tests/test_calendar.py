@@ -1,8 +1,11 @@
 """core.calendar 覆盖率测试：交易日判断与期望最新交易日计算。"""
 from __future__ import annotations
 
-from datetime import date, datetime
-from unittest.mock import patch
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
 
 import core.calendar as cal
 
@@ -56,3 +59,57 @@ def test_get_expected_weekday_after_1530_uses_today():
     with patch.object(cal, "datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 20, 16, 0)  # Mon 16:00 > 15:30
         assert cal.get_expected_latest_trading_day() == "2026-07-20"
+
+
+# ───────────────────────── 交易日历获取 / 缓存 ─────────────────────────
+
+
+def test_fetch_trading_calendar_returns_sorted():
+    fake_ak = MagicMock()
+    # trade_date 列需要是可转 datetime 的字符串，且需含 "trade_date" 列名
+    fake_ak.tool_trade_date_hist_sina.return_value = pd.DataFrame(
+        {"trade_date": pd.to_datetime(["2026-07-21", "2026-07-20", "2026-07-17"])}
+    )
+    with patch.dict("sys.modules", {"akshare": fake_ak}):
+        result = cal._fetch_trading_calendar()
+    assert result == ["2026-07-17", "2026-07-20", "2026-07-21"]
+
+
+def test_fetch_trading_calendar_empty():
+    fake_ak = MagicMock()
+    fake_ak.tool_trade_date_hist_sina.return_value = pd.DataFrame()
+    with patch.dict("sys.modules", {"akshare": fake_ak}):
+        assert cal._fetch_trading_calendar() == []
+
+
+def test_fetch_trading_calendar_raises():
+    fake_ak = MagicMock()
+    fake_ak.tool_trade_date_hist_sina.side_effect = RuntimeError("boom")
+    with patch.dict("sys.modules", {"akshare": fake_ak}):
+        assert cal._fetch_trading_calendar() == []
+
+
+def test_save_and_load_calendar_cache(tmp_path: Path):
+    cache = tmp_path / "trading_calendar.json"
+    with patch.object(cal, "CALENDAR_CACHE", cache):
+        cal._save_calendar_cache(["2026-07-20", "2026-07-21"])
+        assert cache.exists()
+        # 刚写入未过期，应原样返回
+        assert cal._load_cached_calendar() == ["2026-07-20", "2026-07-21"]
+
+
+def test_load_cached_calendar_expired(tmp_path: Path):
+    cache = tmp_path / "trading_calendar.json"
+    old = (datetime.now() - timedelta(days=cal.CALENDAR_CACHE_DAYS + 1)).isoformat()
+    cache.write_text(
+        '{"cached_at": "%s", "trade_dates": ["2026-07-20"]}' % old, encoding="utf-8"
+    )
+    with patch.object(cal, "CALENDAR_CACHE", cache):
+        # 超期 → 返回 None，触发重新获取
+        assert cal._load_cached_calendar() is None
+
+
+def test_load_cached_calendar_missing(tmp_path: Path):
+    cache = tmp_path / "trading_calendar.json"  # 不存在
+    with patch.object(cal, "CALENDAR_CACHE", cache):
+        assert cal._load_cached_calendar() is None
