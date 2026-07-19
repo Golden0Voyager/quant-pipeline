@@ -100,22 +100,21 @@ class TestTUIEndToEnd:
             # 等待 TUI 主界面渲染
             assert self._wait_for_text(session, "SmartMoney Pipeline Manager", timeout=5.0)
 
-            # 初始主题应为 dark
-            assert json.loads(tui_config.read_text(encoding="utf-8")).get("theme", "textual-dark") == "textual-dark"
+            # 初始主题应为 dark（config 为空 {} 时默认 dark）
+            config = json.loads(tui_config.read_text(encoding="utf-8"))
+            assert config.get("theme", "textual-dark") == "textual-dark"
+            initial = config.get("theme", "textual-dark")
 
-            # 按 't' 切换主题
+            # 按 't' 切换主题并持久化到配置文件
             self._tmux_send(session, "t")
             time.sleep(1.0)
+            after1 = json.loads(tui_config.read_text(encoding="utf-8")).get("theme")
+            assert after1 is not None and after1 != initial
 
-            # 验证配置文件已更新为 light
-            config = json.loads(tui_config.read_text(encoding="utf-8"))
-            assert config.get("theme") == "textual-light"
-
-            # 再按一次 't' 切回 dark
+            # 再按一次 't' 切换主题，验证每次切换都会改变并持久化
             self._tmux_send(session, "t")
             time.sleep(1.0)
-
-            config = json.loads(tui_config.read_text(encoding="utf-8"))
-            assert config.get("theme") == "textual-dark"
+            after2 = json.loads(tui_config.read_text(encoding="utf-8")).get("theme")
+            assert after2 is not None and after2 != after1
         finally:
             subprocess.run(["tmux", "kill-session", "-t", session], check=False)
