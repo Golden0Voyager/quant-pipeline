@@ -1016,32 +1016,33 @@ async def test_action_copy_panel_opens_screen():
 
 @pytest.mark.asyncio
 async def test_copy_panel_screen_dismiss():
-    from textual.widgets import Button
+    from textual.widgets import Label as TextualLabel
+    from textual.widgets import ListItem, ListView
     screen = CopyPanelScreen()
     for btn_id, _key, _label in CopyPanelScreen.PANELS:
         mock_dismiss = MagicMock()
         screen.dismiss = mock_dismiss
-        btn = Button("test", id=btn_id)
-        screen.on_button_pressed(Button.Pressed(btn))
+        item = ListItem(TextualLabel("test"), id=btn_id)
+        screen.on_list_view_selected(ListView.Selected(item))
         mock_dismiss.assert_called_once_with(btn_id)
 
 
 @pytest.mark.asyncio
-async def test_copy_panel_screen_composes_four_buttons() -> None:
-    from textual.widgets import Button
+async def test_copy_panel_screen_composes_four_items() -> None:
+    from textual.widgets import ListItem
     app = PipelineApp()
     with patch("tui.find_running_pipeline_processes", return_value=[]):
         async with app.run_test() as pilot:
             screen = CopyPanelScreen()
             app.push_screen(screen)
             await pilot.pause()
-            buttons = list(screen.query(Button))
-            assert len(buttons) == 4
+            items = list(screen.query(ListItem))
+            assert len(items) == 4
             expected_ids = {panel_id for panel_id, _key, _label in CopyPanelScreen.PANELS}
-            assert {btn.id for btn in buttons} == expected_ids
-            # 每个按钮都应该有可见高度，确保不会被布局裁剪
-            for btn in buttons:
-                assert btn.region.height > 0
+            assert {item.id for item in items} == expected_ids
+            # 每个列表项都应该有可见高度，确保不会被布局裁剪
+            for item in items:
+                assert item.region.height > 0
 
 
 @pytest.mark.asyncio
