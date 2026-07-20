@@ -47,6 +47,12 @@ class SmartMoneyDBProvider:
             self._write_conn = conn
         return self._write_conn
 
+    @staticmethod
+    def _commit_delta(conn: sqlite3.Connection, before_changes: int) -> int:
+        """提交事务并返回本次事务产生的变更数。"""
+        conn.commit()
+        return conn.total_changes - before_changes
+
     def _ensure_wal_mode(self) -> None:
         """启用 WAL 模式以提升并发读写性能。"""
         db_path = self._db.db_path
@@ -134,6 +140,206 @@ class SmartMoneyDBProvider:
                         ps_ttm REAL,
                         dividend_yield REAL,
                         UNIQUE(ts_code, trade_date)
+                    )
+                """)
+                # macro_monthly
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS macro_monthly (
+                        date TEXT PRIMARY KEY,
+                        cpi_yoy REAL, cpi_mom REAL, cpi_core_yoy REAL,
+                        ppi_yoy REAL, ppi_mom REAL,
+                        pmi REAL, pmi_yoy REAL, pmi_monthly_change REAL, pmi_mom REAL,
+                        pmi_caixin REAL,
+                        m0 REAL, m1 REAL, m2 REAL, m0_yoy REAL, m1_yoy REAL, m2_yoy REAL,
+                        new_loans REAL, new_loans_yoy REAL,
+                        retail_sales_yoy REAL, retail_sales_ytd_yoy REAL,
+                        fixed_asset_investment_yoy REAL, fixed_asset_investment_ytd_yoy REAL,
+                        export_value REAL, export_yoy REAL, import_value REAL, import_yoy REAL,
+                        industrial_production_yoy REAL, industrial_production_ytd_yoy REAL,
+                        electricity_consumption_yoy REAL, electricity_consumption_total REAL,
+                        enterprise_goods_price_yoy REAL, enterprise_goods_price_mom REAL,
+                        consumer_confidence REAL, consumer_satisfaction REAL, consumer_expectation REAL,
+                        lpr_1y REAL, lpr_5y REAL,
+                        data_date TEXT
+                    )
+                """)
+                # macro_quarterly
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS macro_quarterly (
+                        date TEXT PRIMARY KEY,
+                        gdp REAL, gdp_yoy REAL, gdp_qoq REAL,
+                        gdp_primary REAL, gdp_secondary REAL, gdp_tertiary REAL,
+                        data_date TEXT
+                    )
+                """)
+                # macro_daily
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS macro_daily (
+                        date TEXT PRIMARY KEY,
+                        shibor_on REAL, shibor_1w REAL, shibor_2w REAL, shibor_1m REAL,
+                        shibor_3m REAL, shibor_6m REAL, shibor_9m REAL, shibor_1y REAL,
+                        data_date TEXT
+                    )
+                """)
+                # south_flow
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS south_flow (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date DATE NOT NULL,
+                        market TEXT,
+                        net_buy_amount REAL,
+                        buy_amount REAL,
+                        sell_amount REAL,
+                        cumulative_net_buy REAL,
+                        data_source TEXT,
+                        UNIQUE(trade_date, market)
+                    )
+                """)
+                # ah_premium
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ah_premium (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date DATE NOT NULL,
+                        ts_code TEXT,
+                        h_code TEXT,
+                        name TEXT,
+                        a_price REAL,
+                        h_price REAL,
+                        premium REAL,
+                        data_source TEXT,
+                        UNIQUE(trade_date, ts_code)
+                    )
+                """)
+                # cb_quotation
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS cb_quotation (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT,
+                        bond_name TEXT,
+                        price REAL,
+                        premium REAL,
+                        double_low REAL,
+                        expire_date TEXT,
+                        data_source TEXT,
+                        UNIQUE(ts_code)
+                    )
+                """)
+                # cb_redeem
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS cb_redeem (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT,
+                        bond_name TEXT,
+                        redeem_flag TEXT,
+                        redeem_price REAL,
+                        redeem_date TEXT,
+                        data_source TEXT,
+                        UNIQUE(ts_code)
+                    )
+                """)
+                # cb_index
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS cb_index (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date DATE NOT NULL,
+                        index_code TEXT,
+                        index_name TEXT,
+                        open REAL,
+                        close REAL,
+                        high REAL,
+                        low REAL,
+                        volume REAL,
+                        data_source TEXT,
+                        UNIQUE(trade_date, index_code)
+                    )
+                """)
+                # etf_daily
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS etf_daily (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT,
+                        name TEXT,
+                        trade_date DATE NOT NULL,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL,
+                        volume REAL,
+                        amount REAL,
+                        data_source TEXT,
+                        UNIQUE(ts_code, trade_date)
+                    )
+                """)
+                # restricted_share
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS restricted_share (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT,
+                        name TEXT,
+                        release_date DATE,
+                        actual_release REAL,
+                        total_shares REAL,
+                        market_type TEXT,
+                        data_source TEXT,
+                        UNIQUE(ts_code, release_date)
+                    )
+                """)
+                # earnings_forecast
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS earnings_forecast (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT,
+                        name TEXT,
+                        end_date TEXT,
+                        forecast_type TEXT,
+                        net_profit_change REAL,
+                        previous_profit REAL,
+                        data_source TEXT,
+                        UNIQUE(ts_code, end_date)
+                    )
+                """)
+                # sector_daily
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sector_daily (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sector_name TEXT,
+                        trade_date DATE NOT NULL,
+                        open REAL,
+                        close REAL,
+                        high REAL,
+                        low REAL,
+                        volume REAL,
+                        amount REAL,
+                        pct_change REAL,
+                        data_source TEXT,
+                        UNIQUE(sector_name, trade_date)
+                    )
+                """)
+                # sector_valuation
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sector_valuation (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sector_name TEXT,
+                        trade_date DATE NOT NULL,
+                        pe REAL,
+                        pb REAL,
+                        total_mv REAL,
+                        data_source TEXT,
+                        UNIQUE(sector_name, trade_date)
+                    )
+                """)
+                # index_futures_basis
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS index_futures_basis (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date DATE NOT NULL,
+                        futures_code TEXT,
+                        futures_price REAL,
+                        index_price REAL,
+                        basis REAL,
+                        basis_pct REAL,
+                        data_source TEXT,
+                        UNIQUE(trade_date, futures_code)
                     )
                 """)
         except Exception:
@@ -249,6 +455,36 @@ class SmartMoneyDBProvider:
     def save_historical_valuation(self, symbol: str, trade_date: str, data: dict[str, Any]) -> None:
         self._db.save_historical_valuation(symbol, trade_date, data)
 
+    def save_historical_valuation_batch(self, records: list[dict[str, Any]]) -> int:
+        if not records:
+            return 0
+        rows = [
+            (
+                r.get("ts_code"),
+                r.get("trade_date"),
+                r.get("pe_ttm"),
+                r.get("pb"),
+                r.get("ps_ttm"),
+                r.get("dividend_yield"),
+            )
+            for r in records
+            if r.get("ts_code") and r.get("trade_date")
+        ]
+        if not rows:
+            return 0
+        with self._write_lock:
+            conn = self._get_write_conn()
+            before_changes = conn.total_changes
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO historical_valuation (
+                    ts_code, trade_date, pe_ttm, pb, ps_ttm, dividend_yield
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            return self._commit_delta(conn, before_changes)
+
     def save_sector_industry(self, data: dict[str, Any]) -> None:
         self._db.save_sector_industry(data)
 
@@ -312,6 +548,7 @@ class SmartMoneyDBProvider:
         try:
             with self._write_lock:
                 conn = self._get_write_conn()
+                before_changes = conn.total_changes
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO chip_distribution (
@@ -338,8 +575,7 @@ class SmartMoneyDBProvider:
                         for r in records
                     ],
                 )
-                conn.commit()
-                return conn.total_changes
+                return self._commit_delta(conn, before_changes)
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 筹码分布批量保存失败: {e}")
@@ -352,6 +588,7 @@ class SmartMoneyDBProvider:
         try:
             with self._write_lock:
                 conn = self._get_write_conn()
+                before_changes = conn.total_changes
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO chip_distribution_em (
@@ -378,11 +615,504 @@ class SmartMoneyDBProvider:
                         for r in records
                     ],
                 )
-                conn.commit()
-                return conn.total_changes
+                return self._commit_delta(conn, before_changes)
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 东方财富筹码分布批量保存失败: {e}")
+            return 0
+
+    def save_macro_monthly_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存月度宏观数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO macro_monthly (
+                        date, cpi_yoy, cpi_mom, cpi_core_yoy,
+                        ppi_yoy, ppi_mom,
+                        pmi, pmi_yoy, pmi_monthly_change, pmi_mom,
+                        pmi_caixin,
+                        m0, m1, m2, m0_yoy, m1_yoy, m2_yoy,
+                        new_loans, new_loans_yoy,
+                        retail_sales_yoy, retail_sales_ytd_yoy,
+                        fixed_asset_investment_yoy, fixed_asset_investment_ytd_yoy,
+                        export_value, export_yoy, import_value, import_yoy,
+                        industrial_production_yoy, industrial_production_ytd_yoy,
+                        electricity_consumption_yoy, electricity_consumption_total,
+                        enterprise_goods_price_yoy, enterprise_goods_price_mom,
+                        consumer_confidence, consumer_satisfaction, consumer_expectation,
+                        lpr_1y, lpr_5y,
+                        data_date
+                    ) VALUES (
+                        ?, ?, ?, ?,
+                        ?, ?,
+                        ?, ?, ?, ?,
+                        ?,
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?,
+                        ?, ?, ?,
+                        ?, ?,
+                        ?
+                    )
+                    """,
+                    [
+                        (
+                            r["date"],
+                            r.get("cpi_yoy"), r.get("cpi_mom"), r.get("cpi_core_yoy"),
+                            r.get("ppi_yoy"), r.get("ppi_mom"),
+                            r.get("pmi"), r.get("pmi_yoy"), r.get("pmi_monthly_change"), r.get("pmi_mom"),
+                            r.get("pmi_caixin"),
+                            r.get("m0"), r.get("m1"), r.get("m2"), r.get("m0_yoy"), r.get("m1_yoy"), r.get("m2_yoy"),
+                            r.get("new_loans"), r.get("new_loans_yoy"),
+                            r.get("retail_sales_yoy"), r.get("retail_sales_ytd_yoy"),
+                            r.get("fixed_asset_investment_yoy"), r.get("fixed_asset_investment_ytd_yoy"),
+                            r.get("export_value"), r.get("export_yoy"), r.get("import_value"), r.get("import_yoy"),
+                            r.get("industrial_production_yoy"), r.get("industrial_production_ytd_yoy"),
+                            r.get("electricity_consumption_yoy"), r.get("electricity_consumption_total"),
+                            r.get("enterprise_goods_price_yoy"), r.get("enterprise_goods_price_mom"),
+                            r.get("consumer_confidence"), r.get("consumer_satisfaction"), r.get("consumer_expectation"),
+                            r.get("lpr_1y"), r.get("lpr_5y"),
+                            r.get("data_date"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 月度宏观数据保存失败: {e}")
+            return 0
+
+    def save_macro_quarterly_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存季度宏观数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO macro_quarterly (date, gdp, gdp_yoy, gdp_qoq, gdp_primary, gdp_secondary, gdp_tertiary, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r["date"], r.get("gdp"), r.get("gdp_yoy"), r.get("gdp_qoq"), r.get("gdp_primary"), r.get("gdp_secondary"), r.get("gdp_tertiary"), r.get("data_date"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 季度宏观数据保存失败: {e}")
+            return 0
+
+    def save_macro_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存日度宏观数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO macro_daily (date, shibor_on, shibor_1w, shibor_2w, shibor_1m, shibor_3m, shibor_6m, shibor_9m, shibor_1y, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r["date"], r.get("shibor_on"), r.get("shibor_1w"), r.get("shibor_2w"), r.get("shibor_1m"), r.get("shibor_3m"), r.get("shibor_6m"), r.get("shibor_9m"), r.get("shibor_1y"), r.get("data_date"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 日度宏观数据保存失败: {e}")
+            return 0
+
+    def save_south_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存南向资金流向数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO south_flow (
+                        trade_date, market, net_buy_amount, buy_amount, sell_amount,
+                        cumulative_net_buy, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("market"),
+                            r.get("net_buy_amount"),
+                            r.get("buy_amount"),
+                            r.get("sell_amount"),
+                            r.get("cumulative_net_buy"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 南向资金流向批量保存失败: {e}")
+            return 0
+
+    def save_ah_premium_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存AH溢价率数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO ah_premium (
+                        trade_date, ts_code, h_code, name, a_price, h_price,
+                        premium, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("ts_code"),
+                            r.get("h_code"),
+                            r.get("name"),
+                            r.get("a_price"),
+                            r.get("h_price"),
+                            r.get("premium"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ AH溢价率批量保存失败: {e}")
+            return 0
+
+    def save_cb_quotation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债行情数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO cb_quotation (
+                        ts_code, bond_name, price, premium,
+                        double_low, expire_date, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r.get("bond_name"),
+                            r.get("price"),
+                            r.get("premium"),
+                            r.get("double_low"),
+                            r.get("expire_date"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 可转债行情批量保存失败: {e}")
+            return 0
+
+    def save_cb_redeem_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债强赎数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO cb_redeem (
+                        ts_code, bond_name, redeem_flag,
+                        redeem_price, redeem_date, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r.get("bond_name"),
+                            r.get("redeem_flag"),
+                            r.get("redeem_price"),
+                            r.get("redeem_date"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 可转债强赎批量保存失败: {e}")
+            return 0
+
+    def save_cb_index_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债指数数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO cb_index (
+                        trade_date, index_code, index_name,
+                        open, close, high, low, volume, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("index_code"),
+                            r.get("index_name"),
+                            r.get("open"),
+                            r.get("close"),
+                            r.get("high"),
+                            r.get("low"),
+                            r.get("volume"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 可转债指数批量保存失败: {e}")
+            return 0
+
+    def save_etf_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存ETF日线数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO etf_daily (
+                        ts_code, name, trade_date, open, high, low, close,
+                        volume, amount, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r.get("name"),
+                            r.get("trade_date"),
+                            r.get("open"),
+                            r.get("high"),
+                            r.get("low"),
+                            r.get("close"),
+                            r.get("volume"),
+                            r.get("amount"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ ETF日线数据批量保存失败: {e}")
+            return 0
+
+    def save_restricted_share_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存限售解禁数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO restricted_share (
+                        ts_code, name, release_date, actual_release,
+                        total_shares, market_type, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r.get("name"),
+                            r.get("release_date"),
+                            r.get("actual_release"),
+                            r.get("total_shares"),
+                            r.get("market_type"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 限售解禁批量保存失败: {e}")
+            return 0
+
+    def save_earnings_forecast_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存业绩预告数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO earnings_forecast (
+                        ts_code, name, end_date, forecast_type,
+                        net_profit_change, previous_profit, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["ts_code"],
+                            r.get("name"),
+                            r.get("end_date"),
+                            r.get("forecast_type"),
+                            r.get("net_profit_change"),
+                            r.get("previous_profit"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 业绩预告批量保存失败: {e}")
+            return 0
+
+    def save_sector_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存行业板块日线数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO sector_daily (
+                        sector_name, trade_date,
+                        open, close, high, low, volume, amount, pct_change, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["sector_name"],
+                            r.get("trade_date"),
+                            r.get("open"),
+                            r.get("close"),
+                            r.get("high"),
+                            r.get("low"),
+                            r.get("volume"),
+                            r.get("amount"),
+                            r.get("pct_change"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 行业板块日线批量保存失败: {e}")
+            return 0
+
+    def save_sector_valuation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存行业板块估值数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO sector_valuation (
+                        sector_name, trade_date, pe, pb, total_mv, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["sector_name"],
+                            r.get("trade_date"),
+                            r.get("pe"),
+                            r.get("pb"),
+                            r.get("total_mv"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 行业板块估值批量保存失败: {e}")
+            return 0
+
+    def save_index_futures_basis_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股指期货基差数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO index_futures_basis (
+                        trade_date, futures_code, futures_price, index_price,
+                        basis, basis_pct, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("futures_code"),
+                            r.get("futures_price"),
+                            r.get("index_price"),
+                            r.get("basis"),
+                            r.get("basis_pct"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 股指期货基差批量保存失败: {e}")
             return 0
 
     def get_chip_distribution_em_batch(
