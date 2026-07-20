@@ -11,10 +11,16 @@ import logging
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 logger = logging.getLogger(__name__)
+
+
+def is_real_db_path(db_path: object) -> bool:
+    """Return True only for concrete filesystem paths, not MagicMock-like proxies."""
+    return isinstance(db_path, str | Path)
 
 
 def should_skip_beijing(symbol: str) -> bool:

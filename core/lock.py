@@ -7,17 +7,27 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
+import functools
 import io
 import logging
 import os
+import re
 import signal
 import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _PIDFILE = Path("/tmp/daily_pipeline.pid")
+
+
+def _task_lock_path(name: str) -> Path:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "task"
+    return Path(f"/tmp/daily_pipeline_{safe_name}.lock")
 
 
 class ProcessLock:
@@ -78,3 +88,71 @@ class ProcessLock:
                 pass
             cls._lock_file_fd = None
         _PIDFILE.unlink(missing_ok=True)
+
+
+class TaskLock:
+    """Named non-blocking task lock for direct function or UI-triggered runs."""
+
+    _fds: dict[str, io.TextIOWrapper] = {}
+
+    @classmethod
+    def acquire(cls, name: str) -> bool:
+        if name in cls._fds:
+            return True
+
+        path = _task_lock_path(name)
+        fd = open(path, "a+", buffering=1)  # noqa: SIM115
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fd.close()
+            return False
+
+        fd.truncate(0)
+        fd.seek(0)
+        fd.write(str(os.getpid()))
+        fd.flush()
+        cls._fds[name] = fd
+        return True
+
+    @classmethod
+    def release(cls, name: str) -> None:
+        fd = cls._fds.pop(name, None)
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        except OSError:
+            pass
+        _task_lock_path(name).unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def task_lock(name: str) -> Iterator[bool]:
+    acquired = TaskLock.acquire(name)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            TaskLock.release(name)
+
+
+def skip_if_task_locked(name: str) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
+    """Decorate a task so duplicate direct invocations are skipped, not overlapped."""
+    def decorator(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            with task_lock(name) as acquired:
+                if not acquired:
+                    logger.warning(f"⚠️ 任务 {name} 已在运行，跳过重复启动")
+                    return {
+                        "status": "locked",
+                        "skipped": True,
+                        "reason": "task already running",
+                    }
+                return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
