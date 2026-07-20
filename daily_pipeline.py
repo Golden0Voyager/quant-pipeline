@@ -75,10 +75,27 @@ from interface import (
 
 # ── Task module re-exports ──
 from tasks.bars import _update_single_bar, update_bars  # noqa: F401
+from tasks.china_macro import update_china_macro
+from tasks.convertible_bond import (
+    update_cb_index,
+    update_cb_quotation,
+    update_cb_redeem,
+)
 from tasks.core_chain import (
     update_chip_distribution,
     update_indicators,
     update_stock_list,
+)
+
+# ── New extended tasks ──
+from tasks.corporate_actions import (
+    update_earnings_forecast,
+    update_restricted_share,
+)
+from tasks.finance_flow import (
+    update_ah_premium,
+    update_etf_daily,
+    update_south_flow,
 )
 from tasks.financials import (
     update_industry,
@@ -108,6 +125,7 @@ from tasks.market_flow import (
     update_margin_trading,
     update_sector_fund_flow,
 )
+from tasks.sector_derivatives import update_sector_derivatives
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
     update_fundamentals,
@@ -143,6 +161,7 @@ def run_all(
     loader: DataLoaderInterface,
     engine: IndicatorEngineInterface,
     resume: bool = False,
+    force: bool = False,
 ) -> dict:
     """运行完整数据管道。"""
     start_time = time.time()
@@ -158,17 +177,11 @@ def run_all(
 
     results = {}
     results["stock_list"] = _safe_task("update_stock_list", update_stock_list, db)
-    results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume)
+    results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume, force=force)
 
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
     # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
     results["indicators"] = _safe_task("update_indicators", update_indicators, db, engine)
-    results["chip_distribution"] = _safe_task(
-        "update_chip_distribution", update_chip_distribution, db
-    )
-    results["chip_distribution_em"] = _safe_task(
-        "update_chip_distribution_em", update_chip_distribution_em, db
-    )
 
     results["fundamentals"] = _safe_task("update_fundamentals", update_fundamentals, db, loader)
     results["market_snapshot"] = _safe_task("update_market_snapshot (雪球)", update_market_snapshot, db)
@@ -192,6 +205,25 @@ def run_all(
     results["global_index"] = _safe_task("update_global_index", update_global_index, db)
     results["us_treasury"] = _safe_task("update_us_treasury", update_us_treasury, db)
     results["futures"] = _safe_task("update_futures", update_futures, db)
+    results["china_macro"] = _safe_task("update_china_macro", update_china_macro, db)
+
+    # ── 新增衍生数据任务 ──
+    results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
+    results["ah_premium"] = _safe_task("update_ah_premium", update_ah_premium, db)
+    results["etf_daily"] = _safe_task("update_etf_daily", update_etf_daily, db)
+    results["cb_quotation"] = _safe_task("update_cb_quotation", update_cb_quotation, db)
+    results["cb_redeem"] = _safe_task("update_cb_redeem", update_cb_redeem, db)
+    results["cb_index"] = _safe_task("update_cb_index", update_cb_index, db)
+    results["restricted_share"] = _safe_task("update_restricted_share", update_restricted_share, db)
+    results["earnings_forecast"] = _safe_task("update_earnings_forecast", update_earnings_forecast, db)
+    results["sector_derivatives"] = _safe_task("update_sector_derivatives", update_sector_derivatives, db)
+    results["chip_distribution"] = _safe_task(
+        "update_chip_distribution", update_chip_distribution, db
+    )
+    results["chip_distribution_em"] = _safe_task(
+        "update_chip_distribution_em", update_chip_distribution_em, db
+    )
+
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
     results["health"] = _safe_task("health_check", health_check, db)
 
@@ -204,7 +236,11 @@ def run_all(
 
     # 检查是否有任务失败，供 main() 决定退出码
     results["crashed"] = any(
-        isinstance(v, dict) and (v.get("status") == "crashed" or bool(v.get("error")))
+        isinstance(v, dict)
+        and (
+            v.get("status") in {"crashed", "completed_with_errors"}
+            or bool(v.get("error"))
+        )
         for v in results.values()
     )
     return results
@@ -276,13 +312,13 @@ def main():
                 return True
 
         if args.task == "all":
-            results = run_all(db, loader, engine, resume=args.resume)
+            results = run_all(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
         elif args.task == "update_stock_list":
             update_stock_list(db)
         elif args.task == "update_bars":
-            update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols)
+            update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols, force=args.force)
         elif args.task == "update_indicators":
             if args.force or symbols:
                 conn_kw = sqlite3.connect(str(db.db_path))
@@ -353,6 +389,26 @@ def main():
             update_us_treasury(db)
         elif args.task == "update_futures":
             update_futures(db)
+        elif args.task == "update_south_flow":
+            update_south_flow(db)
+        elif args.task == "update_ah_premium":
+            update_ah_premium(db)
+        elif args.task == "update_etf_daily":
+            update_etf_daily(db)
+        elif args.task == "update_cb_quotation":
+            update_cb_quotation(db)
+        elif args.task == "update_cb_redeem":
+            update_cb_redeem(db)
+        elif args.task == "update_cb_index":
+            update_cb_index(db)
+        elif args.task == "update_restricted_share":
+            update_restricted_share(db)
+        elif args.task == "update_earnings_forecast":
+            update_earnings_forecast(db)
+        elif args.task == "update_sector_derivatives":
+            update_sector_derivatives(db)
+        elif args.task == "update_china_macro":
+            update_china_macro(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":
