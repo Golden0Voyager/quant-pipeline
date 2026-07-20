@@ -21,7 +21,10 @@ import daily_pipeline
 @pytest.fixture(autouse=True)
 def mock_pipeline_lock():
     """Bypass flock logic so tests don't fail when the daemon is running."""
-    with patch("daily_pipeline._acquire_lock"), patch("daily_pipeline._release_lock"):
+    with patch("daily_pipeline._acquire_lock"), \
+         patch("daily_pipeline._release_lock"), \
+         patch("core.lock.TaskLock.acquire", return_value=True), \
+         patch("core.lock.TaskLock.release"):
         yield
 
 
@@ -96,6 +99,44 @@ class TestUpdateSingleBar:
         with patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
             r = daily_pipeline._update_single_bar(db, loader, "000001.SZ", watchlist_symbols=set(), backfill_file=Path("/tmp/bf.txt"), backfilled_symbols=set())
         assert r == "skipped"
+        db.save_daily_bars.assert_not_called()
+
+    def test_existing_latest_expected_trade_date_skipped_without_fetch(self):
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-17"
+        with patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-17"), \
+             patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
+            r = daily_pipeline._update_single_bar(
+                db,
+                loader,
+                "000001.SZ",
+                watchlist_symbols=set(),
+                backfill_file=Path("/tmp/bf.txt"),
+                backfilled_symbols=set(),
+            )
+        assert r == "skipped"
+        db.get_daily_bars.assert_not_called()
+        loader.incremental_update.assert_not_called()
+
+    def test_stale_unchanged_incremental_counts_failed(self):
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-16"
+        existing = _bars_df(["2026-07-16"])
+        db.get_daily_bars.return_value = existing
+        loader.incremental_update.return_value = existing
+        with patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-17"), \
+             patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
+            r = daily_pipeline._update_single_bar(
+                db,
+                loader,
+                "000001.SZ",
+                watchlist_symbols=set(),
+                backfill_file=Path("/tmp/bf.txt"),
+                backfilled_symbols=set(),
+            )
+        assert r == "failed"
         db.save_daily_bars.assert_not_called()
 
     def test_full_no_existing_success(self):
@@ -295,6 +336,140 @@ class TestUpdateIndicators:
         with patch("daily_pipeline.logger"):
             r = daily_pipeline.update_indicators(db, engine, symbols_to_update=["000001.SZ"])
         assert r["failed"] == 1
+
+
+# ===========================================================================
+# update_chip_distribution_em
+# ===========================================================================
+class TestUpdateChipDistributionEm:
+    def test_aborts_after_nine_consecutive_fetch_failures(self):
+        db = MagicMock()
+        symbols = [f"00000{i}.SZ" for i in range(1, 12)]
+
+        with patch("tasks.index_chain._get_chip_em_target_symbols", return_value=symbols), \
+             patch("tasks.index_chain._fetch_cyq_em", return_value=None) as fetch, \
+             patch("tasks.index_chain.time.sleep"), \
+             patch("tasks.index_chain.logger"):
+            r = daily_pipeline.update_chip_distribution_em(db)
+
+        assert r["aborted"] is True
+        assert r["abort_reason"] == "consecutive_failures"
+        assert r["failed"] == 9
+        assert r["total"] == len(symbols)
+        assert r["processed"] == 9
+        assert fetch.call_count == 9
+
+    def test_empty_target_result_has_consistent_status_fields(self):
+        db = MagicMock()
+
+        with patch("tasks.index_chain._get_chip_em_target_symbols", return_value=[]), \
+             patch("tasks.index_chain.logger"):
+            r = daily_pipeline.update_chip_distribution_em(db)
+
+        assert r == {
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "total": 0,
+            "processed": 0,
+            "aborted": False,
+        }
+
+
+# ===========================================================================
+# New derived data task field mapping
+# ===========================================================================
+class TestDerivedDataTaskMappings:
+    def test_restricted_share_uses_start_and_end_date_parameters(self):
+        import tasks.corporate_actions as corporate_actions
+
+        mock_ak = MagicMock()
+        mock_ak.stock_restricted_release_detail_em.return_value = pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "名称": ["平安银行"],
+                "实际解禁数量": [100.5],
+                "总解禁量": [200.5],
+                "市场类型": ["深市"],
+            }
+        )
+
+        with patch.object(corporate_actions, "ak", mock_ak), \
+             patch.object(corporate_actions, "get_expected_latest_trading_day", return_value="2026-07-19"):
+            records = corporate_actions._fetch_restricted_share()
+
+        assert records[0]["ts_code"] == "000001"
+        call_kwargs = mock_ak.stock_restricted_release_detail_em.call_args_list[0].kwargs
+        assert call_kwargs == {"start_date": "20260719", "end_date": "20260719"}
+
+    def test_ah_premium_maps_actual_akshare_columns(self):
+        import tasks.finance_flow as finance_flow
+
+        mock_ak = MagicMock()
+        mock_ak.stock_zh_ah_spot_em.return_value = pd.DataFrame(
+            {
+                "A股代码": ["000001"],
+                "H股代码": ["00001"],
+                "名称": ["平安银行"],
+                "最新价-RMB": [10.1],
+                "最新价-HKD": [11.2],
+                "溢价": [5.5],
+            }
+        )
+
+        with patch.object(finance_flow, "ak", mock_ak), \
+             patch.object(finance_flow, "get_expected_latest_trading_day", return_value="2026-07-19"):
+            records = finance_flow._fetch_ah_premium()
+
+        assert records == [
+            {
+                "trade_date": "2026-07-19",
+                "ts_code": "000001",
+                "h_code": "00001",
+                "name": "平安银行",
+                "h_price": 11.2,
+                "a_price": 10.1,
+                "premium": 5.5,
+                "data_source": "akshare",
+            }
+        ]
+
+    def test_sector_valuation_uses_current_date_and_actual_columns(self):
+        import tasks.sector_derivatives as sector_derivatives
+
+        mock_ak = MagicMock()
+        mock_ak.stock_industry_pe_ratio_cninfo.return_value = pd.DataFrame(
+            {
+                "行业名称": ["银行"],
+                "变动日期": ["2026-07-19"],
+                "静态市盈率-加权平均": [6.1],
+                "市净率": [0.7],
+                "总市值-静态": [123456.0],
+            }
+        )
+
+        with patch.object(sector_derivatives, "ak", mock_ak), \
+             patch.object(sector_derivatives, "datetime") as mock_datetime:
+            mock_datetime.now.return_value = datetime(2026, 7, 19)
+            records = sector_derivatives._fetch_sector_valuation()
+
+        mock_ak.stock_industry_pe_ratio_cninfo.assert_called_once_with(date="20260719")
+        assert records == [
+            {
+                "sector_name": "银行",
+                "trade_date": "2026-07-19",
+                "pe": 6.1,
+                "pb": 0.7,
+                "total_mv": 123456.0,
+                "data_source": "akshare",
+            }
+        ]
+
+    def test_parse_chinese_quarter_label(self):
+        import tasks.china_macro as china_macro
+
+        assert china_macro._parse_quarter("2024年第一季度") == "2024-Q1"
+        assert china_macro._parse_quarter("2024年第四季度") == "2024-Q4"
 
 
 # ===========================================================================
@@ -623,6 +798,24 @@ class TestRunAll:
         assert "health" in r
         assert safe_task.call_count > 20
 
+    def test_chip_tasks_run_after_all_data_update_tasks(self, tmp_path: Path, weekday_mock):
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+
+        with patch("daily_pipeline._should_update", return_value=True), \
+             patch("daily_pipeline._safe_task", return_value={"status": "ok"}) as safe_task, \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.run_all(db, loader, engine)
+
+        task_names = [call.args[0] for call in safe_task.call_args_list]
+
+        assert task_names.index("update_chip_distribution") > task_names.index("update_sector_derivatives")
+        assert task_names.index("update_chip_distribution_em") > task_names.index("update_chip_distribution")
+        assert task_names.index("retry_failed") > task_names.index("update_chip_distribution_em")
+        assert task_names.index("health_check") > task_names.index("retry_failed")
+
 
 # ===========================================================================
 # main() / CLI
@@ -678,7 +871,7 @@ class TestMain:
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None)
+            fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None, force=False)
 
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
@@ -689,7 +882,7 @@ class TestMain:
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = engine = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader, engine, resume=True)
+            fn.assert_called_once_with(db, loader, engine, resume=True, force=True)
 
     def test_task_retry(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "retry"]), \
@@ -1048,6 +1241,51 @@ def test_update_historical_valuation_empty():
     assert r["total"] == 0
 
 
+def test_update_historical_valuation_deduplicates_symbol_date():
+    db = MagicMock()
+    db.get_fundamentals_batch.return_value = pd.DataFrame({
+        "ts_code": ["000001", "000001", "000002"],
+        "trade_date": ["2026-07-17", "2026-07-17", "2026-07-17"],
+        "pe_ttm": [10.0, 10.1, 12.0],
+        "pb": [1.0, 1.1, 1.5],
+        "ps_ttm": [2.0, 2.1, 2.5],
+        "dividend_yield": [0.03, 0.031, 0.02],
+    })
+
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_historical_valuation(db)
+
+    assert r["saved"] == 2
+    assert r["total"] == 2
+    assert db.save_historical_valuation.call_count == 2
+
+
+def test_update_historical_valuation_uses_batch_save_when_available():
+    class _BatchDB:
+        def __init__(self) -> None:
+            self.save_historical_valuation = MagicMock()
+            self.save_historical_valuation_batch = MagicMock(return_value=2)
+
+        def get_fundamentals_batch(self) -> pd.DataFrame:
+            return pd.DataFrame({
+                "ts_code": ["000001", "000002"],
+                "trade_date": ["2026-07-17", "2026-07-17"],
+                "pe_ttm": [10.0, 12.0],
+                "pb": [1.0, 1.5],
+                "ps_ttm": [2.0, 2.5],
+                "dividend_yield": [0.03, 0.02],
+            })
+
+    db = _BatchDB()
+
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_historical_valuation(db)
+
+    assert r["saved"] == 2
+    db.save_historical_valuation_batch.assert_called_once()
+    db.save_historical_valuation.assert_not_called()
+
+
 # ===========================================================================
 # update_sector_industry edge cases
 # ===========================================================================
@@ -1137,6 +1375,23 @@ def test_update_bars_symbols_mode_no_crash():
     ProgressTracker.clear()
 
 
+def test_update_bars_with_mock_db_path_does_not_create_magicmock_file():
+    db = MagicMock()
+    loader = MagicMock()
+    db.get_stock_list.return_value = pd.DataFrame({"code": ["000001"]})
+    db.get_daily_bars.return_value = _bars_df(["2024-01-02"])
+    db.watchlist_get_all.return_value = pd.DataFrame()
+    loader.incremental_update.return_value = _bars_df(["2024-01-02"])
+    pre_existing = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name}
+
+    with patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_bars(db, loader)
+
+    new_magicmock = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name} - pre_existing
+    assert r["total"] == 1
+    assert not new_magicmock
+
+
 def test_run_all_detects_crashed_task():
     """run_all() must detect crashed tasks in results."""
     from daily_pipeline import run_all
@@ -1165,6 +1420,34 @@ def test_run_all_detects_crashed_task():
         results2 = run_all(db, loader, engine)
     assert results2.get("crashed") is True, \
         "run_all should set crashed=True when task returns error field"
+
+    with patch("daily_pipeline._safe_task",
+               return_value={"status": "completed_with_errors", "failed": 1}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("time.sleep"):
+        results3 = run_all(db, loader, engine)
+    assert results3.get("crashed") is True, \
+        "run_all should set crashed=True when task completed with errors"
+
+
+def test_safe_task_marks_error_result_completed_with_errors():
+    from core.runner import safe_task
+
+    with patch("core.runner.logger"):
+        result = safe_task("broken_task", lambda: {"saved": 0, "total": 0, "error": "Broken pipe"})
+
+    assert result["status"] == "completed_with_errors"
+    assert result["error"] == "Broken pipe"
+
+
+def test_safe_task_marks_failed_result_completed_with_errors():
+    from core.runner import safe_task
+
+    with patch("core.runner.logger"):
+        result = safe_task("partial_task", lambda: {"success": 0, "failed": 2, "total": 10})
+
+    assert result["status"] == "completed_with_errors"
 
 
 def test_main_exits_one_when_run_all_returns_crashed():

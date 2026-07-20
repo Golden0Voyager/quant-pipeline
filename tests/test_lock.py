@@ -9,7 +9,7 @@ import io
 from unittest.mock import MagicMock, patch
 
 import core.lock as lock_mod
-from core.lock import ProcessLock
+from core.lock import ProcessLock, TaskLock, skip_if_task_locked, task_lock
 
 
 def _make_pidfile() -> MagicMock:
@@ -21,6 +21,7 @@ def _make_pidfile() -> MagicMock:
 
 def _reset():
     ProcessLock._lock_file_fd = None
+    TaskLock._fds.clear()
 
 
 def test_acquire_success_and_idempotent():
@@ -112,3 +113,47 @@ def test_release_when_not_locked():
         "core.lock.fcntl"
     ), patch("core.lock.os"):
         ProcessLock.release()  # 不应抛异常
+
+
+def test_task_lock_context_acquires_and_releases():
+    _reset()
+    fake_fd = MagicMock(spec=io.TextIOWrapper)
+
+    with patch("core.lock.open", return_value=fake_fd) as mock_open, \
+         patch("core.lock.fcntl") as mock_fcntl:
+        with task_lock("update_chip_distribution_em") as acquired:
+            assert acquired is True
+            assert "update_chip_distribution_em" in TaskLock._fds
+        mock_open.assert_called_once()
+        mock_fcntl.flock.assert_any_call(fake_fd, mock_fcntl.LOCK_EX | mock_fcntl.LOCK_NB)
+        mock_fcntl.flock.assert_any_call(fake_fd, mock_fcntl.LOCK_UN)
+        fake_fd.close.assert_called_once()
+
+
+def test_task_lock_context_reports_conflict():
+    _reset()
+    fake_fd = MagicMock(spec=io.TextIOWrapper)
+
+    with patch("core.lock.open", return_value=fake_fd), \
+         patch("core.lock.fcntl") as mock_fcntl:
+        mock_fcntl.flock.side_effect = OSError("locked")
+        with task_lock("update_industry") as acquired:
+            assert acquired is False
+        fake_fd.close.assert_called_once()
+
+
+def test_skip_if_task_locked_returns_locked_result_on_conflict():
+    _reset()
+
+    @skip_if_task_locked("update_industry")
+    def _task() -> dict[str, object]:
+        return {"saved": 1}
+
+    with patch("core.lock.TaskLock.acquire", return_value=False), \
+         patch("core.lock.TaskLock.release") as release, \
+         patch("core.lock.logger"):
+        result = _task()
+
+    assert result["status"] == "locked"
+    assert result["skipped"] is True
+    release.assert_not_called()
