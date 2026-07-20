@@ -123,6 +123,10 @@ class DatabaseInterface(Protocol):
         """保存历史估值快照。"""
         ...
 
+    def save_historical_valuation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存历史估值快照，返回实际保存条数。"""
+        ...
+
     def save_sector_industry(self, data: dict[str, Any]) -> None:
         """保存行业对比数据。"""
         ...
@@ -195,6 +199,98 @@ class DatabaseInterface(Protocol):
 
     def save_chip_distribution_em_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存东方财富线上获取的筹码分布数据到 chip_distribution_em 表。"""
+        ...
+
+    # ===========================================================================
+    # 宏观经济（中国）
+    # ===========================================================================
+
+    def save_macro_monthly_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存月度宏观指标（CPI/PPI/PMI/M2/社零等），返回实际保存条数。"""
+        ...
+
+    def save_macro_quarterly_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存季度宏观指标（GDP），返回实际保存条数。"""
+        ...
+
+    def save_macro_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存日度宏观指标（SHIBOR），返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 南向资金
+    # ===========================================================================
+
+    def save_south_flow_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存南向资金流向数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # A/H 溢价
+    # ===========================================================================
+
+    def save_ah_premium_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存A/H股溢价数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 可转债
+    # ===========================================================================
+
+    def save_cb_quotation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债行情数据，返回实际保存条数。"""
+        ...
+
+    def save_cb_redeem_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债强赎条款数据，返回实际保存条数。"""
+        ...
+
+    def save_cb_index_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存可转债指数数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # ETF 日线
+    # ===========================================================================
+
+    def save_etf_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存ETF日线行情数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 限售解禁
+    # ===========================================================================
+
+    def save_restricted_share_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存限售解禁数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 业绩预告
+    # ===========================================================================
+
+    def save_earnings_forecast_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存业绩预告数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 行业涨跌幅 / 板块估值
+    # ===========================================================================
+
+    def save_sector_daily_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存行业板块日线涨跌幅数据，返回实际保存条数。"""
+        ...
+
+    def save_sector_valuation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存行业板块估值数据（PE/PB），返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # 股指期货基差
+    # ===========================================================================
+
+    def save_index_futures_basis_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股指期货基差数据，返回实际保存条数。"""
         ...
 
     def get_chip_distribution_em_batch(

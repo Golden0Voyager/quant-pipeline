@@ -40,9 +40,24 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
         result = fn(*args, **kwargs)
         elapsed = time.time() - task_start
-        logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s")
+        if isinstance(result, dict) and _task_result_has_errors(result):
+            result.setdefault("status", "completed_with_errors")
+            logger.warning(f"⚠️ 任务 {name} 完成但存在错误，耗时 {elapsed:.1f}s")
+        else:
+            logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s")
         return result
     except Exception as e:
         elapsed = time.time() - task_start
         logger.error(f"❌ 任务 {name} 异常终止 (耗时 {elapsed:.1f}s): {e}", exc_info=True)
         return {"error": str(e), "status": "crashed"}
+
+
+def _task_result_has_errors(result: dict[str, Any]) -> bool:
+    """Return True when a task completed but reported a non-empty error state."""
+    if result.get("error") or result.get("aborted"):
+        return True
+    failed = result.get("failed")
+    if isinstance(failed, int | float) and failed > 0:
+        return True
+    failed_symbols = result.get("failed_symbols")
+    return isinstance(failed_symbols, list) and len(failed_symbols) > 0

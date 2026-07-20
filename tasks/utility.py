@@ -19,7 +19,7 @@ import pandas as pd  # noqa: F401
 from core.calendar import get_expected_latest_trading_day
 from core.config import DB_PATH, SHARED_DATA_DIR  # noqa: F401
 from core.monitor import AkShareMonitor  # noqa: F401
-from core.utils import should_skip_beijing, should_update  # noqa: F401
+from core.utils import is_real_db_path, should_skip_beijing, should_update  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
 
 # akshare 作为可选依赖（部分任务函数可能不直接使用它）
@@ -97,6 +97,11 @@ def health_check(db: DatabaseInterface) -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     issues: list[str] = []
     report_lines = [f"\n📋 SmartMoney 数据健康报告 ({today})\n" + "=" * 50]
+
+    if not is_real_db_path(getattr(db, "db_path", None)):
+        issues.append("无法打开数据库：db_path 不是有效路径")
+        report_lines.append("  数据库连接失败")
+        return {"issues": issues, "report": "\n".join(report_lines)}
 
     try:
         conn = sqlite3.connect(str(db.db_path))

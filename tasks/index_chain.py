@@ -9,6 +9,7 @@ import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
+from core.lock import skip_if_task_locked
 from core.stock_cyq_em import stock_cyq_em
 from core.utils import infer_market  # noqa: F401
 from interface import DatabaseInterface
@@ -122,12 +123,43 @@ def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+_CSI_INDICES: list[tuple[str, str]] = [
+    ("000300", "sina"),    # 沪深 300（新浪）
+    ("000852", "csindex"), # 中证 1000（中证指数官网）
+    ("000905", "sina"),    # 中证 500（新浪）
+]
+
+
+def _fetch_index_constituents(index_code: str, source: str) -> set[str]:
+    """返回指数成分股的 ts_code 集合，忽略北交所。"""
+    import akshare as ak
+
+    codes: set[str] = set()
+    try:
+        if source == "sina":
+            df = ak.index_stock_cons_sina(index_code)
+            col = "code"
+        elif source == "csindex":
+            df = ak.index_stock_cons_csindex(index_code)
+            col = "成分券代码"
+        else:
+            return codes
+
+        for _, row in df.iterrows():
+            code = str(row.get(col, ""))
+            if code.startswith(("6", "0", "3")):
+                codes.add(code)
+    except Exception:
+        pass
+    return codes
+
+
 def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     """获取需要线上抓取筹码分布的目标股票清单。
 
     优先顺序：
     1. 自选股（watchlist）
-    2. 指数成分股（从 index_daily 表中有数据的股票）
+    2. 指数成分股（CSI300 / CSI500 / CSI1000，实时拉取）
     3. 兜底：本地已有筹码分布且有日线数据的活跃股票
     """
     import sqlite3
@@ -143,16 +175,8 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     except Exception:
         pass
 
-    try:
-        rows = conn.execute("""
-            SELECT DISTINCT d.ts_code FROM daily_bars d
-            INNER JOIN index_daily i ON d.ts_code = i.ts_code
-            WHERE i.index_code LIKE '000300%' OR i.index_code LIKE '000905%'
-            ORDER BY d.ts_code
-        """).fetchall()
-        symbols.update(r[0] for r in rows)
-    except Exception:
-        pass
+    for index_code, source in _CSI_INDICES:
+        symbols |= _fetch_index_constituents(index_code, source)
 
     if len(symbols) < 200:
         try:
@@ -180,7 +204,12 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     return sorted(symbols)
 
 
-def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[str] | None = None) -> dict:
+@skip_if_task_locked("update_chip_distribution_em")
+def update_chip_distribution_em(
+    db: DatabaseInterface,
+    symbols_to_update: list[str] | None = None,
+    max_consecutive_failures: int = 9,
+) -> dict:
     """从东方财富线上获取筹码分布数据，写入 chip_distribution_em 表。
 
     限量为：自选股 + 指数成分股，避免全市场 5500 次 HTTP 调用。
@@ -188,6 +217,7 @@ def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[s
     Args:
         db: 数据库接口
         symbols_to_update: 指定目标股票清单，None 则自动探测
+        max_consecutive_failures: 连续失败硬熔断阈值，默认 9 次
 
     Returns:
         统计字典
@@ -206,7 +236,14 @@ def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[s
     total = len(symbols)
     if total == 0:
         logger.info("没有需要获取的股票")
-        return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+        return {
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "total": 0,
+            "processed": 0,
+            "aborted": False,
+        }
 
     success_count = 0
     failed_count = 0
@@ -231,6 +268,21 @@ def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[s
         if df is None:
             failed_count += 1
             consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                logger.error(
+                    "  🛑 连续 %d 次失败，触发硬熔断，跳过剩余 %d 只",
+                    consecutive_failures,
+                    total - i,
+                )
+                return {
+                    "success": success_count,
+                    "failed": failed_count,
+                    "skipped": skipped_count,
+                    "total": total,
+                    "processed": i,
+                    "aborted": True,
+                    "abort_reason": "consecutive_failures",
+                }
             continue
 
         # 成功一次就重置熔断计数器
@@ -275,4 +327,42 @@ def update_chip_distribution_em(db: DatabaseInterface, symbols_to_update: list[s
         "failed": failed_count,
         "skipped": skipped_count,
         "total": total,
+        "processed": total,
+        "aborted": False,
     }
+
+
+@skip_if_task_locked("update_chip_distribution_em_fullmarket")
+def update_chip_distribution_em_fullmarket(db: DatabaseInterface) -> dict:
+    """全市场模式：对 daily_bars 中所有股票跑 chip_distribution_em。
+
+    仅在 TUI 下拉菜单中手动触发，不会自动执行。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db.db_path))
+    all_symbols = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code"
+        ).fetchall()
+    ]
+    conn.close()
+
+    logger.info("\n" + "=" * 60)
+    logger.info("全市场筹码分布拉取（手动触发）")
+    logger.info(f"共 {len(all_symbols)} 只股票")
+    logger.info("=" * 60)
+
+    import sqlite3
+
+    _conn = sqlite3.connect(str(db.db_path))
+    existing = {
+        r[0]
+        for r in _conn.execute("SELECT DISTINCT ts_code FROM chip_distribution_em").fetchall()
+    }
+    _conn.close()
+    remaining = [s for s in all_symbols if s not in existing]
+    logger.info(f"已有 {len(existing)} 只，还需拉取 {len(remaining)} 只")
+
+    return update_chip_distribution_em(db, symbols_to_update=remaining)

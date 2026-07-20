@@ -10,9 +10,10 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed, wait
 from datetime import datetime
 
+from core.lock import skip_if_task_locked
 from core.utils import should_skip_beijing
 from interface import DatabaseInterface, DataLoaderInterface
 
@@ -160,22 +161,34 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
 
     batch_buffer: list[dict] = []
     workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    submit_batch_size = 500  # 分批提交，避免 futures 无限堆积
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_code = {executor.submit(_fetch_one, code): code for code in stock_codes}
-        for i, future in enumerate(as_completed(future_to_code), 1):
-            record, is_failed = future.result()
-            if record:
-                batch_buffer.append(record)
-                saved += 1
-            if is_failed:
-                failed += 1
+        processed = 0
+        for batch_start in range(0, len(stock_codes), submit_batch_size):
+            batch_codes = stock_codes[batch_start:batch_start + submit_batch_size]
+            fut_map = {executor.submit(_fetch_one, code): code for code in batch_codes}
+            for future in as_completed(fut_map):
+                try:
+                    record, is_failed = future.result(timeout=30)
+                except TimeoutError:
+                    logger.warning(f"  ⏰ 股票 {fut_map[future]} 超时，跳过")
+                    failed += 1
+                    continue
+                except Exception:
+                    failed += 1
+                    continue
+                if record:
+                    batch_buffer.append(record)
+                    saved += 1
+                if is_failed:
+                    failed += 1
 
-            if len(batch_buffer) >= batch_chunk:
-                db.save_quarterly_financials_batch(batch_buffer)
-                batch_buffer.clear()
+                if len(batch_buffer) >= batch_chunk:
+                    db.save_quarterly_financials_batch(batch_buffer)
+                    batch_buffer.clear()
 
-            if i % 500 == 0:
-                logger.info(f"  进度: {i}/{total} (成功: {saved}, 失败: {failed})")
+            processed += len(batch_codes)
+            logger.info(f"  进度: {processed}/{total} (成功: {saved}, 失败: {failed})")
 
     if batch_buffer:
         db.save_quarterly_financials_batch(batch_buffer)
@@ -184,6 +197,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
     return {"saved": saved, "failed": failed, "total": total}
 
 
+@skip_if_task_locked("update_industry")
 def update_industry(db: DatabaseInterface) -> dict:
     """
     批量更新 stock_list.industry 列。

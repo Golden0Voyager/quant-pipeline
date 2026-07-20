@@ -286,23 +286,46 @@ def update_historical_valuation(db: DatabaseInterface, symbols: list[str] | None
             df = df[df["ts_code"].isin(symbol_set)]
             logger.info(f"  --symbols 过滤：{len(df)}/{before} 只")
 
-        saved = 0
+        before_dedup = len(df)
+        df = df.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+        if len(df) < before_dedup:
+            logger.info(f"  去重：移除 {before_dedup - len(df)} 条重复估值快照")
+
+        records = []
         for _, row in df.iterrows():
             try:
                 symbol = row.get("ts_code")
                 trade_date = row.get("trade_date")
                 if not symbol or not trade_date:
                     continue
-                data = {
+                records.append({
+                    "ts_code": symbol,
+                    "trade_date": str(trade_date)[:10],
                     "pe_ttm": row.get("pe_ttm"),
                     "pb": row.get("pb"),
                     "ps_ttm": row.get("ps_ttm"),
                     "dividend_yield": row.get("dividend_yield"),
-                }
-                db.save_historical_valuation(symbol, str(trade_date)[:10], data)
-                saved += 1
+                })
             except Exception:
                 continue
+
+        batch_saver = None
+        if "save_historical_valuation_batch" in dir(db):
+            batch_saver = getattr(db, "save_historical_valuation_batch", None)
+
+        if callable(batch_saver):
+            saved = batch_saver(records) if records else 0
+        else:
+            saved = 0
+            for record in records:
+                data = {
+                    "pe_ttm": record.get("pe_ttm"),
+                    "pb": record.get("pb"),
+                    "ps_ttm": record.get("ps_ttm"),
+                    "dividend_yield": record.get("dividend_yield"),
+                }
+                db.save_historical_valuation(record["ts_code"], record["trade_date"], data)
+                saved += 1
 
         logger.info(f"✅ 历史估值快照保存完成: {saved}/{len(df)}")
         return {"saved": saved, "total": len(df)}

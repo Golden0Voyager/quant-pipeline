@@ -256,7 +256,9 @@ async def test_stop_current_process_kills_on_timeout():
 async def test_action_stop_pipeline_no_process():
     app = PipelineApp()
     mock_logger = MagicMock()
-    with patch("logging.getLogger", return_value=mock_logger):
+    with patch("tui.find_running_pipeline_processes", return_value=[]), \
+         patch("tui.get_daemon_status", return_value=("Stopped", None)), \
+         patch("logging.getLogger", return_value=mock_logger):
         await app.action_stop_pipeline()
         mock_logger.info.assert_called_once_with("没有正在运行的任务可停止")
 
@@ -273,7 +275,9 @@ async def test_action_stop_pipeline_stops_process():
     app._current_process = mock_proc
     mock_logger = MagicMock()
 
-    with patch("logging.getLogger", return_value=mock_logger):
+    with patch("tui.find_running_pipeline_processes", return_value=[]), \
+         patch("tui.get_daemon_status", return_value=("Stopped", None)), \
+         patch("logging.getLogger", return_value=mock_logger):
         await app.action_stop_pipeline()
         mock_proc.terminate.assert_called_once()
         mock_logger.info.assert_called_with("已停止进程: %s", [99999])
@@ -1077,7 +1081,29 @@ def test_get_updating_table_active():
     with patch("os.path.getmtime", return_value=time.time() - 30), \
          patch("tui.parse_progress", return_value=data):
         result = DataCompletenessWidget._get_updating_table()
-        assert result == "daily_bars"
+        assert result == ["daily_bars"]
+
+
+def test_new_tables_have_date_column_mappings():
+    from tui import TABLE_DATE_COLUMNS
+
+    expected = {
+        "south_flow": "trade_date",
+        "ah_premium": "trade_date",
+        "etf_daily": "trade_date",
+        "cb_index": "trade_date",
+        "restricted_share": "release_date",
+        "earnings_forecast": "end_date",
+        "sector_daily": "trade_date",
+        "sector_valuation": "trade_date",
+        "index_futures_basis": "trade_date",
+        "macro_monthly": "date",
+        "macro_quarterly": "date",
+        "macro_daily": "date",
+    }
+
+    for table, date_column in expected.items():
+        assert TABLE_DATE_COLUMNS[table] == date_column
 
 
 def test_get_updating_table_stale():
@@ -1150,15 +1176,16 @@ def test_load_save_theme(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_log_cleanup_screen_buttons():
     app = PipelineApp()
-    async with app.run_test() as pilot:
-        await pilot.press("l")
-        screen = app.screen
-        assert isinstance(screen, LogCleanupScreen)
-        labels = [str(b.label) for b in screen.query("Button")]
-        assert "全部清理" in labels
-        assert "保留最近 7 天" in labels
-        assert "保留最近 30 天" in labels
-        assert "取消" in labels
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            screen = app.screen
+            assert isinstance(screen, LogCleanupScreen)
+            labels = [str(b.label) for b in screen.query("Button")]
+            assert "全部清理" in labels
+            assert "保留最近 7 天" in labels
+            assert "保留最近 30 天" in labels
+            assert "取消" in labels
 
 
 @pytest.mark.asyncio

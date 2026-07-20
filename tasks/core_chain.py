@@ -17,6 +17,7 @@ import pandas as pd
 from core.config import SHARED_DATA_DIR  # noqa: F401
 from core.utils import (
     infer_market,
+    is_real_db_path,
     should_skip_beijing,  # noqa: F401
 )
 from interface import (
@@ -57,7 +58,29 @@ def update_stock_list(db: DatabaseInterface) -> dict:
         df["code"] = df["code"].astype(str).str.strip()
         df["name"] = df["name"].astype(str).str.strip()
         df["market"] = df["code"].apply(infer_market)
-        df["industry"] = None  # 由 update_industry 任务填充
+
+        # 从旧表合并已有 industry，避免 update_industry 全量重爬
+        # 仅在 db_path 为真实文件路径时尝试合并；测试中的 mock db 直接跳过，
+        # 避免把 MagicMock 的 repr 当成 SQLite 文件名在仓库根目录生成垃圾文件
+        if is_real_db_path(getattr(db, "db_path", None)):
+            try:
+                old_conn = sqlite3.connect(str(db.db_path))
+                old_df = pd.read_sql_query(
+                    "SELECT code, industry FROM stock_list WHERE industry IS NOT NULL AND industry != '未分类'",
+                    old_conn,
+                )
+                old_conn.close()
+                if not old_df.empty:
+                    old_df["code"] = old_df["code"].astype(str).str.strip()
+                    old_industry = old_df.set_index("code")["industry"]
+                    df["industry"] = df["code"].map(old_industry)
+                    df["industry"] = df["industry"].where(df["industry"].notna(), None)
+                else:
+                    df["industry"] = None
+            except Exception:
+                df["industry"] = None  # 合并失败时退化为全量重爬
+        else:
+            df["industry"] = None
 
         db.save_stock_list(df)
         saved = len(df)

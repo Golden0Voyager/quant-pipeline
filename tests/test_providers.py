@@ -101,6 +101,22 @@ def test_db_provider_methods():
     assert result is not None
 
 
+def test_new_batch_save_methods_return_per_call_change_count():
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+
+    first = provider.save_south_flow_batch(
+        [{"trade_date": "2026-07-19", "market": "港股通", "net_buy_amount": 1.0}]
+    )
+    second = provider.save_ah_premium_batch(
+        [{"trade_date": "2026-07-19", "ts_code": "000001", "name": "平安银行"}]
+    )
+
+    assert first == 1
+    assert second == 1
+
+
 def test_loader_provider_methods():
     from providers import SmartMoneyLoaderProvider
 
