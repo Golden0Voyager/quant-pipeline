@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import random
@@ -14,7 +15,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd  # noqa: F401  # DataFrame types used via db/loader returns
@@ -29,6 +30,7 @@ if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
 
 from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: F401
 
+from core.calendar import get_expected_latest_trading_day
 from core.config import (
     BATCH_SIZE_VAL as BATCH_SIZE,
 )
@@ -59,7 +61,7 @@ from core.config import (
 )
 from core.monitor import AkShareMonitor
 from core.progress import ProgressTracker
-from core.utils import should_skip_beijing
+from core.utils import is_real_db_path, should_skip_beijing
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -70,12 +72,36 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_trade_date(value: object) -> str | None:
+    """Normalize common trade date forms to YYYY-MM-DD for lexical comparison."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    if not isinstance(value, str):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return text
+
+
+def _has_real_db_path(db: DatabaseInterface) -> bool:
+    return is_real_db_path(getattr(db, "db_path", None))
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
     limit: int = None,
     resume: bool = False,
     symbols: list[str] | None = None,
+    force: bool = False,
 ) -> dict:
     """分批增量更新指定或所有股票的日线数据，支持断点续传。"""
     logger.info("=" * 60)
@@ -108,6 +134,47 @@ def update_bars(
         logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
     else:
         logger.info(f"📊 共 {total} 只股票待更新（已包含北交所）")
+
+    # ── 智能探测：快速 SQL 检查是否全部已是最新 ──
+    if not resume and not force and not limit and not symbols and _has_real_db_path(db):
+        import sqlite3
+        try:
+            _conn = sqlite3.connect(str(db.db_path))
+            _total_stocks = _conn.execute(
+                "SELECT COUNT(*) FROM stock_list"
+            ).fetchone()[0]
+            _covered = _conn.execute(
+                "SELECT COUNT(DISTINCT ts_code) FROM daily_bars"
+            ).fetchone()[0]
+            _latest_bar = _conn.execute(
+                "SELECT MAX(trade_date) FROM daily_bars"
+            ).fetchone()[0]
+            _conn.close()
+
+            if _covered >= _total_stocks and _latest_bar:
+                _expected = get_expected_latest_trading_day()
+                if _latest_bar >= _expected:
+                    logger.info(
+                        f"✅ 智能探测：全部 {_total_stocks} 只股票数据已是最新"
+                        f"（截至 {_latest_bar}），跳过批次扫描"
+                    )
+                    return {
+                        "success": 0, "failed": 0, "skipped": _total_stocks,
+                        "total": _total_stocks, "probe_skipped": True,
+                    }
+                logger.info(
+                    f"💡 智能探测：数据截至 {_latest_bar}，最新交易日为 {_expected}，继续更新"
+                )
+            else:
+                logger.info(
+                    f"💡 智能探测：{_covered}/{_total_stocks} 只有数据"
+                    f"（最新 {_latest_bar or 'N/A'}），继续更新"
+                )
+        except sqlite3.Error as e:
+            logger.debug(f"智能探测跳过: {e}")
+        finally:
+            with contextlib.suppress(Exception):
+                _conn.close()
 
     # ── 断点续传检测 ──
     progress = None
@@ -149,6 +216,7 @@ def update_bars(
 
     # 初始化 AkShare 稳定性监控
     monitor = AkShareMonitor()
+    expected_latest = get_expected_latest_trading_day()
 
     # ── 自选股全量拉取初始化 ──
     watchlist_symbols = set()
@@ -186,6 +254,7 @@ def update_bars(
                         backfilled_symbols=backfilled_symbols,
                         backfill_file=backfill_file,
                         db_lock=db_write_lock,
+                        expected_latest_date=expected_latest,
                     ): symbol
                     for symbol in batch
                 }
@@ -256,6 +325,7 @@ def update_bars(
                     watchlist_symbols=watchlist_symbols,
                     backfilled_symbols=backfilled_symbols,
                     backfill_file=backfill_file,
+                    expected_latest_date=expected_latest,
                 )
                 if result == "success":
                     success_count += 1
@@ -378,6 +448,7 @@ def _update_single_bar(
     backfilled_symbols: set[str] | None = None,
     backfill_file: Path | None = None,
     db_lock: threading.Lock | None = None,
+    expected_latest_date: str | None = None,
 ) -> str:
     """更新单只股票的日线数据，带重试。
 
@@ -414,6 +485,7 @@ def _update_single_bar(
 
     is_watchlist = watchlist_symbols and symbol in watchlist_symbols
     is_backfilled = backfilled_symbols and symbol in backfilled_symbols
+    expected_latest = _normalize_trade_date(expected_latest_date or get_expected_latest_trading_day())
 
     for attempt in range(MAX_RETRY):
         try:
@@ -460,8 +532,8 @@ def _update_single_bar(
 
             # 2. 正常增量/全量拉取路径
             # 轻量查询：先检查 MAX(trade_date)，避免全表扫描（约 5500 次全表读 → 1 次聚合查询）
-            latest_date = db.get_latest_bar_date(symbol)
-            if isinstance(latest_date, str) and latest_date >= datetime.now().strftime("%Y-%m-%d"):
+            latest_date = _normalize_trade_date(db.get_latest_bar_date(symbol))
+            if latest_date and expected_latest and latest_date >= expected_latest:
                 return "skipped"
             # 非最新时才读取全量数据做增量更新
             if db_lock:
@@ -473,6 +545,12 @@ def _update_single_bar(
                 df_bars = loader.incremental_update(symbol, existing)
                 # 优化点：如果行数没变，说明已经是最新，无需重复保存，直接返回 skipped
                 if len(df_bars) == len(existing):
+                    if latest_date and expected_latest and latest_date < expected_latest:
+                        logger.warning(
+                            f"  ❌ {symbol}: 增量更新未取得最新交易日数据 "
+                            f"({latest_date} < {expected_latest})"
+                        )
+                        return "failed"
                     return "skipped"
             else:
                 # 正常非自选股的全量拉取走 DEFAULT_LOOKBACK_DAYS 天配置
@@ -512,4 +590,3 @@ def _update_single_bar(
                 return "failed"
 
     return "failed"
-
