@@ -105,6 +105,7 @@ from tasks.financials import (
 from tasks.futures import update_futures
 from tasks.index_chain import (
     update_chip_distribution_em,
+    update_chip_distribution_em_fullmarket,
     update_index_daily,
 )
 from tasks.macro import (
@@ -345,6 +346,8 @@ def main():
                 update_chip_distribution(db)
         elif args.task == "update_chip_distribution_em":
             update_chip_distribution_em(db)
+        elif args.task == "update_chip_distribution_em_fullmarket":
+            update_chip_distribution_em_fullmarket(db)
         elif args.task == "update_fundamentals":
             update_fundamentals(db, loader, symbols=symbols)
         elif args.task == "update_market_snapshot":

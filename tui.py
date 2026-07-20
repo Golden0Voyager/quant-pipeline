@@ -964,6 +964,7 @@ class SingleTaskWidget(Static):
         ("技术指标 (Indicators)", "update_indicators"),
         ("筹码分布 (Chip Dist.)", "update_chip_distribution"),
         ("筹码分布线上 (Chip EM)", "update_chip_distribution_em"),
+        ("筹码分布全市场 (Full Market Chip EM)", "update_chip_distribution_em_fullmarket"),
         ("基本面数据 (Fundamentals)", "update_fundamentals"),
         ("行情快照 (Market Snapshot)", "update_market_snapshot"),
         # ── 资金面 ──

@@ -123,17 +123,46 @@ def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+_CSI_INDICES: list[tuple[str, str]] = [
+    ("000300", "sina"),    # 沪深 300（新浪）
+    ("000852", "csindex"), # 中证 1000（中证指数官网）
+    ("000905", "sina"),    # 中证 500（新浪）
+]
+
+
+def _fetch_index_constituents(index_code: str, source: str) -> set[str]:
+    """返回指数成分股的 ts_code 集合，忽略北交所。"""
+    import akshare as ak
+
+    codes: set[str] = set()
+    try:
+        if source == "sina":
+            df = ak.index_stock_cons_sina(index_code)
+            col = "code"
+        elif source == "csindex":
+            df = ak.index_stock_cons_csindex(index_code)
+            col = "成分券代码"
+        else:
+            return codes
+
+        for _, row in df.iterrows():
+            code = str(row.get(col, ""))
+            if code.startswith(("6", "0", "3")):
+                codes.add(code)
+    except Exception:
+        pass
+    return codes
+
+
 def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     """获取需要线上抓取筹码分布的目标股票清单。
 
     优先顺序：
     1. 自选股（watchlist）
-    2. 指数成分股（通过 AkShare 实时拉取沪深 300 / 中证 500 成分股）
+    2. 指数成分股（CSI300 / CSI500 / CSI1000，实时拉取）
     3. 兜底：本地已有筹码分布且有日线数据的活跃股票
     """
     import sqlite3
-
-    import akshare as ak
 
     conn = sqlite3.connect(str(db.db_path))
     symbols: set[str] = set()
@@ -146,21 +175,8 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     except Exception:
         pass
 
-    # 实时拉取指数成分股（去掉 sh/sz 前缀后以 ts_code 格式存入）
-    for index_code in ("000300", "000905"):
-        try:
-            df = ak.index_stock_cons_sina(index_code)
-            # code 列是纯数字，需补齐前缀
-            for _, row in df.iterrows():
-                code = str(row.get("code", ""))
-                if code.startswith("6"):
-                    symbols.add(code)
-                elif code.startswith(("0", "3")):
-                    symbols.add(code)
-                elif code.startswith(("8", "4", "920")):
-                    symbols.add(code)
-        except Exception:
-            pass
+    for index_code, source in _CSI_INDICES:
+        symbols |= _fetch_index_constituents(index_code, source)
 
     if len(symbols) < 200:
         try:
@@ -314,3 +330,39 @@ def update_chip_distribution_em(
         "processed": total,
         "aborted": False,
     }
+
+
+@skip_if_task_locked("update_chip_distribution_em_fullmarket")
+def update_chip_distribution_em_fullmarket(db: DatabaseInterface) -> dict:
+    """全市场模式：对 daily_bars 中所有股票跑 chip_distribution_em。
+
+    仅在 TUI 下拉菜单中手动触发，不会自动执行。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db.db_path))
+    all_symbols = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code"
+        ).fetchall()
+    ]
+    conn.close()
+
+    logger.info("\n" + "=" * 60)
+    logger.info("全市场筹码分布拉取（手动触发）")
+    logger.info(f"共 {len(all_symbols)} 只股票")
+    logger.info("=" * 60)
+
+    import sqlite3
+
+    _conn = sqlite3.connect(str(db.db_path))
+    existing = {
+        r[0]
+        for r in _conn.execute("SELECT DISTINCT ts_code FROM chip_distribution_em").fetchall()
+    }
+    _conn.close()
+    remaining = [s for s in all_symbols if s not in existing]
+    logger.info(f"已有 {len(existing)} 只，还需拉取 {len(remaining)} 只")
+
+    return update_chip_distribution_em(db, symbols_to_update=remaining)
