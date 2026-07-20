@@ -32,6 +32,7 @@ v2 改进：
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
 import logging
@@ -44,6 +45,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from core.lock import ProcessLock
 
 sys.path.insert(0, os.path.expanduser("~/Code"))
 
@@ -318,13 +321,26 @@ def compare_and_repair(
         where_clause += " AND trade_date >= ?"
         params.append(since)
 
+    expected_columns = [
+        "trade_date", "open", "close", "high", "low", "volume", "amount",
+        "turnover_rate", "pct_change", "amplitude", "data_source",
+    ]
+    available_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()
+    }
+    if "ts_code" not in available_columns or "trade_date" not in available_columns:
+        return {"total": 0, "matched": 0, "diff": 0, "fixed": 0, "skipped": 0, "failed": 1, "elapsed": time.time() - t0, "diff_start": "", "diff_end": ""}
+
+    select_columns = [col for col in expected_columns if col in available_columns]
     db_df = pd.read_sql_query(
-        f"SELECT trade_date, open, close, high, low, volume, amount, "
-        f"turnover_rate, pct_change, amplitude, data_source "
+        f"SELECT {', '.join(select_columns)} "
         f"FROM daily_bars {where_clause} ORDER BY trade_date",
         conn,
         params=tuple(params),
     )
+    for col in expected_columns:
+        if col not in db_df.columns:
+            db_df[col] = None
 
     # 检查是否有 data_source 为 NULL 的行
     has_null_source = db_df["data_source"].isna().any() if "data_source" in db_df.columns else True
@@ -863,6 +879,14 @@ def main():
     if args.workers < 1:
         parser.error("--workers 必须 >= 1")
     os.nice(10)
+
+    # 单实例保护（atexit 保证 exit/return/异常时也释放）
+    try:
+        ProcessLock.acquire()
+    except RuntimeError as e:
+        logger.error("❌ 另一个 reconcile 实例正在运行: %s", e)
+        sys.exit(1)
+    atexit.register(ProcessLock.release)
 
     conn = sqlite3.connect(args.db_path, timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL")
