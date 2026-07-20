@@ -562,6 +562,11 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
             "chip_distribution", "chip_distribution_em",
             "futures_daily",
+            "south_flow", "ah_premium", "etf_daily",
+            "cb_quotation", "cb_redeem", "cb_index",
+            "restricted_share", "earnings_forecast",
+            "sector_daily", "sector_valuation", "index_futures_basis",
+            "macro_monthly", "macro_quarterly", "macro_daily",
         ]
         result = {}
         if fast:
@@ -618,17 +623,31 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "chip_distribution_em": "trade_date",
     "dividend_summary": "updated_at",
     "futures_daily": "trade_date",
+    "south_flow": "trade_date",
+    "ah_premium": "trade_date",
+    "etf_daily": "trade_date",
+    "cb_index": "trade_date",
+    "restricted_share": "release_date",
+    "earnings_forecast": "end_date",
+    "sector_daily": "trade_date",
+    "sector_valuation": "trade_date",
+    "index_futures_basis": "trade_date",
+    "macro_monthly": "date",
+    "macro_quarterly": "date",
+    "macro_daily": "date",
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
 MONTHLY_TABLES: set[str] = {
     "institutional_holdings",
+    "macro_monthly",
 }
 
 # 随季报更新的表（使用 report_date/report_period，不按交易日衡量新鲜度）
 QUARTERLY_TABLES: set[str] = {
     "shareholder_count",
     "quarterly_financials",
+    "macro_quarterly",
 }
 
 # T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
@@ -971,6 +990,17 @@ class SingleTaskWidget(Static):
         ("全球指数 (Global Index)", "update_global_index"),
         ("美债收益率 (US Treasury)", "update_us_treasury"),
         ("期货日线 (Futures)", "update_futures"),
+        # ── 衍生数据 ──
+        ("南向资金 (South Flow)", "update_south_flow"),
+        ("AH溢价 (AH Premium)", "update_ah_premium"),
+        ("ETF日线 (ETF Daily)", "update_etf_daily"),
+        ("可转债行情 (CB Quotation)", "update_cb_quotation"),
+        ("可转债强赎 (CB Redeem)", "update_cb_redeem"),
+        ("可转债指数 (CB Index)", "update_cb_index"),
+        ("限售解禁 (Restricted Share)", "update_restricted_share"),
+        ("业绩预告 (Earnings Forecast)", "update_earnings_forecast"),
+        ("行业板块 (Sector Derivatives)", "update_sector_derivatives"),
+        ("中国宏观 (China Macro)", "update_china_macro"),
         # ── 工具 ──
         ("股票列表 (Stock List)", "update_stock_list"),
         ("重试失败 (Retry Failed)", "retry"),
@@ -997,34 +1027,44 @@ class SingleTaskWidget(Static):
 
 
 class DataCompletenessWidget(VerticalScroll):
-    # 任务名 → 表名的映射（用于判断哪个表正在更新）
-    TASK_TO_TABLE: dict[str, str] = {
-        "update_stock_list": "stock_list",
-        "update_bars": "daily_bars",
-        "update_indicators": "indicators",
-        "update_fundamentals": "fundamentals",
-        "update_fund_flow": "fund_flow",
-        "update_margin_trading": "margin_trading",
-        "update_dragon_tiger": "dragon_tiger",
-        "update_block_trade": "block_trade",
-        "update_sector_fund_flow": "sector_fund_flow",
-        "update_shareholder_count": "shareholder_count",
-        "update_quarterly_financials": "quarterly_financials",
-        "update_historical_valuation": "historical_valuation",
-        "update_sector_industry": "sector_industry",
-        "update_institutional_holdings": "institutional_holdings",
-        "update_north_flow": "north_flow",
-        "update_index_daily": "index_daily",
-        "update_limit_up_down": "limit_up_down",
-        "update_dividend_summary": "dividend_summary",
-        "update_gold_price": "gold_price",
-        "update_crude_oil": "crude_oil",
-        "update_usd": "fx_rate",
-        "update_global_index": "global_index",
-        "update_us_treasury": "us_treasury",
-        "update_futures": "futures_daily",
-        "update_chip_distribution": "chip_distribution",
-        "update_chip_distribution_em": "chip_distribution_em",
+    # 任务名 → 表名列表的映射（用于判断哪些表正在更新）
+    TASK_TO_TABLE: dict[str, list[str]] = {
+        "update_stock_list": ["stock_list"],
+        "update_bars": ["daily_bars"],
+        "update_indicators": ["indicators"],
+        "update_fundamentals": ["fundamentals"],
+        "update_fund_flow": ["fund_flow"],
+        "update_margin_trading": ["margin_trading"],
+        "update_dragon_tiger": ["dragon_tiger"],
+        "update_block_trade": ["block_trade"],
+        "update_sector_fund_flow": ["sector_fund_flow"],
+        "update_shareholder_count": ["shareholder_count"],
+        "update_quarterly_financials": ["quarterly_financials"],
+        "update_historical_valuation": ["historical_valuation"],
+        "update_sector_industry": ["sector_industry"],
+        "update_institutional_holdings": ["institutional_holdings"],
+        "update_north_flow": ["north_flow"],
+        "update_index_daily": ["index_daily"],
+        "update_limit_up_down": ["limit_up_down"],
+        "update_dividend_summary": ["dividend_summary"],
+        "update_gold_price": ["gold_price"],
+        "update_crude_oil": ["crude_oil"],
+        "update_usd": ["fx_rate"],
+        "update_global_index": ["global_index"],
+        "update_us_treasury": ["us_treasury"],
+        "update_futures": ["futures_daily"],
+        "update_chip_distribution": ["chip_distribution"],
+        "update_chip_distribution_em": ["chip_distribution_em"],
+        "update_south_flow": ["south_flow"],
+        "update_ah_premium": ["ah_premium"],
+        "update_etf_daily": ["etf_daily"],
+        "update_cb_quotation": ["cb_quotation"],
+        "update_cb_redeem": ["cb_redeem"],
+        "update_cb_index": ["cb_index"],
+        "update_restricted_share": ["restricted_share"],
+        "update_earnings_forecast": ["earnings_forecast"],
+        "update_sector_derivatives": ["sector_daily", "sector_valuation", "index_futures_basis"],
+        "update_china_macro": ["macro_monthly", "macro_quarterly", "macro_daily"],
     }
 
     TABLE_LABELS: dict[str, str] = {
@@ -1061,6 +1101,22 @@ class DataCompletenessWidget(VerticalScroll):
         "us_treasury": "US Treasury",
         # 期货
         "futures_daily": "Futures",
+        # 衍生数据
+        "south_flow": "South Flow",
+        "ah_premium": "AH Premium",
+        "etf_daily": "ETF Daily",
+        "cb_quotation": "CB Quotation",
+        "cb_redeem": "CB Redeem",
+        "cb_index": "CB Index",
+        "restricted_share": "Restricted Share",
+        "earnings_forecast": "Earnings Forecast",
+        "sector_daily": "Sector Daily",
+        "sector_valuation": "Sector Val.",
+        "index_futures_basis": "Futures Basis",
+        # 宏观
+        "macro_monthly": "Macro Monthly",
+        "macro_quarterly": "Macro Quarterly",
+        "macro_daily": "Macro Daily",
         # 总览
         "stock_list": "Stock List",
     }
@@ -1099,6 +1155,22 @@ class DataCompletenessWidget(VerticalScroll):
         "us_treasury": "美债收益率",
         # 期货
         "futures_daily": "期货日线",
+        # 衍生数据
+        "south_flow": "南向资金",
+        "ah_premium": "AH溢价",
+        "etf_daily": "ETF日线",
+        "cb_quotation": "可转债行情",
+        "cb_redeem": "可转债强赎",
+        "cb_index": "可转债指数",
+        "restricted_share": "限售解禁",
+        "earnings_forecast": "业绩预告",
+        "sector_daily": "行业涨跌幅",
+        "sector_valuation": "板块估值",
+        "index_futures_basis": "基差",
+        # 宏观
+        "macro_monthly": "宏观(月)",
+        "macro_quarterly": "宏观(季)",
+        "macro_daily": "宏观(日)",
         # 总览
         "stock_list": "股票列表",
     }
@@ -1109,7 +1181,7 @@ class DataCompletenessWidget(VerticalScroll):
         self._latest_dates: dict[str, str | None] = {}
         self._daily_coverage: tuple[int, int] = (0, 0)
         self._bg_tasks: set[asyncio.Task] = set()
-        self._last_updating_table: str | None = None
+        self._last_updating_table: list[str] | None = None
         # 挂载内容子组件
         self._content = Static(id="dc-content")
         await self.mount(self._content)
@@ -1147,8 +1219,8 @@ class DataCompletenessWidget(VerticalScroll):
         self._rebuild_content()
 
     @staticmethod
-    def _get_updating_table() -> str | None:
-        """读取 progress.json，返回当前正在更新的表名，若无活跃任务则返回 None。"""
+    def _get_updating_table() -> list[str] | None:
+        """读取 progress.json，返回当前正在更新的表名列表，若无活跃任务则返回 None。"""
         import os
         import time
         try:
@@ -1195,10 +1267,10 @@ class DataCompletenessWidget(VerticalScroll):
         tbl: str,
         latest: str | None,
         expected_date: str,
-        updating_table: str | None,
+        updating_tables: list[str] | None,
     ) -> str:
         """返回指定表的新鲜度状态标签（纯文本）。"""
-        if tbl == updating_table:
+        if updating_tables and tbl in updating_tables:
             return "更新中"
         if tbl in MONTHLY_TABLES and latest:
             return "按月更新"
@@ -1211,10 +1283,10 @@ class DataCompletenessWidget(VerticalScroll):
     def _rebuild_content(self) -> None:
         counts = self._counts
         latest_dates = self._latest_dates
-        updating_table = self._get_updating_table()
-        if updating_table != self._last_updating_table:
-            self._last_updating_table = updating_table
-            if updating_table:
+        updating_tables = self._get_updating_table()
+        if updating_tables != self._last_updating_table:
+            self._last_updating_table = updating_tables
+            if updating_tables:
                 self.add_class("active-task")
             else:
                 self.remove_class("active-task")
@@ -1256,7 +1328,7 @@ class DataCompletenessWidget(VerticalScroll):
             n = counts.get(tbl, 0)
             latest = latest_dates.get(tbl)
             status = self._get_status_for_table(
-                tbl, latest, expected_date, updating_table
+                tbl, latest, expected_date, updating_tables
             )
 
             order = self._STATUS_ORDER.get(status, 3)
@@ -1833,6 +1905,9 @@ class PipelineApp(App):
 
     async def action_run_reconcile(self) -> None:
         """全量清洗：对比 AkShare 并修复差异。"""
+        if self._current_process is not None:
+            self.notify("已有任务在运行，请等待完成", severity="warning", timeout=3.0)
+            return
         reconcile_path = str(Path(__file__).parent / "scripts" / "reconcile_with_akshare.py")
         self.notify("全量数据清洗启动（对比 AkShare 并修复差异）", timeout=5.0)
         self._create_background_task(
