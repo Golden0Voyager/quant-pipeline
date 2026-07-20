@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -53,7 +54,7 @@ def _fetch_cb_quotation() -> list[dict]:
         for _, row in df.iterrows():
             records.append(
                 {
-                    "ts_code": str(row.get("转债代码", "")).strip(),
+                    "ts_code": str(row.get("代码", "")).strip(),
                     "bond_name": str(row.get("转债名称", "")).strip(),
                     "price": _to_float(row.get("现价")),
                     "premium": _to_float(row.get("转股溢价率")),
@@ -80,6 +81,7 @@ def update_cb_quotation(db: DatabaseInterface) -> dict:
 
     try:
         records = _fetch_cb_quotation()
+        warn_if_all_empty(records, key_cols=["ts_code", "price"], task_name="convertible_bond_quotation")
         if not records:
             logger.warning("⚠️ 可转债行情无数据")
             return {"saved": 0, "total": 0}
@@ -108,11 +110,11 @@ def _fetch_cb_redeem() -> list[dict]:
         for _, row in df.iterrows():
             records.append(
                 {
-                    "ts_code": str(row.get("转债代码", "")).strip(),
-                    "bond_name": str(row.get("转债名称", "")).strip(),
-                    "redeem_flag": str(row.get("强赎", "")).strip(),
-                    "redeem_price": _to_float(row.get("赎回价")),
-                    "redeem_date": str(row.get("赎回日", ""))[:10],
+                    "ts_code": str(row.get("代码", "")).strip(),
+                    "bond_name": str(row.get("名称", "")).strip(),
+                    "redeem_flag": str(row.get("强赎状态", "")).strip(),
+                    "redeem_price": _to_float(row.get("强赎价")),
+                    "redeem_date": str(row.get("最后交易日", ""))[:10],
                     "data_source": "akshare",
                 }
             )
@@ -134,6 +136,7 @@ def update_cb_redeem(db: DatabaseInterface) -> dict:
 
     try:
         records = _fetch_cb_redeem()
+        warn_if_all_empty(records, key_cols=["ts_code", "redeem_flag"], task_name="convertible_bond_redeem")
         if not records:
             logger.warning("⚠️ 可转债强赎无数据")
             return {"saved": 0, "total": 0}
@@ -151,7 +154,12 @@ def update_cb_redeem(db: DatabaseInterface) -> dict:
 
 
 def _fetch_cb_index() -> list[dict]:
-    """获取可转债指数行情（集思录）。"""
+    """获取可转债指数行情（集思录等权指数）。
+
+    ``ak.bond_cb_index_jsl`` 返回单一时间序列，列名为英文
+    （``price_dt``/``price``/``volume``/``amount`` 等），无 OHLC 与指数代码/名称，
+    故 open/high/low 置空，index_code/index_name 使用常量。
+    """
     if ak is None:
         return []
     try:
@@ -162,14 +170,14 @@ def _fetch_cb_index() -> list[dict]:
         for _, row in df.iterrows():
             records.append(
                 {
-                    "trade_date": str(row.get("日期", ""))[:10],
-                    "index_code": str(row.get("指数代码", "")).strip(),
-                    "index_name": str(row.get("指数名称", "")).strip(),
-                    "open": _to_float(row.get("开盘")),
-                    "close": _to_float(row.get("收盘")),
-                    "high": _to_float(row.get("最高")),
-                    "low": _to_float(row.get("最低")),
-                    "volume": _to_float(row.get("成交量")),
+                    "trade_date": str(row.get("price_dt", ""))[:10],
+                    "index_code": "JSL_EW",
+                    "index_name": "集思录可转债等权指数",
+                    "open": None,
+                    "close": _to_float(row.get("price")),
+                    "high": None,
+                    "low": None,
+                    "volume": _to_float(row.get("volume")),
                     "data_source": "akshare",
                 }
             )
@@ -191,6 +199,7 @@ def update_cb_index(db: DatabaseInterface) -> dict:
 
     try:
         records = _fetch_cb_index()
+        warn_if_all_empty(records, key_cols=["trade_date", "close"], task_name="convertible_bond_index")
         if not records:
             logger.warning("⚠️ 可转债指数无数据")
             return {"saved": 0, "total": 0}
