@@ -76,6 +76,7 @@ from interface import (
 # ── Task module re-exports ──
 from tasks.bars import _update_single_bar, update_bars  # noqa: F401
 from tasks.china_macro import update_china_macro
+from tasks.concept_board import update_concept_board
 from tasks.convertible_bond import (
     update_cb_index,
     update_cb_quotation,
@@ -127,6 +128,7 @@ from tasks.market_flow import (
     update_margin_trading,
     update_sector_fund_flow,
 )
+from tasks.market_valuation import update_market_valuation
 from tasks.money_market import update_money_market
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.utility import health_check, retry_failed
@@ -211,6 +213,8 @@ def run_all(
     results["futures"] = _safe_task("update_futures", update_futures, db)
     results["china_macro"] = _safe_task("update_china_macro", update_china_macro, db)
     results["money_market"] = _safe_task("update_money_market", update_money_market, db)
+    results["market_valuation"] = _safe_task("update_market_valuation", update_market_valuation, db)
+    results["concept_board"] = _safe_task("update_concept_board", update_concept_board, db)
 
     # ── 新增衍生数据任务 ──
     results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
@@ -420,6 +424,10 @@ def main():
             update_china_macro(db)
         elif args.task == "update_money_market":
             update_money_market(db)
+        elif args.task == "update_market_valuation":
+            update_market_valuation(db)
+        elif args.task == "update_concept_board":
+            update_concept_board(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":
