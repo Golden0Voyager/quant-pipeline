@@ -386,11 +386,12 @@ class TestDerivedDataTaskMappings:
         mock_ak = MagicMock()
         mock_ak.stock_restricted_release_detail_em.return_value = pd.DataFrame(
             {
-                "代码": ["000001"],
-                "名称": ["平安银行"],
+                "股票代码": ["000001"],
+                "股票简称": ["平安银行"],
+                "解禁时间": ["2026-07-15"],
+                "限售股类型": ["首发原股东限售股份"],
                 "实际解禁数量": [100.5],
-                "总解禁量": [200.5],
-                "市场类型": ["深市"],
+                "解禁数量": [200.5],
             }
         )
 
@@ -399,8 +400,13 @@ class TestDerivedDataTaskMappings:
             records = corporate_actions._fetch_restricted_share()
 
         assert records[0]["ts_code"] == "000001"
+        assert records[0]["name"] == "平安银行"
+        assert records[0]["release_date"] == "2026-07-15"
+        assert records[0]["total_shares"] == 200.5
+        assert records[0]["market_type"] == "首发原股东限售股份"
+        # 单次区间查询：起始 = 最近交易日回溯 30 天，结束 = 最近交易日
         call_kwargs = mock_ak.stock_restricted_release_detail_em.call_args_list[0].kwargs
-        assert call_kwargs == {"start_date": "20260719", "end_date": "20260719"}
+        assert call_kwargs == {"start_date": "20260619", "end_date": "20260719"}
 
     def test_ah_premium_maps_actual_akshare_columns(self):
         import tasks.finance_flow as finance_flow
@@ -449,11 +455,12 @@ class TestDerivedDataTaskMappings:
         )
 
         with patch.object(sector_derivatives, "ak", mock_ak), \
-             patch.object(sector_derivatives, "datetime") as mock_datetime:
-            mock_datetime.now.return_value = datetime(2026, 7, 19)
+             patch.object(sector_derivatives, "get_expected_latest_trading_day", return_value="2026-07-19"):
             records = sector_derivatives._fetch_sector_valuation()
 
-        mock_ak.stock_industry_pe_ratio_cninfo.assert_called_once_with(date="20260719")
+        mock_ak.stock_industry_pe_ratio_cninfo.assert_called_once_with(
+            symbol="证监会行业分类", date="20260719"
+        )
         assert records == [
             {
                 "sector_name": "银行",
