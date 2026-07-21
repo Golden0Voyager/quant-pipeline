@@ -13,10 +13,12 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import tasks.china_macro as china_macro
+import tasks.concept_board as concept_board
 import tasks.convertible_bond as convertible_bond
 import tasks.corporate_actions as corporate_actions
 import tasks.finance_flow as finance_flow
 import tasks.index_chain as index_chain
+import tasks.market_valuation as market_valuation
 import tasks.money_market as money_market
 import tasks.sector_derivatives as sector_derivatives
 
@@ -532,3 +534,95 @@ def test_update_chip_distribution_em_fullmarket(tmp_path):
         result = index_chain.update_chip_distribution_em_fullmarket(db)
     assert mock_run.called
     assert result == fake_result
+
+
+# ===========================================================================
+# market_valuation
+# ===========================================================================
+
+
+def _mock_ak_market_valuation() -> MagicMock:
+    ak = MagicMock()
+    ak.stock_a_ttm_lyr.return_value = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03"],
+        "middlePE": [16.5, 16.3],
+        "quantile": [0.45, 0.44],
+        "middlePE_LYR": [15.2, 15.0],
+    })
+    ak.stock_a_all_pb.return_value = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03"],
+        "middlePB": [1.8, 1.79],
+        "quantile": [0.3, 0.29],
+    })
+    ak.stock_ebs_lg.return_value = pd.DataFrame({
+        "日期": ["2024-01-02", "2024-01-03"],
+        "沪深300": [3800.5, 3810.2],
+        "股债利差": [0.06, 0.061],
+        "均线": [0.058, 0.059],
+    })
+    return ak
+
+
+def test_update_market_valuation_runs_all():
+    ak = _mock_ak_market_valuation()
+    db = MagicMock()
+    db.save_market_valuation_batch.return_value = 2
+    with patch.object(market_valuation, "ak", ak):
+        result = market_valuation.update_market_valuation(db)
+    assert result["saved"] == 2
+    assert "全市场PE" in result and "全市场PB" in result and "股债利差" in result
+    assert db.save_market_valuation_batch.called
+
+
+def test_update_market_valuation_ak_none():
+    db = MagicMock()
+    with patch.object(market_valuation, "ak", None):
+        result = market_valuation.update_market_valuation(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+# ===========================================================================
+# concept_board
+# ===========================================================================
+
+
+def _mock_ak_concept_board() -> MagicMock:
+    ak = MagicMock()
+    ak.stock_board_concept_summary_ths.return_value = pd.DataFrame({
+        "日期": ["2024-01-02", "2024-01-02", "2024-01-03"],
+        "板块名称": ["AI概念", "芯片概念", "AI概念"],
+        "涨跌幅": [3.2, 2.1, -1.5],
+        "成交额": [100.5, 80.3, 95.0],
+        "上涨家数": [20, 15, 8],
+        "下跌家数": [3, 5, 15],
+    })
+    ak.stock_board_concept_name_ths.return_value = pd.DataFrame({
+        "板块名称": ["AI概念", "芯片概念"],
+        "板块代码": ["885902", "885903"],
+    })
+    ak.stock_board_concept_cons_ths.return_value = pd.DataFrame({
+        "代码": ["000001", "000002"],
+    })
+    return ak
+
+
+def test_update_concept_board_runs_all():
+    ak = _mock_ak_concept_board()
+    db = MagicMock()
+    db.save_concept_board_batch.return_value = 3
+    db.save_concept_member_batch.return_value = 4
+    with patch.object(concept_board, "ak", ak):
+        result = concept_board.update_concept_board(db)
+    assert result["board_saved"] == 3
+    assert result["member_saved"] == 4
+    assert db.save_concept_board_batch.called
+    assert db.save_concept_member_batch.called
+
+
+def test_update_concept_board_ak_none():
+    db = MagicMock()
+    with patch.object(concept_board, "ak", None):
+        result = concept_board.update_concept_board(db)
+    assert result["saved"] == 0
+    assert "error" in result
