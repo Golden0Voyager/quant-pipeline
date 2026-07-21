@@ -104,11 +104,14 @@ from tasks.financials import (
     update_shareholder_count,
 )
 from tasks.futures import update_futures
+from tasks.hkscc_holder import update_hkscc_holder
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
     update_index_daily,
 )
+from tasks.insider_trading import update_insider_trading
+from tasks.institution_survey import update_institution_survey
 from tasks.macro import (
     update_crude_oil,
     update_dividend_summary,
@@ -130,7 +133,10 @@ from tasks.market_flow import (
 )
 from tasks.market_valuation import update_market_valuation
 from tasks.money_market import update_money_market
+from tasks.option_sentiment import update_option_sentiment
 from tasks.sector_derivatives import update_sector_derivatives
+from tasks.stock_pledge import update_stock_pledge
+from tasks.stock_repurchase import update_stock_repurchase
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
     update_fundamentals,
@@ -215,6 +221,16 @@ def run_all(
     results["money_market"] = _safe_task("update_money_market", update_money_market, db)
     results["market_valuation"] = _safe_task("update_market_valuation", update_market_valuation, db)
     results["concept_board"] = _safe_task("update_concept_board", update_concept_board, db)
+
+    # ── Phase 2: 事件型强信号 ──
+    results["option_sentiment"] = _safe_task("update_option_sentiment", update_option_sentiment, db)
+    results["stock_repurchase"] = _safe_task("update_stock_repurchase", update_stock_repurchase, db)
+    results["insider_trading"] = _safe_task("update_insider_trading", update_insider_trading, db)
+    results["institution_survey"] = _safe_task("update_institution_survey", update_institution_survey, db)
+    results["stock_pledge"] = _safe_task("update_stock_pledge", update_stock_pledge, db)
+
+    # ── Phase 3: 锦上添花 ──
+    results["hkscc_holder"] = _safe_task("update_hkscc_holder", update_hkscc_holder, db)
 
     # ── 新增衍生数据任务 ──
     results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
@@ -428,6 +444,18 @@ def main():
             update_market_valuation(db)
         elif args.task == "update_concept_board":
             update_concept_board(db)
+        elif args.task == "update_option_sentiment":
+            update_option_sentiment(db)
+        elif args.task == "update_stock_repurchase":
+            update_stock_repurchase(db)
+        elif args.task == "update_insider_trading":
+            update_insider_trading(db)
+        elif args.task == "update_institution_survey":
+            update_institution_survey(db)
+        elif args.task == "update_stock_pledge":
+            update_stock_pledge(db)
+        elif args.task == "update_hkscc_holder":
+            update_hkscc_holder(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":

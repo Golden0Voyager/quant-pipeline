@@ -332,6 +332,30 @@ class DatabaseInterface(Protocol):
         """批量保存概念板块成分股映射数据，返回实际保存条数。"""
         ...
 
+    # ===========================================================================
+    # Phase 2: 事件型强信号
+    # ===========================================================================
+
+    def save_option_sentiment_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存期权情绪数据（QVIX/PCR），返回实际保存条数。"""
+        ...
+
+    def save_stock_repurchase_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股票回购数据，返回实际保存条数。"""
+        ...
+
+    def save_insider_trading_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存董监高增减持数据，返回实际保存条数。"""
+        ...
+
+    def save_institution_survey_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存机构调研数据，返回实际保存条数。"""
+        ...
+
+    def save_stock_pledge_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股权质押数据，返回实际保存条数。"""
+        ...
+
 
 # ===========================================================================
 # 数据加载器接口

@@ -19,6 +19,8 @@ from smartmoney_hunter.data_loader import DataLoader
 from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.indicators import IndicatorCalculator
 
+logger = logging.getLogger(__name__)
+
 # ===========================================================================
 # Database Provider
 # ===========================================================================
@@ -428,14 +430,86 @@ class SmartMoneyDBProvider:
                         UNIQUE(trade_date, futures_code)
                     )
                 """)
-        except Exception:
-            pass
+                # ==================== Phase 2: 期权情绪 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS option_sentiment (
+                        trade_date TEXT PRIMARY KEY,
+                        qvix REAL,
+                        pcr REAL,
+                        put_volume INTEGER,
+                        call_volume INTEGER,
+                        put_oi INTEGER,
+                        call_oi INTEGER,
+                        implied_vol_avg REAL
+                    )
+                """)
+                # ==================== Phase 2: 股票回购 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_repurchase (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT,
+                        stock_code TEXT,
+                        stock_name TEXT,
+                        repurchase_amount REAL,
+                        repurchase_price REAL,
+                        repurchase_quantity INTEGER,
+                        progress_status TEXT,
+                        UNIQUE(trade_date, stock_code)
+                    )
+                """)
+                # ==================== Phase 2: 增减持 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS insider_trading (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT,
+                        stock_code TEXT,
+                        stock_name TEXT,
+                        changer_name TEXT,
+                        change_type TEXT,
+                        change_quantity INTEGER,
+                        change_price REAL,
+                        holdings_after_change REAL,
+                        UNIQUE(trade_date, stock_code, changer_name, change_type)
+                    )
+                """)
+                # ==================== Phase 2: 机构调研 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS institution_survey (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT,
+                        stock_code TEXT,
+                        stock_name TEXT,
+                        survey_org TEXT,
+                        survey_type TEXT,
+                        survey_count INTEGER,
+                        UNIQUE(trade_date, stock_code, survey_org)
+                    )
+                """)
+                # ==================== Phase 2: 股权质押 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_pledge (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT,
+                        stock_code TEXT,
+                        stock_name TEXT,
+                        pledger TEXT,
+                        pledge_amount REAL,
+                        pledge_ratio REAL,
+                        pledge_org TEXT,
+                        UNIQUE(trade_date, stock_code, pledger)
+                    )
+                """)
+        except Exception as e:
+            logger.warning(f"⚠️ _ensure_tables 创建表失败: {e}")
 
     @property
     def db_path(self) -> str:
         return str(self._db.db_path)
 
     def close(self) -> None:
+        if self._write_conn is not None:
+            self._write_conn.close()
+            self._write_conn = None
         self._db.close()
 
     def get_distinct_codes(self, table: str, column: str = "ts_code") -> set[str]:
@@ -1314,6 +1388,122 @@ class SmartMoneyDBProvider:
     ) -> dict[str, dict]:
         """批量获取多只股票最新东方财富筹码分布。"""
         return self._db.get_chip_distribution_em_batch(stock_list)
+
+    def save_option_sentiment_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存期权情绪数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO option_sentiment (trade_date, qvix, pcr, put_volume, call_volume, put_oi, call_oi, implied_vol_avg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("qvix"), r.get("pcr"),
+                         r.get("put_volume"), r.get("call_volume"),
+                         r.get("put_oi"), r.get("call_oi"),
+                         r.get("implied_vol_avg"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 期权情绪批量保存失败: {e}")
+            return 0
+
+    def save_stock_repurchase_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股票回购数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_repurchase (trade_date, stock_code, stock_name, repurchase_amount, repurchase_price, repurchase_quantity, progress_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                         r.get("repurchase_amount"), r.get("repurchase_price"),
+                         r.get("repurchase_quantity"), r.get("progress_status"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 股票回购批量保存失败: {e}")
+            return 0
+
+    def save_insider_trading_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存增减持数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO insider_trading (trade_date, stock_code, stock_name, changer_name, change_type, change_quantity, change_price, holdings_after_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                         r.get("changer_name"), r.get("change_type"),
+                         r.get("change_quantity"), r.get("change_price"),
+                         r.get("holdings_after_change"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 增减持批量保存失败: {e}")
+            return 0
+
+    def save_institution_survey_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存机构调研数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO institution_survey (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                         r.get("survey_org"), r.get("survey_type"), r.get("survey_count"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 机构调研批量保存失败: {e}")
+            return 0
+
+    def save_stock_pledge_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存股权质押数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_pledge (trade_date, stock_code, stock_name, pledger, pledge_amount, pledge_ratio, pledge_org) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                         r.get("pledger"), r.get("pledge_amount"),
+                         r.get("pledge_ratio"), r.get("pledge_org"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 股权质押批量保存失败: {e}")
+            return 0
 
 
 

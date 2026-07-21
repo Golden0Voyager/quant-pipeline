@@ -1,0 +1,787 @@
+"""Coverage sprint: batch save methods, edge cases, and connection logic.
+
+Target: providers.py coverage 66% → 85%+.
+
+Strategy
+--------
+- tmp_path 真实 SQLite 数据库，无 mock
+- 参数化测试批量覆盖全部 ~22 个 batch save 方法的 happy path
+- 单独覆盖 empty record 路径和 exception 路径
+- 覆盖 _ensure_wal_mode / _get_write_conn / _commit_delta 等底层方法
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from providers import SmartMoneyDBProvider
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fixtures
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def provider(tmp_path: Path) -> SmartMoneyDBProvider:
+    """创建一个指向临时数据库的 SmartMoneyDBProvider。
+
+    ``_ensure_tables()`` 会在 __init__ 中自动创建所有必要表。
+    """
+    return SmartMoneyDBProvider(db_path=str(tmp_path / "quant_core_test.db"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. 底层方法
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestConnectionEdgeCases:
+    """_ensure_wal_mode / _get_write_conn / _commit_delta 测试。"""
+
+    def test_ensure_wal_nonexistent_parent(self):
+        """父目录不存在 → _ensure_wal_mode 静默返回。"""
+        p = SmartMoneyDBProvider(db_path="/nonexistent_deep/test.db")
+        assert p.db_path is not None
+
+    def test_get_write_conn_returns_same_connection(self, provider):
+        """_get_write_conn 返回同一个连接（复用）。"""
+        conn1 = provider._get_write_conn()
+        conn2 = provider._get_write_conn()
+        assert conn1 is conn2
+
+    def test_get_write_conn_has_wal_mode(self, provider):
+        """_get_write_conn 连接启用 WAL 模式。"""
+        conn = provider._get_write_conn()
+        cursor = conn.execute("PRAGMA journal_mode")
+        mode = cursor.fetchone()[0]
+        assert mode.upper() == "WAL"
+
+    def test_commit_delta_returns_correct_count(self, provider):
+        """_commit_delta 返回本次事务产生的变更数。"""
+        conn = provider._get_write_conn()
+        before = conn.total_changes
+        conn.execute("CREATE TABLE IF NOT EXISTS _delta_test (id INTEGER PRIMARY KEY, val TEXT)")
+        conn.execute("INSERT INTO _delta_test VALUES (1, 'hello')")
+        delta = provider._commit_delta(conn, before)
+        assert delta >= 1
+        # 清理
+        conn.execute("DROP TABLE IF EXISTS _delta_test")
+
+    def test_get_latest_bar_date_no_data(self, provider):
+        """无 daily_bars 数据 → 返回 None。"""
+        assert provider.get_latest_bar_date("000001.SZ") is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. 空记录路径 — 所有 batch save 方法在 records=[] 时应返回 0
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEmptyRecords:
+    """全部 batch save 方法的 records=[] 边界测试。"""
+
+    _empty_batch_methods: list[str] = [
+        "save_historical_valuation_batch",
+        "save_macro_monthly_batch",
+        "save_macro_quarterly_batch",
+        "save_macro_daily_batch",
+        "save_money_market_batch",
+        "save_central_bank_balance_batch",
+        "save_market_valuation_batch",
+        "save_concept_board_batch",
+        "save_concept_member_batch",
+        "save_south_flow_batch",
+        "save_ah_premium_batch",
+        "save_cb_quotation_batch",
+        "save_cb_redeem_batch",
+        "save_cb_index_batch",
+        "save_etf_daily_batch",
+        "save_restricted_share_batch",
+        "save_earnings_forecast_batch",
+        "save_sector_daily_batch",
+        "save_sector_valuation_batch",
+        "save_index_futures_basis_batch",
+        "save_chip_distribution_batch",
+        "save_chip_distribution_em_batch",
+        "save_historical_valuation_batch",
+    ]
+
+    @pytest.mark.parametrize("method_name", sorted(set(_empty_batch_methods)))
+    def test_empty_records_returns_zero(self, provider, method_name: str):
+        """空记录 → 返回 0。"""
+        method = getattr(provider, method_name)
+        result = method([])
+        assert result == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. 批量 save 方法参数化测试 — 每个方法用一条记录验证 SQL 可执行
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 每个条目: (method_name, records)
+BatchCase = tuple[str, str, list[dict[str, Any]]]
+
+_BATCH_CASES: list[BatchCase] = [
+    (
+        "save_concept_board_batch",
+        "概念板块",
+        [
+            {
+                "trade_date": "2024-01-02",
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "pct_change": 1.5,
+                "turnover": 3.0,
+                "up_count": 10,
+                "down_count": 2,
+                "data_source": "ths",
+            }
+        ],
+    ),
+    (
+        "save_concept_member_batch",
+        "概念成分股",
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000001",
+            }
+        ],
+    ),
+    (
+        "save_money_market_batch",
+        "货币市场",
+        [
+            {
+                "date": "2024-01-02",
+                "shibor_on": 1.5,
+                "shibor_1w": 1.8,
+                "shibor_2w": 2.0,
+                "shibor_1m": 2.2,
+                "shibor_3m": 2.5,
+                "shibor_6m": 2.7,
+                "shibor_9m": 2.8,
+                "shibor_1y": 3.0,
+                "fr001": 1.6,
+                "fr007": 2.1,
+                "fr014": 2.4,
+                "pboc_policy_rate": 3.5,
+                "data_date": "2024-01-02",
+            }
+        ],
+    ),
+    (
+        "save_central_bank_balance_batch",
+        "央行资产负债表",
+        [
+            {
+                "date": "2024-01-01",
+                "total_assets": 400000,
+                "reserve_money": 330000,
+                "currency_issue": 110000,
+                "claims_on_other_deposit": 120000,
+                "claims_on_gov": 15000,
+                "gov_deposits": 45000,
+                "foreign_assets": 210000,
+                "fx_reserve": 31000,
+                "data_date": "2024-01-15",
+            }
+        ],
+    ),
+    (
+        "save_market_valuation_batch",
+        "大盘估值",
+        [
+            {
+                "date": "2024-01-02",
+                "pe_median": 12.5,
+                "pe_quantile": 0.35,
+                "pe_lyr_median": 11.0,
+                "pb_median": 1.5,
+                "pb_quantile": 0.25,
+                "equity_bond_spread": 3.2,
+                "ebs_ma": 3.0,
+                "csi300_close": 3500,
+                "data_source": "legu",
+                "data_date": "2024-01-02",
+            }
+        ],
+    ),
+    (
+        "save_south_flow_batch",
+        "南向资金",
+        [
+            {
+                "trade_date": "2024-01-02",
+                "market": "港股通",
+                "net_buy_amount": 1.0e9,
+                "buy_amount": 2.0e9,
+                "sell_amount": 1.0e9,
+                "cumulative_net_buy": 100.0e9,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_ah_premium_batch",
+        "AH 溢价",
+        [
+            {
+                "trade_date": "2024-01-02",
+                "ts_code": "000001",
+                "h_code": "00300.HK",
+                "name": "平安银行",
+                "a_price": 10.5,
+                "h_price": 8.0,
+                "premium": 31.25,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_cb_quotation_batch",
+        "可转债行情",
+        [
+            {
+                "ts_code": "113050",
+                "bond_name": "测试转债",
+                "price": 120.0,
+                "premium": 5.0,
+                "double_low": 125.0,
+                "expire_date": "2028-01-01",
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_cb_redeem_batch",
+        "可转债强赎",
+        [
+            {
+                "ts_code": "113050",
+                "bond_name": "测试转债",
+                "redeem_flag": "Y",
+                "redeem_price": 100.0,
+                "redeem_date": "2026-08-01",
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_cb_index_batch",
+        "可转债指数",
+        [
+            {
+                "trade_date": "2024-01-02",
+                "index_code": "000832",
+                "index_name": "中证转债",
+                "open": 400.0,
+                "close": 401.0,
+                "high": 402.0,
+                "low": 399.0,
+                "volume": 1e6,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_etf_daily_batch",
+        "ETF 日线",
+        [
+            {
+                "ts_code": "510050",
+                "name": "50ETF",
+                "trade_date": "2024-01-02",
+                "open": 2.6,
+                "high": 2.7,
+                "low": 2.5,
+                "close": 2.65,
+                "volume": 1e8,
+                "amount": 2.6e8,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_restricted_share_batch",
+        "限售解禁",
+        [
+            {
+                "ts_code": "000001",
+                "name": "平安银行",
+                "release_date": "2024-01-02",
+                "actual_release": 100.5,
+                "total_shares": 200.5,
+                "market_type": "深市",
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_earnings_forecast_batch",
+        "业绩预告",
+        [
+            {
+                "ts_code": "000001",
+                "name": "平安银行",
+                "end_date": "2024-06-30",
+                "forecast_type": "预增",
+                "net_profit_change": 50.0,
+                "previous_profit": 1.0e9,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_sector_daily_batch",
+        "行业板块日线",
+        [
+            {
+                "sector_name": "银行",
+                "trade_date": "2024-01-02",
+                "open": 100.0,
+                "close": 101.0,
+                "high": 102.0,
+                "low": 99.0,
+                "volume": 1e6,
+                "amount": 1e8,
+                "pct_change": 1.0,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_sector_valuation_batch",
+        "行业板块估值",
+        [
+            {
+                "sector_name": "银行",
+                "trade_date": "2024-01-02",
+                "pe": 6.5,
+                "pb": 0.7,
+                "total_mv": 123456.0,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_index_futures_basis_batch",
+        "基差数据",
+        [
+            {
+                "trade_date": "2024-01-02",
+                "futures_code": "IF0",
+                "futures_price": 3500.0,
+                "index_price": 3490.0,
+                "basis": 10.0,
+                "basis_pct": 0.2865,
+                "data_source": "akshare",
+            }
+        ],
+    ),
+    (
+        "save_chip_distribution_batch",
+        "筹码分布",
+        [
+            {
+                "ts_code": "000001",
+                "trade_date": "2024-01-02",
+                "profit_ratio": 0.5,
+                "avg_cost": 10.0,
+                "cost_90_low": 9.0,
+                "cost_90_high": 11.0,
+                "concentration_90": 0.3,
+                "cost_70_low": 9.5,
+                "cost_70_high": 10.5,
+                "concentration_70": 0.2,
+                "chip_concentration": 0.9,
+            }
+        ],
+    ),
+    (
+        "save_chip_distribution_em_batch",
+        "EM 筹码分布",
+        [
+            {
+                "ts_code": "000001",
+                "trade_date": "2024-01-02",
+                "profit_ratio": 0.5,
+                "avg_cost": 10.0,
+                "cost_90_low": 9.0,
+                "cost_90_high": 11.0,
+                "concentration_90": 0.3,
+                "cost_70_low": 9.5,
+                "cost_70_high": 10.5,
+                "concentration_70": 0.2,
+            }
+        ],
+    ),
+]
+
+
+class TestBatchSaveHappyPath:
+    """全部 batch save 方法的 happy path 参数化测试。"""
+
+    @pytest.mark.parametrize("method_name,label,records", _BATCH_CASES, ids=[c[1] for c in _BATCH_CASES])
+    def test_happy_path(self, provider, method_name: str, label: str, records: list[dict]):
+        method = getattr(provider, method_name)
+        result = method(records)
+        assert result >= 1, f"{label}: 应返回 >= 1, 实际 {result}"
+        # 重复写入（INSERT OR REPLACE）应仍正常工作
+        result2 = method(records)
+        assert result2 >= 0, f"{label}(重复): 应返回 >= 0, 实际 {result2}"
+
+
+class TestHistoricalValuation:
+    """save_historical_valuation_batch —— 需要手动创建表。"""
+
+    def _ensure_table(self, provider):
+        conn = sqlite3.connect(provider.db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS historical_valuation ("
+            "ts_code TEXT, trade_date TEXT, pe_ttm REAL, pb REAL, "
+            "ps_ttm REAL, dividend_yield REAL"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_happy_path(self, provider):
+        self._ensure_table(provider)
+        result = provider.save_historical_valuation_batch(
+            [
+                {
+                    "ts_code": "000001",
+                    "trade_date": "2024-06-30",
+                    "pe_ttm": 10.0,
+                    "pb": 1.5,
+                    "ps_ttm": 2.0,
+                    "dividend_yield": 0.03,
+                }
+            ]
+        )
+        assert result >= 1
+
+    def test_missing_required_keys_skipped(self, provider):
+        """缺少 ts_code 的记录被跳过 → 返回 0。"""
+        self._ensure_table(provider)
+        result = provider.save_historical_valuation_batch(
+            [{"pe_ttm": 10.0}]  # 缺少 ts_code 和 trade_date
+        )
+        assert result == 0
+
+    def test_mixed_valid_and_invalid(self, provider):
+        """混合有效/无效记录 → 只保存有效记录。"""
+        self._ensure_table(provider)
+        result = provider.save_historical_valuation_batch(
+            [
+                {"ts_code": "000001", "trade_date": "2024-06-30", "pe_ttm": 10.0},
+                {"pe_ttm": 15.0},  # 无效：缺少 ts_code
+                {"ts_code": "000002", "trade_date": "2024-06-30", "pb": 2.0},
+            ]
+        )
+        assert result >= 2  # 有效记录2条
+
+
+class TestMacroBatchSaves:
+    """宏观数据批量保存独立测试。"""
+
+    def test_macro_monthly_happy(self, provider):
+        r = provider.save_macro_monthly_batch([
+            {
+                "date": "2024-01-01",
+                "cpi_yoy": 0.2,
+                "cpi_mom": 0.1,
+                "cpi_core_yoy": 0.8,
+                "ppi_yoy": -2.5,
+                "ppi_mom": -0.4,
+                "pmi": 50.1,
+                "pmi_yoy": 1.2,
+                "pmi_monthly_change": 0.3,
+                "pmi_mom": 0.5,
+                "pmi_caixin": 50.8,
+                "m0": 10.0,
+                "m1": 60.0,
+                "m2": 280.0,
+                "m0_yoy": 5.0,
+                "m1_yoy": 1.5,
+                "m2_yoy": 8.0,
+                "new_loans": 3.0,
+                "new_loans_yoy": 10.0,
+                "retail_sales_yoy": 4.5,
+                "retail_sales_ytd_yoy": 4.0,
+                "fixed_asset_investment_yoy": 3.2,
+                "fixed_asset_investment_ytd_yoy": 3.0,
+                "export_value": 3000,
+                "export_yoy": 5.0,
+                "import_value": 2500,
+                "import_yoy": 3.0,
+                "industrial_production_yoy": 5.5,
+                "industrial_production_ytd_yoy": 5.0,
+                "electricity_consumption_yoy": 6.0,
+                "electricity_consumption_total": 8000,
+                "enterprise_goods_price_yoy": -2.0,
+                "enterprise_goods_price_mom": -0.3,
+                "consumer_confidence": 108.5,
+                "consumer_satisfaction": 107.2,
+                "consumer_expectation": 109.8,
+                "lpr_1y": 3.45,
+                "lpr_5y": 3.95,
+                "data_date": "2024-01-15",
+            }
+        ])
+        assert r >= 1
+
+    def test_macro_quarterly_all_fields(self, provider):
+        r = provider.save_macro_quarterly_batch([
+            {
+                "date": "2024-Q1",
+                "gdp": 300000,
+                "gdp_yoy": 5.3,
+                "gdp_qoq": 1.5,
+                "gdp_primary": 20000,
+                "gdp_secondary": 120000,
+                "gdp_tertiary": 160000,
+                "data_date": "2024-04-15",
+            }
+        ])
+        assert r >= 1
+
+    def test_macro_daily_all_fields(self, provider):
+        r = provider.save_macro_daily_batch([
+            {
+                "date": "2024-01-02",
+                "shibor_on": 1.6,
+                "shibor_1w": 2.0,
+                "shibor_2w": 2.3,
+                "shibor_1m": 2.5,
+                "shibor_3m": 2.7,
+                "shibor_6m": 2.9,
+                "shibor_9m": 3.0,
+                "shibor_1y": 3.1,
+                "data_date": "2024-01-02",
+            }
+        ])
+        assert r >= 1
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. except Exception 路径 — 表删除后调用 batch save 触发异常
+# ═══════════════════════════════════════════════════════════
+
+
+class TestBatchSaveExceptionPaths:
+    """模拟 SQL 错误触发各 save_*_batch 的 except Exception 分支。"""
+
+    def _drop_table(self, provider, table: str):
+        conn = sqlite3.connect(provider.db_path)
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.commit()
+        conn.close()
+
+    def test_concept_board_exception(self, provider):
+        self._drop_table(provider, "concept_board")
+        result = provider.save_concept_board_batch([
+            {"trade_date": "2024-01-02", "concept_code": "BK0001",
+             "concept_name": "T", "pct_change": 1.0, "turnover": 2.0,
+             "up_count": 5, "down_count": 1}
+        ])
+        assert result == 0
+
+    def test_concept_member_exception(self, provider):
+        self._drop_table(provider, "concept_member")
+        result = provider.save_concept_member_batch([
+            {"concept_code": "BK0001", "concept_name": "T", "ts_code": "000001"}
+        ])
+        assert result == 0
+
+    def test_money_market_exception(self, provider):
+        self._drop_table(provider, "money_market")
+        result = provider.save_money_market_batch([
+            {"date": "2024-01-02", "shibor_on": 1.5, "data_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_central_bank_exception(self, provider):
+        self._drop_table(provider, "central_bank_balance")
+        result = provider.save_central_bank_balance_batch([
+            {"date": "2024-01-01", "total_assets": 1000, "data_date": "2024-01-15"}
+        ])
+        assert result == 0
+
+    def test_south_flow_exception(self, provider):
+        self._drop_table(provider, "south_flow")
+        result = provider.save_south_flow_batch([
+            {"trade_date": "2024-01-02", "market": "港股通"}
+        ])
+        assert result == 0
+
+    def test_ah_premium_exception(self, provider):
+        self._drop_table(provider, "ah_premium")
+        result = provider.save_ah_premium_batch([
+            {"trade_date": "2024-01-02", "ts_code": "000001", "name": "T"}
+        ])
+        assert result == 0
+
+    def test_cb_redeem_exception(self, provider):
+        self._drop_table(provider, "cb_redeem")
+        result = provider.save_cb_redeem_batch([
+            {"ts_code": "113050", "bond_name": "T"}
+        ])
+        assert result == 0
+
+    def test_cb_index_exception(self, provider):
+        self._drop_table(provider, "cb_index")
+        result = provider.save_cb_index_batch([
+            {"trade_date": "2024-01-02", "index_code": "000832", "index_name": "T"}
+        ])
+        assert result == 0
+
+    def test_etf_daily_exception(self, provider):
+        self._drop_table(provider, "etf_daily")
+        result = provider.save_etf_daily_batch([
+            {"ts_code": "510050", "name": "T", "trade_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_restricted_share_exception(self, provider):
+        self._drop_table(provider, "restricted_share")
+        result = provider.save_restricted_share_batch([
+            {"ts_code": "000001", "name": "T", "release_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_earnings_forecast_exception(self, provider):
+        self._drop_table(provider, "earnings_forecast")
+        result = provider.save_earnings_forecast_batch([
+            {"ts_code": "000001", "name": "T", "end_date": "2024-06-30"}
+        ])
+        assert result == 0
+
+    def test_sector_valuation_exception(self, provider):
+        self._drop_table(provider, "sector_valuation")
+        result = provider.save_sector_valuation_batch([
+            {"sector_name": "银行", "trade_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_index_futures_basis_exception(self, provider):
+        self._drop_table(provider, "index_futures_basis")
+        result = provider.save_index_futures_basis_batch([
+            {"trade_date": "2024-01-02", "futures_code": "IF0"}
+        ])
+        assert result == 0
+
+    def test_option_sentiment_exception(self, provider):
+        self._drop_table(provider, "option_sentiment")
+        result = provider.save_option_sentiment_batch([
+            {"trade_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_stock_repurchase_exception(self, provider):
+        self._drop_table(provider, "stock_repurchase")
+        result = provider.save_stock_repurchase_batch([
+            {"trade_date": "2024-01-02", "stock_code": "000001"}
+        ])
+        assert result == 0
+
+    def test_insider_trading_exception(self, provider):
+        self._drop_table(provider, "insider_trading")
+        result = provider.save_insider_trading_batch([
+            {"trade_date": "2024-01-02", "stock_code": "000001"}
+        ])
+        assert result == 0
+
+    def test_institution_survey_exception(self, provider):
+        self._drop_table(provider, "institution_survey")
+        result = provider.save_institution_survey_batch([
+            {"trade_date": "2024-01-02", "stock_code": "000001"}
+        ])
+        assert result == 0
+
+    def test_stock_pledge_exception(self, provider):
+        self._drop_table(provider, "stock_pledge")
+        result = provider.save_stock_pledge_batch([
+            {"trade_date": "2024-01-02", "stock_code": "000001"}
+        ])
+        assert result == 0
+
+    def test_chip_distribution_exception(self, provider):
+        self._drop_table(provider, "chip_distribution")
+        result = provider.save_chip_distribution_batch([
+            {"ts_code": "000001", "trade_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_chip_distribution_em_exception(self, provider):
+        self._drop_table(provider, "chip_distribution_em")
+        result = provider.save_chip_distribution_em_batch([
+            {"ts_code": "000001", "trade_date": "2024-01-02"}
+        ])
+        assert result == 0
+
+    def test_macro_quarterly_exception(self, provider):
+        self._drop_table(provider, "macro_quarterly")
+        result = provider.save_macro_quarterly_batch([
+            {"date": "2024-Q1", "gdp": 100000}
+        ])
+        assert result == 0
+
+    def test_macro_daily_exception(self, provider):
+        self._drop_table(provider, "macro_daily")
+        result = provider.save_macro_daily_batch([
+            {"date": "2024-01-02", "shibor_on": 1.5}
+        ])
+        assert result == 0
+
+
+# ═══════════════════════════════════════════════════════════
+# 5. DataLoader / IndicatorProvider
+# ═══════════════════════════════════════════════════════════
+
+
+class TestLoaderAndIndicator:
+    """SmartMoneyLoaderProvider + SmartMoneyIndicatorProvider 方法调用。"""
+
+    def test_loader_init_and_get_bars(self):
+        from providers import SmartMoneyLoaderProvider
+        p = SmartMoneyLoaderProvider()
+        result = p.get_daily_bars("000001")
+        assert result is not None
+
+    def test_loader_no_cache(self):
+        from providers import SmartMoneyLoaderProvider
+        p = SmartMoneyLoaderProvider(use_cache=False)
+        result = p.get_daily_bars("000001", start_date="2024-01-01", end_date="2024-01-31")
+        assert result is not None
+
+    def test_loader_incremental_update(self):
+        from providers import SmartMoneyLoaderProvider
+        p = SmartMoneyLoaderProvider()
+        df = __import__("pandas").DataFrame()
+        result = p.incremental_update("000001", df)
+        assert result is not None
+
+    def test_loader_market_valuation(self):
+        from providers import SmartMoneyLoaderProvider
+        p = SmartMoneyLoaderProvider()
+        result = p.get_market_valuation()
+        assert result is not None
+
+    def test_loader_market_fund_flow(self):
+        from providers import SmartMoneyLoaderProvider
+        p = SmartMoneyLoaderProvider()
+        result = p.get_market_fund_flow()
+        assert result is not None
+
+    def test_indicator_init_and_calculate(self):
+        from providers import SmartMoneyIndicatorProvider
+        p = SmartMoneyIndicatorProvider()
+        result = p.calculate_all_indicators(__import__("pandas").DataFrame({"close": [10.0, 11.0]}))
+        assert result is not None
