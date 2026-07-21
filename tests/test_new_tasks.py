@@ -22,6 +22,9 @@ import tasks.market_valuation as market_valuation
 import tasks.money_market as money_market
 import tasks.sector_derivatives as sector_derivatives
 
+
+
+
 # ===========================================================================
 # money_market
 # ===========================================================================
@@ -220,6 +223,148 @@ def test_convertible_bond_individual_and_ak_none():
         assert convertible_bond.update_cb_quotation(db2)["saved"] == 0
         assert convertible_bond.update_cb_redeem(db2)["saved"] == 0
         assert convertible_bond.update_cb_index(db2)["saved"] == 0
+
+
+# --- 补充边缘路径 ---
+
+
+def test_cb_to_float_nan():
+    """_to_float: NaN → None。"""
+    assert convertible_bond._to_float(float("nan")) is None
+
+
+def test_cb_to_float_invalid():
+    """_to_float: 非数值 → None。"""
+    assert convertible_bond._to_float("abc") is None
+
+
+def test_cb_fetch_quotation_ak_none():
+    """_fetch_cb_quotation: ak=None → []."""
+    with patch.object(convertible_bond, "ak", None):
+        assert convertible_bond._fetch_cb_quotation() == []
+
+
+def test_cb_fetch_quotation_exception():
+    """_fetch_cb_quotation: ak 抛异常 → []."""
+    ak = MagicMock()
+    ak.bond_cb_jsl.side_effect = RuntimeError("network err")
+    with patch.object(convertible_bond, "ak", ak):
+        assert convertible_bond._fetch_cb_quotation() == []
+
+
+def test_cb_update_quotation_save_exception():
+    """update_cb_quotation: 保存抛异常 → error dict。"""
+    ak = MagicMock()
+    ak.bond_cb_jsl.return_value = pd.DataFrame({
+        "代码": ["113050"], "转债名称": ["测试"], "现价": [120.0],
+        "转股溢价率": [5.0], "双低": [125.0], "到期时间": ["2028-01-01"],
+    })
+    db = MagicMock()
+    db.save_cb_quotation_batch.side_effect = RuntimeError("save fail")
+    with patch.object(convertible_bond, "ak", ak):
+        result = convertible_bond.update_cb_quotation(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_cb_fetch_redeem_ak_none():
+    """_fetch_cb_redeem: ak=None → []."""
+    with patch.object(convertible_bond, "ak", None):
+        assert convertible_bond._fetch_cb_redeem() == []
+
+
+def test_cb_fetch_redeem_exception():
+    """_fetch_cb_redeem: ak 抛异常 → []."""
+    ak = MagicMock()
+    ak.bond_cb_redeem_jsl.side_effect = RuntimeError("network err")
+    with patch.object(convertible_bond, "ak", ak):
+        assert convertible_bond._fetch_cb_redeem() == []
+
+
+def test_cb_update_redeem_save_exception():
+    """update_cb_redeem: 保存抛异常 → error dict。"""
+    ak = MagicMock()
+    ak.bond_cb_redeem_jsl.return_value = pd.DataFrame({
+        "代码": ["113050"], "名称": ["测试"], "强赎状态": ["Y"],
+        "强赎价": [100.0], "最后交易日": ["2026-08-01"],
+    })
+    db = MagicMock()
+    db.save_cb_redeem_batch.side_effect = RuntimeError("save fail")
+    with patch.object(convertible_bond, "ak", ak):
+        result = convertible_bond.update_cb_redeem(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_cb_fetch_index_ak_none():
+    """_fetch_cb_index: ak=None → []."""
+    with patch.object(convertible_bond, "ak", None):
+        assert convertible_bond._fetch_cb_index() == []
+
+
+def test_cb_fetch_index_exception():
+    """_fetch_cb_index: ak 抛异常 → []."""
+    ak = MagicMock()
+    ak.bond_cb_index_jsl.side_effect = RuntimeError("network err")
+    with patch.object(convertible_bond, "ak", ak):
+        assert convertible_bond._fetch_cb_index() == []
+
+
+def test_cb_update_index_save_exception():
+    """update_cb_index: 保存抛异常 → error dict。"""
+    ak = MagicMock()
+    ak.bond_cb_index_jsl.return_value = pd.DataFrame({
+        "price_dt": ["2024-01-01"], "price": [401.0], "volume": [1e6],
+    })
+    db = MagicMock()
+    db.save_cb_index_batch.side_effect = RuntimeError("save fail")
+    with patch.object(convertible_bond, "ak", ak):
+        result = convertible_bond.update_cb_index(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_cb_update_aggregate_quotation_exception():
+    """update_convertible_bond: quotation 抛异常时不中断其他。"""
+    ak = MagicMock()
+    ak.bond_cb_jsl.side_effect = RuntimeError("quotation err")
+    ak.bond_cb_redeem_jsl.return_value = pd.DataFrame({
+        "代码": ["113050"], "名称": ["测试"], "强赎状态": ["Y"],
+        "强赎价": [100.0], "最后交易日": ["2026-08-01"],
+    })
+    ak.bond_cb_index_jsl.return_value = pd.DataFrame({
+        "price_dt": ["2024-01-01"], "price": [401.0], "volume": [1e6],
+    })
+    db = MagicMock()
+    for m in ("save_cb_redeem_batch", "save_cb_index_batch"):
+        setattr(db, m, MagicMock(return_value=1))
+    with patch.object(convertible_bond, "ak", ak):
+        result = convertible_bond.update_convertible_bond(db)
+    assert "quotation" not in result  # 异常时不会设置 key
+    assert result.get("redeem") == 1
+    assert result.get("index") == 1
+
+
+def test_cb_update_aggregate_one_fetcher_empty():
+    """update_convertible_bond: 单个 fetcher 返回空不中断其他。"""
+    ak = MagicMock()
+    ak.bond_cb_jsl.return_value = pd.DataFrame({
+        "代码": ["113050"], "转债名称": ["测试"], "现价": [120.0],
+        "转股溢价率": [5.0], "双低": [125.0], "到期时间": ["2028-01-01"],
+    })
+    ak.bond_cb_redeem_jsl.return_value = pd.DataFrame({
+        "代码": ["113050"], "名称": ["测试"], "强赎状态": ["Y"],
+        "强赎价": [100.0], "最后交易日": ["2026-08-01"],
+    })
+    ak.bond_cb_index_jsl.return_value = pd.DataFrame()
+    db = MagicMock()
+    for m in ("save_cb_quotation_batch", "save_cb_redeem_batch"):
+        setattr(db, m, MagicMock(return_value=1))
+    # 验证 aggregate 不因单个空 fetcher 而崩溃
+    with patch.object(convertible_bond, "ak", ak):
+        result = convertible_bond.update_convertible_bond(db)
+    assert result.get("quotation") == 1
+    assert result.get("redeem") == 1
 
 
 # ===========================================================================
@@ -625,3 +770,255 @@ def test_update_concept_board_empty():
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 0
     assert not db.save_concept_board_batch.called
+
+
+def _mock_concept_member_push2_response() -> MagicMock:
+    """模拟东方财富 push2 概念板块列表 JSON 响应。"""
+    m = MagicMock()
+    m.json.return_value = {
+        "data": {
+            "total": 2,
+            "diff": [
+                {"f12": "BK1001", "f14": "AI概念"},
+                {"f12": "BK1002", "f14": "芯片概念"},
+            ],
+        }
+    }
+    m.raise_for_status = lambda: None
+    return m
+
+
+def test_update_concept_member_runs():
+    """验证 update_concept_member 获取成分股映射并保存。"""
+    ak = MagicMock()
+    ak.stock_board_concept_cons_em.return_value = pd.DataFrame({
+        "代码": ["000001", "000002"],
+    })
+    db = MagicMock()
+    db.save_concept_member_batch.return_value = 4
+
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value = _mock_concept_member_push2_response()
+        result = concept_board.update_concept_member(db)
+
+    assert result["member_saved"] == 4
+    assert db.save_concept_member_batch.called
+    assert ak.stock_board_concept_cons_em.call_count == 2
+
+
+def test_update_concept_member_empty_push2():
+    """验证 push2 概念列表为空时优雅降级。"""
+    ak = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"data": {"total": 0, "diff": []}}
+    mock_resp.raise_for_status = lambda: None
+    db = MagicMock()
+
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value = mock_resp
+        result = concept_board.update_concept_member(db)
+
+    assert result["member_saved"] == 0
+    assert not db.save_concept_member_batch.called
+
+
+def test_update_concept_member_ak_none():
+    """验证 akshare 未安装时优雅降级。"""
+    db = MagicMock()
+    with patch.object(concept_board, "ak", None):
+        result = concept_board.update_concept_member(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_concept_to_float_none():
+    assert concept_board._to_float(None) is None
+
+
+def test_concept_to_float_invalid():
+    assert concept_board._to_float("bad") is None
+
+
+def test_concept_to_int_none():
+    assert concept_board._to_int(None) is None
+
+
+def test_concept_to_int_invalid():
+    assert concept_board._to_int("bad") is None
+
+
+def test_concept_try_get_ak_df_ak_none():
+    with patch.object(concept_board, "ak", None):
+        assert concept_board._try_get_ak_df(lambda x: x) is None
+
+
+def test_concept_try_get_ak_df_func_raises():
+    def _raise():
+        raise ValueError("test")
+    with patch.object(concept_board, "ak", MagicMock()):
+        assert concept_board._try_get_ak_df(_raise) is None
+
+
+def test_update_concept_board_request_fails():
+    """验证 push2 请求异常时优雅降级。"""
+    db = MagicMock()
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.side_effect = Exception("network error")
+        result = concept_board.update_concept_board(db)
+    assert result["board_saved"] == 0
+
+
+def test_update_concept_board_save_raises():
+    """验证保存接口异常时优雅降级。"""
+    db = MagicMock()
+    db.save_concept_board_batch.side_effect = Exception("save error")
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = _mock_concept_spot_response()
+        mock_get.return_value.raise_for_status = lambda: None
+        result = concept_board.update_concept_board(db)
+    assert result["board_saved"] == 0
+
+
+def test_update_concept_member_save_raises():
+    """验证保存成分股映射异常时优雅降级。"""
+    ak = MagicMock()
+    ak.stock_board_concept_cons_em.return_value = pd.DataFrame({"代码": ["000001"]})
+    db = MagicMock()
+    db.save_concept_member_batch.side_effect = Exception("save error")
+
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value = _mock_concept_member_push2_response()
+        result = concept_board.update_concept_member(db)
+    assert result["member_saved"] == 0
+
+
+def test_fetch_concept_members_ak_none_direct():
+    """直接调用 _fetch_concept_members_em 时 ak 为 None。"""
+    with patch.object(concept_board, "ak", None):
+        members = concept_board._fetch_concept_members_em()
+    assert len(members) == 0
+
+
+def test_fetch_em_spot_empty_code_skipped():
+    """验证概念代码为空时跳过该条。"""
+    db = MagicMock()
+    db.save_concept_board_batch.return_value = 1
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = {
+            "data": {
+                "total": 2,
+                "diff": [
+                    {"f3": None, "f4": None, "f12": "", "f14": "", "f104": None, "f105": None},
+                    {"f3": 2.0, "f4": 50.0, "f12": "BK2001", "f14": "新能源", "f104": 10, "f105": 2},
+                ],
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = concept_board.update_concept_board(db)
+    assert result["board_saved"] == 1
+
+
+def test_fetch_concept_members_ak_raises():
+    """验证 akshare 成分股接口异常时优雅跳过。"""
+    ak = MagicMock()
+    ak.stock_board_concept_cons_em.side_effect = Exception("akshare error")
+
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value = _mock_concept_member_push2_response()
+        members = concept_board._fetch_concept_members_em()
+
+    assert len(members) == 0
+
+
+def test_fetch_concept_members_empty_df():
+    """验证成分股 DataFrame 为空时跳过。"""
+    ak = MagicMock()
+    ak.stock_board_concept_cons_em.return_value = pd.DataFrame()
+    db = MagicMock()
+    db.save_concept_member_batch.return_value = 0
+
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value = _mock_concept_member_push2_response()
+        result = concept_board.update_concept_member(db)
+
+    assert result["member_saved"] == 0
+
+
+def test_fetch_concept_members_push2_fails():
+    """验证 push2 概念列表请求异常时优雅降级。"""
+    ak = MagicMock()
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.side_effect = Exception("push2 error")
+        members = concept_board._fetch_concept_members_em()
+    assert len(members) == 0
+
+
+def test_fetch_concept_members_empty_code_skip():
+    """验证概念板块代码为空时跳过。"""
+    ak = MagicMock()
+    with patch("tasks.concept_board.requests.get") as mock_get, \
+         patch.object(concept_board, "ak", ak):
+        mock_get.return_value.json.return_value = {
+            "data": {
+                "total": 2,
+                "diff": [
+                    {"f12": "", "f14": ""},
+                    {"f12": "BK3001", "f14": "有效概念"},
+                ],
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        ak.stock_board_concept_cons_em.return_value = pd.DataFrame({"代码": ["000001"]})
+        members = concept_board._fetch_concept_members_em()
+    assert len(members) == 1
+
+
+def test_fetch_em_spot_none_fields():
+    """验证行情数据中数值字段为 None 时仍然创建记录。"""
+    db = MagicMock()
+    db.save_concept_board_batch.return_value = 1
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = {
+            "data": {
+                "total": 1,
+                "diff": [
+                    {"f3": None, "f4": None, "f12": "BK4001", "f14": "测试概念", "f104": None, "f105": None},
+                ],
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = concept_board.update_concept_board(db)
+    assert result["board_saved"] == 1
+
+
+def test_fetch_em_spot_pagination():
+    """验证分页逻辑：items >= 100 时自动请求下一页。"""
+    db = MagicMock()
+    db.save_concept_board_batch.return_value = 150
+
+    page_items = []
+    for i in range(100):
+        page_items.append({
+            "f3": 1.0, "f4": 10.0, "f12": f"BK{i:04d}",
+            "f14": f"概念{i}", "f104": 5, "f105": 2,
+        })
+    # Second page: few items to signal end
+    next_items = [
+        {"f3": 2.0, "f4": 20.0, "f12": "BK2000", "f14": "末页概念", "f104": 3, "f105": 1},
+    ]
+
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.side_effect = [
+            {"data": {"total": 101, "diff": page_items}},
+            {"data": {"total": 101, "diff": next_items}},
+        ]
+        mock_get.return_value.raise_for_status = lambda: None
+        result = concept_board.update_concept_board(db)
+    assert mock_get.call_count == 2
+    assert result["board_saved"] == 150
