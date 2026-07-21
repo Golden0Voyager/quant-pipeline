@@ -181,6 +181,29 @@ class SmartMoneyDBProvider:
                         data_date TEXT
                     )
                 """)
+                # money_market（SHIBOR + 回购利率 + 基准利率，日频）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS money_market (
+                        date TEXT PRIMARY KEY,
+                        shibor_on REAL, shibor_1w REAL, shibor_2w REAL,
+                        shibor_1m REAL, shibor_3m REAL, shibor_6m REAL,
+                        shibor_9m REAL, shibor_1y REAL,
+                        fr001 REAL, fr007 REAL, fr014 REAL,
+                        pboc_policy_rate REAL,
+                        data_date TEXT
+                    )
+                """)
+                # central_bank_balance（央行资产负债表，月频）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS central_bank_balance (
+                        date TEXT PRIMARY KEY,
+                        total_assets REAL, reserve_money REAL,
+                        currency_issue REAL, claims_on_other_deposit REAL,
+                        claims_on_gov REAL, gov_deposits REAL,
+                        foreign_assets REAL, fx_reserve REAL,
+                        data_date TEXT
+                    )
+                """)
                 # south_flow
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS south_flow (
@@ -194,6 +217,28 @@ class SmartMoneyDBProvider:
                         data_source TEXT,
                         UNIQUE(trade_date, market)
                     )
+                """)
+                # north_hold（北向资金个股持仓，季度快照）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS north_hold (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_code TEXT NOT NULL,
+                        security_name TEXT,
+                        trade_date DATE NOT NULL,
+                        close_price REAL,
+                        hold_shares REAL,
+                        hold_market_cap REAL,
+                        hold_shares_ratio REAL,
+                        free_shares_ratio REAL,
+                        total_shares_ratio REAL,
+                        data_source TEXT,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(ts_code, trade_date)
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_north_hold_code
+                    ON north_hold(ts_code, trade_date DESC)
                 """)
                 # ah_premium
                 conn.execute("""
@@ -497,6 +542,9 @@ class SmartMoneyDBProvider:
     def save_north_flow_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_north_flow_batch(records)
 
+    def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_north_hold_batch(records)
+
     def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_index_daily_batch(records)
 
@@ -733,6 +781,48 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 日度宏观数据保存失败: {e}")
+            return 0
+
+    def save_money_market_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存货币市场日度数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO money_market (date, shibor_on, shibor_1w, shibor_2w, shibor_1m, shibor_3m, shibor_6m, shibor_9m, shibor_1y, fr001, fr007, fr014, pboc_policy_rate, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r["date"], r.get("shibor_on"), r.get("shibor_1w"), r.get("shibor_2w"), r.get("shibor_1m"), r.get("shibor_3m"), r.get("shibor_6m"), r.get("shibor_9m"), r.get("shibor_1y"), r.get("fr001"), r.get("fr007"), r.get("fr014"), r.get("pboc_policy_rate"), r.get("data_date"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 货币市场数据保存失败: {e}")
+            return 0
+
+    def save_central_bank_balance_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存央行资产负债表数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO central_bank_balance (date, total_assets, reserve_money, currency_issue, claims_on_other_deposit, claims_on_gov, gov_deposits, foreign_assets, fx_reserve, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r["date"], r.get("total_assets"), r.get("reserve_money"), r.get("currency_issue"), r.get("claims_on_other_deposit"), r.get("claims_on_gov"), r.get("gov_deposits"), r.get("foreign_assets"), r.get("fx_reserve"), r.get("data_date"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 央行资产负债表保存失败: {e}")
             return 0
 
     def save_south_flow_batch(self, records: list[dict[str, Any]]) -> int:

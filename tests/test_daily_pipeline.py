@@ -1722,6 +1722,78 @@ def test_update_north_flow_filters_south(mock_ak: MagicMock):
     assert recs[0]["market"] == "沪股通"
 
 
+def _mk_north_hold_resp(payload: dict) -> MagicMock:
+    """构造一个类 requests.Response 的 mock。"""
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+    return resp
+
+
+@patch("tasks.macro.requests")
+def test_update_north_hold_success(mock_requests: MagicMock):
+    """东财个股北向持仓：解析字段 + 日期截断 + 写入。"""
+    db = MagicMock()
+    db.save_north_hold_batch.return_value = 2
+    payload = {
+        "result": {
+            "pages": 1,
+            "count": 2,
+            "data": [
+                {
+                    "SECURITY_CODE": "600519", "SECURITY_NAME": "贵州茅台",
+                    "TRADE_DATE": "2026-06-30 00:00:00", "CLOSE_PRICE": 1185.49,
+                    "HOLD_SHARES": 53711656, "HOLD_MARKET_CAP": 63674631071,
+                    "HOLD_SHARES_RATIO": 4.29, "FREE_SHARES_RATIO": 4.30,
+                    "TOTAL_SHARES_RATIO": 4.30,
+                },
+                {
+                    "SECURITY_CODE": "300750", "SECURITY_NAME": "宁德时代",
+                    "TRADE_DATE": "2026-06-30 00:00:00", "CLOSE_PRICE": 393.01,
+                    "HOLD_SHARES": 894158187, "HOLD_MARKET_CAP": 351413000000,
+                    "HOLD_SHARES_RATIO": 20.28, "FREE_SHARES_RATIO": 21.00,
+                    "TOTAL_SHARES_RATIO": 19.33,
+                },
+            ],
+        }
+    }
+    mock_requests.get.return_value = _mk_north_hold_resp(payload)
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_hold(db)
+    assert r["saved"] == 2
+    db.save_north_hold_batch.assert_called_once()
+    recs = db.save_north_hold_batch.call_args[0][0]
+    assert recs[0]["ts_code"] == "600519"
+    assert recs[0]["trade_date"] == "2026-06-30"  # 截断到 10 位
+    assert recs[0]["hold_shares"] == 53711656
+    assert recs[0]["data_source"] == "eastmoney"
+
+
+@patch("tasks.macro.requests")
+def test_update_north_hold_empty(mock_requests: MagicMock):
+    db = MagicMock()
+    payload = {"result": {"pages": 1, "count": 0, "data": []}}
+    mock_requests.get.return_value = _mk_north_hold_resp(payload)
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_hold(db)
+    assert r["saved"] == 0
+    db.save_north_hold_batch.assert_not_called()
+
+
+@patch("tasks.macro.requests")
+def test_update_north_hold_network_error_graceful(mock_requests: MagicMock):
+    """网络/解析异常时优雅降级，不抛出、不写库。"""
+    import requests as _real_requests
+    db = MagicMock()
+    # 保留真实异常类，使 `except (requests.RequestException, ValueError)` 合法
+    mock_requests.RequestException = _real_requests.RequestException
+    mock_requests.get.side_effect = _real_requests.RequestException("boom")
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_north_hold(db)
+    assert r["saved"] == 0
+    db.save_north_hold_batch.assert_not_called()
+
+
 @patch("tasks.index_chain.ak")
 def test_update_index_daily_success(mock_ak: MagicMock):
     db = MagicMock()

@@ -115,6 +115,7 @@ from tasks.macro import (
     update_gold_price,
     update_limit_up_down,
     update_north_flow,
+    update_north_hold,
     update_us_treasury,
     update_usd,
 )
@@ -126,6 +127,7 @@ from tasks.market_flow import (
     update_margin_trading,
     update_sector_fund_flow,
 )
+from tasks.money_market import update_money_market
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
@@ -197,6 +199,7 @@ def run_all(
     results["sector_industry"] = _safe_task("update_sector_industry", update_sector_industry, db)
     results["industry"] = _safe_task("update_industry", update_industry, db)
     results["north_flow"] = _safe_task("update_north_flow", update_north_flow, db)
+    results["north_hold"] = _safe_task("update_north_hold", update_north_hold, db)
     results["index_daily"] = _safe_task("update_index_daily", update_index_daily, db)
     results["limit_up_down"] = _safe_task("update_limit_up_down", update_limit_up_down, db)
     results["dividend_summary"] = _safe_task("update_dividend_summary", update_dividend_summary, db)
@@ -207,6 +210,7 @@ def run_all(
     results["us_treasury"] = _safe_task("update_us_treasury", update_us_treasury, db)
     results["futures"] = _safe_task("update_futures", update_futures, db)
     results["china_macro"] = _safe_task("update_china_macro", update_china_macro, db)
+    results["money_market"] = _safe_task("update_money_market", update_money_market, db)
 
     # ── 新增衍生数据任务 ──
     results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
@@ -374,6 +378,8 @@ def main():
             update_industry(db)
         elif args.task == "update_north_flow":
             update_north_flow(db)
+        elif args.task == "update_north_hold":
+            update_north_hold(db)
         elif args.task == "update_index_daily":
             update_index_daily(db)
         elif args.task == "update_limit_up_down":
@@ -412,6 +418,8 @@ def main():
             update_sector_derivatives(db)
         elif args.task == "update_china_macro":
             update_china_macro(db)
+        elif args.task == "update_money_market":
+            update_money_market(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":

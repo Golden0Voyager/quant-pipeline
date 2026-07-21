@@ -68,6 +68,16 @@ def _parse_quarter(q_str: str) -> str | None:
 # ===========================================================================
 
 
+def _parse_month_col(df: pd.DataFrame) -> pd.DataFrame:
+    """将 '月份' 列拆分为 'year' 和 'month' 列（兼容 '2024年01月' 格式）。"""
+    if "月份" not in df.columns:
+        return df
+    parts = df["月份"].astype(str).str.extract(r"(\d{4})[年.]?(\d{1,2})")
+    df["year"] = parts[0]
+    df["month"] = parts[1].str.zfill(2)
+    return df
+
+
 def _fetch_cpi() -> list[dict]:
     """获取 CPI 数据。"""
     if ak is None:
@@ -76,33 +86,21 @@ def _fetch_cpi() -> list[dict]:
         df = ak.macro_china_cpi()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "cpi当月同比": "cpi_yoy",
-            "CPI当月同比": "cpi_yoy",
-            "当月同比": "cpi_yoy",
-            "cpi当月环比": "cpi_mom",
-            "CPI当月环比": "cpi_mom",
-            "当月环比": "cpi_mom",
-            "cpi核心当月同比": "cpi_core_yoy",
-            "CPI核心当月同比": "cpi_core_yoy",
-            "核心当月同比": "cpi_core_yoy",
+            "全国-同比增长": "cpi_yoy",
+            "全国-环比增长": "cpi_mom",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "cpi_yoy", "cpi_mom", "cpi_core_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "cpi_yoy": _to_float(row.get("cpi_yoy")),
                     "cpi_mom": _to_float(row.get("cpi_mom")),
-                    "cpi_core_yoy": _to_float(row.get("cpi_core_yoy")),
                 })
         return records
     except Exception as e:
@@ -118,29 +116,21 @@ def _fetch_ppi() -> list[dict]:
         df = ak.macro_china_ppi()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "ppi当月同比": "ppi_yoy",
-            "PPI当月同比": "ppi_yoy",
-            "当月同比": "ppi_yoy",
-            "ppi当月环比": "ppi_mom",
-            "PPI当月环比": "ppi_mom",
-            "当月环比": "ppi_mom",
+            "当月": "ppi_current",
+            "当月同比增长": "ppi_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "ppi_yoy", "ppi_mom"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "ppi_yoy": _to_float(row.get("ppi_yoy")),
-                    "ppi_mom": _to_float(row.get("ppi_mom")),
+                    "ppi_current": _to_float(row.get("ppi_current")),
                 })
         return records
     except Exception as e:
@@ -156,33 +146,21 @@ def _fetch_pmi() -> list[dict]:
         df = ak.macro_china_pmi()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "制造业PMI": "pmi",
-            "制造业PMI同比增长": "pmi_yoy",
-            "制造业PMI同比增长率": "pmi_yoy",
-            "同比增长": "pmi_yoy",
-            "制造业PMI环比变化": "pmi_monthly_change",
-            "环比变化": "pmi_monthly_change",
-            "制造业PMI环比": "pmi_mom",
-            "环比": "pmi_mom",
+            "制造业-指数": "pmi",
+            "制造业-同比增长": "pmi_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "pmi", "pmi_yoy", "pmi_monthly_change", "pmi_mom"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "pmi": _to_float(row.get("pmi")),
                     "pmi_yoy": _to_float(row.get("pmi_yoy")),
-                    "pmi_monthly_change": _to_float(row.get("pmi_monthly_change")),
-                    "pmi_mom": _to_float(row.get("pmi_mom")),
                 })
         return records
     except Exception as e:
@@ -198,23 +176,21 @@ def _fetch_caixin_pmi() -> list[dict]:
         df = ak.macro_china_cx_pmi_yearly()
         if df is None or df.empty:
             return []
+        # Format: ['商品', '日期', '今值', '预测值', '前值']
         col_map = {
-            "年": "year",
-            "月": "month",
-            "财新制造业PMI": "pmi_caixin",
-            "PMI": "pmi_caixin",
+            "日期": "date_col",
+            "今值": "pmi_caixin",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "pmi_caixin"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
-            year = str(row.get("year", "")).strip()
-            month = str(row.get("month", "")).strip()
-            if year and month:
+            date_val = row.get("date_col")
+            if date_val is None:
+                continue
+            date_str = str(date_val).strip()[:10]
+            if date_str:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": date_str,
                     "pmi_caixin": _to_float(row.get("pmi_caixin")),
                 })
         return records
@@ -231,30 +207,23 @@ def _fetch_money_supply() -> list[dict]:
         df = ak.macro_china_money_supply()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "M0": "m0",
-            "M0数量": "m0",
-            "M0同比": "m0_yoy",
-            "M1": "m1",
-            "M1数量": "m1",
-            "M1同比": "m1_yoy",
-            "M2": "m2",
-            "M2数量": "m2",
-            "M2同比": "m2_yoy",
+            "货币和准货币(M2)-数量(亿元)": "m2",
+            "货币和准货币(M2)-同比增长": "m2_yoy",
+            "货币(M1)-数量(亿元)": "m1",
+            "货币(M1)-同比增长": "m1_yoy",
+            "流通中的现金(M0)-数量(亿元)": "m0",
+            "流通中的现金(M0)-同比增长": "m0_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "m0", "m1", "m2", "m0_yoy", "m1_yoy", "m2_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "m0": _to_float(row.get("m0")),
                     "m1": _to_float(row.get("m1")),
                     "m2": _to_float(row.get("m2")),
@@ -276,26 +245,19 @@ def _fetch_new_financial_credit() -> list[dict]:
         df = ak.macro_china_new_financial_credit()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "新增贷款": "new_loans",
-            "新增人民币贷款": "new_loans",
-            "新增贷款同比": "new_loans_yoy",
-            "新增人民币贷款同比": "new_loans_yoy",
-            "同比": "new_loans_yoy",
+            "当月": "new_loans",
+            "当月-同比增长": "new_loans_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "new_loans", "new_loans_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "new_loans": _to_float(row.get("new_loans")),
                     "new_loans_yoy": _to_float(row.get("new_loans_yoy")),
                 })
@@ -313,28 +275,19 @@ def _fetch_retail_sales() -> list[dict]:
         df = ak.macro_china_consumer_goods_retail()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "社会消费品零售总额同比增长": "retail_sales_yoy",
-            "同比增长率": "retail_sales_yoy",
             "同比增长": "retail_sales_yoy",
-            "当月同比": "retail_sales_yoy",
-            "社会消费品零售总额累计增长": "retail_sales_ytd_yoy",
-            "累计增长": "retail_sales_ytd_yoy",
-            "累计同比": "retail_sales_ytd_yoy",
+            "累计-同比增长": "retail_sales_ytd_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "retail_sales_yoy", "retail_sales_ytd_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "retail_sales_yoy": _to_float(row.get("retail_sales_yoy")),
                     "retail_sales_ytd_yoy": _to_float(row.get("retail_sales_ytd_yoy")),
                 })
@@ -352,27 +305,19 @@ def _fetch_fixed_asset_investment() -> list[dict]:
         df = ak.macro_china_gdzctz()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "固定资产投资完成额同比增长": "fixed_asset_investment_yoy",
             "同比增长": "fixed_asset_investment_yoy",
-            "当月同比": "fixed_asset_investment_yoy",
-            "固定资产投资完成额累计增长": "fixed_asset_investment_ytd_yoy",
-            "累计增长": "fixed_asset_investment_ytd_yoy",
-            "累计同比": "fixed_asset_investment_ytd_yoy",
+            "自年初累计": "fixed_asset_investment_ytd_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "fixed_asset_investment_yoy", "fixed_asset_investment_ytd_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "fixed_asset_investment_yoy": _to_float(row.get("fixed_asset_investment_yoy")),
                     "fixed_asset_investment_ytd_yoy": _to_float(row.get("fixed_asset_investment_ytd_yoy")),
                 })
@@ -390,33 +335,21 @@ def _fetch_trade() -> list[dict]:
         df = ak.macro_china_hgjck()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "出口总额": "export_value",
-            "出口总额（亿元）": "export_value",
-            "出口值": "export_value",
-            "出口总额同比增长": "export_yoy",
-            "出口总额同比增长（%）": "export_yoy",
-            "出口同比增长": "export_yoy",
-            "进口总额": "import_value",
-            "进口总额（亿元）": "import_value",
-            "进口值": "import_value",
-            "进口总额同比增长": "import_yoy",
-            "进口总额同比增长（%）": "import_yoy",
-            "进口同比增长": "import_yoy",
+            "当月出口额-金额": "export_value",
+            "当月出口额-同比增长": "export_yoy",
+            "当月进口额-金额": "import_value",
+            "当月进口额-同比增长": "import_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "export_value", "export_yoy", "import_value", "import_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "export_value": _to_float(row.get("export_value")),
                     "export_yoy": _to_float(row.get("export_yoy")),
                     "import_value": _to_float(row.get("import_value")),
@@ -437,28 +370,20 @@ def _fetch_industrial_production() -> list[dict]:
         if df is None or df.empty:
             return []
         col_map = {
-            "年": "year",
-            "月": "month",
-            "工业增加值同比增长": "industrial_production_yoy",
-            "同比增长": "industrial_production_yoy",
-            "当月同比": "industrial_production_yoy",
-            "工业增加值累计增长": "industrial_production_ytd_yoy",
-            "累计增长": "industrial_production_ytd_yoy",
-            "累计同比": "industrial_production_ytd_yoy",
+            "日期": "date_col",
+            "今值": "industrial_production_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "industrial_production_yoy", "industrial_production_ytd_yoy"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
-            year = str(row.get("year", "")).strip()
-            month = str(row.get("month", "")).strip()
-            if year and month:
+            date_val = row.get("date_col")
+            if date_val is None:
+                continue
+            date_str = str(date_val).strip()[:10]
+            if date_str:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": date_str,
                     "industrial_production_yoy": _to_float(row.get("industrial_production_yoy")),
-                    "industrial_production_ytd_yoy": _to_float(row.get("industrial_production_ytd_yoy")),
                 })
         return records
     except Exception as e:
@@ -474,26 +399,22 @@ def _fetch_electricity_consumption() -> list[dict]:
         df = ak.macro_china_society_electricity()
         if df is None or df.empty:
             return []
+        # 统计时间格式为 "2003.12"
+        parts = df["统计时间"].astype(str).str.extract(r"(\d{4})\.(\d{1,2})")
+        df["year"] = parts[0]
+        df["month"] = parts[1].str.zfill(2)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "全社会用电量同比增长": "electricity_consumption_yoy",
-            "同比增长": "electricity_consumption_yoy",
-            "当月同比": "electricity_consumption_yoy",
             "全社会用电量": "electricity_consumption_total",
-            "用电量": "electricity_consumption_total",
+            "全社会用电量同比": "electricity_consumption_yoy",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "electricity_consumption_yoy", "electricity_consumption_total"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "electricity_consumption_yoy": _to_float(row.get("electricity_consumption_yoy")),
                     "electricity_consumption_total": _to_float(row.get("electricity_consumption_total")),
                 })
@@ -511,25 +432,21 @@ def _fetch_enterprise_goods_price() -> list[dict]:
         df = ak.macro_china_qyspjg()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "企业商品价格同比": "enterprise_goods_price_yoy",
-            "同比": "enterprise_goods_price_yoy",
-            "企业商品价格环比": "enterprise_goods_price_mom",
-            "环比": "enterprise_goods_price_mom",
+            "总指数-指数值": "enterprise_goods_price",
+            "总指数-同比增长": "enterprise_goods_price_yoy",
+            "总指数-环比增长": "enterprise_goods_price_mom",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "enterprise_goods_price_yoy", "enterprise_goods_price_mom"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
+                    "enterprise_goods_price": _to_float(row.get("enterprise_goods_price")),
                     "enterprise_goods_price_yoy": _to_float(row.get("enterprise_goods_price_yoy")),
                     "enterprise_goods_price_mom": _to_float(row.get("enterprise_goods_price_mom")),
                 })
@@ -547,27 +464,20 @@ def _fetch_consumer_confidence() -> list[dict]:
         df = ak.macro_china_xfzxx()
         if df is None or df.empty:
             return []
+        df = _parse_month_col(df)
         col_map = {
-            "年": "year",
-            "月": "month",
-            "消费者信心指数": "consumer_confidence",
-            "消费者信心": "consumer_confidence",
-            "消费者满意指数": "consumer_satisfaction",
-            "消费者满意": "consumer_satisfaction",
-            "消费者预期指数": "consumer_expectation",
-            "消费者预期": "consumer_expectation",
+            "消费者信心指数-指数值": "consumer_confidence",
+            "消费者满意指数-指数值": "consumer_satisfaction",
+            "消费者预期指数-指数值": "consumer_expectation",
         }
         df = df.rename(columns=col_map)
-        keep = {"year", "month", "consumer_confidence", "consumer_satisfaction", "consumer_expectation"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
         records = []
         for _, row in df.iterrows():
             year = str(row.get("year", "")).strip()
             month = str(row.get("month", "")).strip()
             if year and month:
                 records.append({
-                    "date": f"{year}-{month.zfill(2)}-01",
+                    "date": f"{year}-{month}-01",
                     "consumer_confidence": _to_float(row.get("consumer_confidence")),
                     "consumer_satisfaction": _to_float(row.get("consumer_satisfaction")),
                     "consumer_expectation": _to_float(row.get("consumer_expectation")),
@@ -579,74 +489,32 @@ def _fetch_consumer_confidence() -> list[dict]:
 
 
 def _fetch_lpr() -> list[dict]:
-    """获取贷款市场报价利率（LPR）数据。
-
-    akshare 返回的 LPR 数据为长格式（每行一个利率品种），
-    需要按日期透视成宽格式。
-    """
+    """获取贷款市场报价利率（LPR）数据。"""
     if ak is None:
         return []
     try:
         df = ak.macro_china_lpr()
         if df is None or df.empty:
             return []
-        # 确定列名
         col_map = {
-            "日期": "date",
-            "利率名称": "rate_name",
-            "利率": "rate",
-            "LPR品种": "rate_name",
-            "品种": "rate_name",
-            "LPR": "rate",
+            "TRADE_DATE": "date",
+            "LPR1Y": "lpr_1y",
+            "LPR5Y": "lpr_5y",
         }
         df = df.rename(columns=col_map)
-        # 确定可用列
-        has_date = "date" in df.columns
-        has_rate_name = "rate_name" in df.columns
-        has_rate = "rate" in df.columns
-
-        if has_date and has_rate_name and has_rate:
-            records: dict[str, dict] = {}
-            for _, row in df.iterrows():
-                date_val = str(row.get("date", "")).strip()[:10]
-                name = str(row.get("rate_name", "")).strip()
-                rate = _to_float(row.get("rate"))
-                if not date_val or not name or rate is None:
-                    continue
-                if date_val not in records:
-                    records[date_val] = {"date": date_val}
-                if "1年" in name or "1Y" in name.upper():
-                    records[date_val]["lpr_1y"] = rate
-                elif "5年" in name or "5Y" in name.upper():
-                    records[date_val]["lpr_5y"] = rate
-            return list(records.values())
-        else:
-            # 降级：尝试直接用年/月格式
-            cm = {
-                "年": "year",
-                "月": "month",
-                "1年期LPR": "lpr_1y",
-                "5年期LPR": "lpr_5y",
-                "1年期": "lpr_1y",
-                "5年期": "lpr_5y",
-            }
-            df = df.rename(columns=cm)
-            keep = {"year", "month", "lpr_1y", "lpr_5y"}
-            available = [c for c in keep if c in df.columns]
-            if "year" in available and "month" in available:
-                df = df[available]
-                result = []
-                for _, row in df.iterrows():
-                    year = str(row.get("year", "")).strip()
-                    month = str(row.get("month", "")).strip()
-                    if year and month:
-                        result.append({
-                            "date": f"{year}-{month.zfill(2)}-01",
-                            "lpr_1y": _to_float(row.get("lpr_1y")),
-                            "lpr_5y": _to_float(row.get("lpr_5y")),
-                        })
-                return result
-            return []
+        records = []
+        for _, row in df.iterrows():
+            date_val = row.get("date")
+            if date_val is None:
+                continue
+            date_str = str(date_val).strip()[:10]
+            if date_str:
+                records.append({
+                    "date": date_str,
+                    "lpr_1y": _to_float(row.get("lpr_1y")),
+                    "lpr_5y": _to_float(row.get("lpr_5y")),
+                })
+        return records
     except Exception as e:
         logger.warning(f"LPR 获取失败: {e}")
         return []
@@ -702,66 +570,6 @@ def _fetch_gdp() -> list[dict]:
         return records
     except Exception as e:
         logger.warning(f"GDP 获取失败: {e}")
-        return []
-
-
-# ===========================================================================
-# 日度指标
-# ===========================================================================
-
-
-def _fetch_shibor() -> list[dict]:
-    """获取 SHIBOR 利率数据。"""
-    if ak is None:
-        return []
-    try:
-        df = ak.macro_china_shibor_all()
-        if df is None or df.empty:
-            return []
-        col_map = {
-            "日期": "date",
-            "ON": "shibor_on",
-            "隔夜": "shibor_on",
-            "1W": "shibor_1w",
-            "1周": "shibor_1w",
-            "2W": "shibor_2w",
-            "2周": "shibor_2w",
-            "1M": "shibor_1m",
-            "1个月": "shibor_1m",
-            "3M": "shibor_3m",
-            "3个月": "shibor_3m",
-            "6M": "shibor_6m",
-            "6个月": "shibor_6m",
-            "9M": "shibor_9m",
-            "9个月": "shibor_9m",
-            "1Y": "shibor_1y",
-            "1年": "shibor_1y",
-        }
-        df = df.rename(columns=col_map)
-        keep = {
-            "date", "shibor_on", "shibor_1w", "shibor_2w",
-            "shibor_1m", "shibor_3m", "shibor_6m", "shibor_9m", "shibor_1y",
-        }
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
-        records = []
-        for _, row in df.iterrows():
-            date_val = str(row.get("date", "")).strip()[:10]
-            if date_val:
-                records.append({
-                    "date": date_val,
-                    "shibor_on": _to_float(row.get("shibor_on")),
-                    "shibor_1w": _to_float(row.get("shibor_1w")),
-                    "shibor_2w": _to_float(row.get("shibor_2w")),
-                    "shibor_1m": _to_float(row.get("shibor_1m")),
-                    "shibor_3m": _to_float(row.get("shibor_3m")),
-                    "shibor_6m": _to_float(row.get("shibor_6m")),
-                    "shibor_9m": _to_float(row.get("shibor_9m")),
-                    "shibor_1y": _to_float(row.get("shibor_1y")),
-                })
-        return records
-    except Exception as e:
-        logger.warning(f"SHIBOR 获取失败: {e}")
         return []
 
 
@@ -838,21 +646,5 @@ def update_china_macro(db: DatabaseInterface) -> dict:
         saved_q = 0
         logger.warning(f"⚠️ GDP 获取失败: {e}")
     results["quarterly_saved"] = saved_q
-
-    # --- Daily ---
-    try:
-        daily = _fetch_shibor()
-        if daily:
-            for r in daily:
-                r["data_date"] = data_date
-            saved_d = db.save_macro_daily_batch(daily)
-            logger.info(f"✅ 日度宏观(SHIBOR)保存完成: {saved_d} 条")
-        else:
-            saved_d = 0
-            logger.warning("⚠️ SHIBOR 无数据")
-    except Exception as e:
-        saved_d = 0
-        logger.warning(f"⚠️ SHIBOR 获取失败: {e}")
-    results["daily_saved"] = saved_d
 
     return dict(results)

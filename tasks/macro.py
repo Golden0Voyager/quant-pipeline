@@ -18,6 +18,11 @@ try:
 except ImportError:
     ak = None
 
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +86,109 @@ def update_north_flow(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 北向资金更新失败: {e}")
+        return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 北向资金个股持仓（季度快照）
+# ===========================================================================
+
+_EM_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_EM_NORTH_HOLD_REPORT = "RPT_MUTUAL_HOLDSTOCKNORTH_STA"
+_EM_NORTH_HOLD_COLUMNS = (
+    "SECURITY_CODE,SECURITY_NAME,TRADE_DATE,CLOSE_PRICE,HOLD_SHARES,"
+    "HOLD_MARKET_CAP,HOLD_SHARES_RATIO,FREE_SHARES_RATIO,TOTAL_SHARES_RATIO"
+)
+_EM_PAGE_SIZE = 500
+_EM_MAX_PAGES = 20
+_EM_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://data.eastmoney.com/hsgtcg/",
+}
+
+
+def _fetch_north_hold(timeout: float = 30.0) -> list[dict]:
+    """获取北向资金个股持仓（东财数据中心，全市场最新季度快照）。
+
+    2024-08-19 起沪深交易所停止每日个股北向披露，改为季度末快照。
+    reportName=RPT_MUTUAL_HOLDSTOCKNORTH_STA 仅保留最新报告期，全市场约
+    3900 只。每日运行幂等：同一季度重复 upsert，新季度披露后自动写入新一期。
+    """
+    if requests is None:
+        logger.warning("⚠️ requests 未安装，无法获取北向持仓")
+        return []
+    records: list[dict] = []
+    page = 1
+    while page <= _EM_MAX_PAGES:
+        params = {
+            "reportName": _EM_NORTH_HOLD_REPORT,
+            "columns": _EM_NORTH_HOLD_COLUMNS,
+            "pageSize": str(_EM_PAGE_SIZE),
+            "pageNumber": str(page),
+            "sortColumns": "HOLD_MARKET_CAP",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+        }
+        try:
+            resp = requests.get(
+                _EM_DATACENTER_URL, params=params,
+                headers=_EM_HEADERS, timeout=timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"⚠️ 北向持仓第 {page} 页获取失败: {e}")
+            break
+        result = payload.get("result") or {}
+        rows = result.get("data") or []
+        if not rows:
+            break
+        for row in rows:
+            code = str(row.get("SECURITY_CODE", "")).strip()
+            if not code:
+                continue
+            records.append(
+                {
+                    "ts_code": code,
+                    "security_name": str(row.get("SECURITY_NAME", "") or "").strip(),
+                    "trade_date": str(row.get("TRADE_DATE", ""))[:10],
+                    "close_price": row.get("CLOSE_PRICE"),
+                    "hold_shares": row.get("HOLD_SHARES"),
+                    "hold_market_cap": row.get("HOLD_MARKET_CAP"),
+                    "hold_shares_ratio": row.get("HOLD_SHARES_RATIO"),
+                    "free_shares_ratio": row.get("FREE_SHARES_RATIO"),
+                    "total_shares_ratio": row.get("TOTAL_SHARES_RATIO"),
+                    "data_source": "eastmoney",
+                }
+            )
+        total_pages = result.get("pages") or 1
+        if page >= total_pages:
+            break
+        page += 1
+    return records
+
+
+def update_north_hold(db: DatabaseInterface) -> dict:
+    """获取北向资金个股持仓并保存（季度快照，每日幂等 upsert）。"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🌐 任务: 更新北向资金个股持仓")
+    logger.info("=" * 60)
+
+    try:
+        records = _fetch_north_hold()
+        if not records:
+            logger.warning("⚠️ 北向持仓无数据")
+            return {"saved": 0, "total": 0}
+        saved = db.save_north_hold_batch(records)
+        latest = max((r["trade_date"] for r in records if r.get("trade_date")), default="")
+        logger.info(f"✅ 北向持仓保存完成: {saved} 条 (报告期 {latest})")
+        return {"saved": saved, "total": len(records)}
+    except Exception as e:
+        logger.error(f"❌ 北向持仓更新失败: {e}")
         return {"saved": 0, "error": str(e)}
 
 

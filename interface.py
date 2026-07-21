@@ -143,6 +143,10 @@ class DatabaseInterface(Protocol):
         """批量保存北向资金数据，返回实际保存条数。"""
         ...
 
+    def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存北向资金个股持仓数据，返回实际保存条数。"""
+        ...
+
     def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存指数日线数据，返回实际保存条数。"""
         ...
@@ -215,6 +219,14 @@ class DatabaseInterface(Protocol):
 
     def save_macro_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存日度宏观指标（SHIBOR），返回实际保存条数。"""
+        ...
+
+    def save_money_market_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存货币市场日度数据（SHIBOR/回购利率/基准利率），返回实际保存条数。"""
+        ...
+
+    def save_central_bank_balance_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存央行资产负债表月度数据，返回实际保存条数。"""
         ...
 
     # ===========================================================================
