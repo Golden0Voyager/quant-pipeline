@@ -587,42 +587,41 @@ def test_update_market_valuation_ak_none():
 # ===========================================================================
 
 
-def _mock_ak_concept_board() -> MagicMock:
-    ak = MagicMock()
-    ak.stock_board_concept_summary_ths.return_value = pd.DataFrame({
-        "日期": ["2024-01-02", "2024-01-02", "2024-01-03"],
-        "板块名称": ["AI概念", "芯片概念", "AI概念"],
-        "涨跌幅": [3.2, 2.1, -1.5],
-        "成交额": [100.5, 80.3, 95.0],
-        "上涨家数": [20, 15, 8],
-        "下跌家数": [3, 5, 15],
-    })
-    ak.stock_board_concept_name_ths.return_value = pd.DataFrame({
-        "板块名称": ["AI概念", "芯片概念"],
-        "板块代码": ["885902", "885903"],
-    })
-    ak.stock_board_concept_cons_ths.return_value = pd.DataFrame({
-        "代码": ["000001", "000002"],
-    })
-    return ak
+def _mock_concept_spot_response() -> dict:
+    """模拟东方财富 push2 概念板块行情 JSON 响应。"""
+    return {
+        "data": {
+            "total": 2,
+            "diff": [
+                {"f3": 3.2, "f4": 100.5, "f12": "BK1001", "f14": "AI概念", "f104": 20, "f105": 3},
+                {"f3": 2.1, "f4": 80.3, "f12": "BK1002", "f14": "芯片概念", "f104": 15, "f105": 5},
+            ],
+        }
+    }
 
 
-def test_update_concept_board_runs_all():
-    ak = _mock_ak_concept_board()
+def _mock_empty_spot_response() -> dict:
+    return {"data": {"total": 0, "diff": []}}
+
+
+def test_update_concept_board_runs():
+    """验证 update_concept_board 直调 eastmoney 接口并保存。"""
     db = MagicMock()
-    db.save_concept_board_batch.return_value = 3
-    db.save_concept_member_batch.return_value = 4
-    with patch.object(concept_board, "ak", ak):
+    db.save_concept_board_batch.return_value = 2
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = _mock_concept_spot_response()
+        mock_get.return_value.raise_for_status = lambda: None
         result = concept_board.update_concept_board(db)
-    assert result["board_saved"] == 3
-    assert result["member_saved"] == 4
+    assert result["board_saved"] == 2
     assert db.save_concept_board_batch.called
-    assert db.save_concept_member_batch.called
 
 
-def test_update_concept_board_ak_none():
+def test_update_concept_board_empty():
+    """验证 eastmoney 接口返回空时优雅降级。"""
     db = MagicMock()
-    with patch.object(concept_board, "ak", None):
+    with patch("tasks.concept_board.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = _mock_empty_spot_response()
+        mock_get.return_value.raise_for_status = lambda: None
         result = concept_board.update_concept_board(db)
-    assert result["saved"] == 0
-    assert "error" in result
+    assert result["board_saved"] == 0
+    assert not db.save_concept_board_batch.called

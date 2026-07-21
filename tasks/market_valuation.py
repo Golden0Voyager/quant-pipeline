@@ -54,9 +54,9 @@ def _fetch_pe() -> list[dict]:
         return []
     col_map = {
         "date": "date",
-        "middlePE": "pe_median",
-        "quantile": "pe_quantile",
-        "middlePE_LYR": "pe_lyr_median",
+        "middlePETTM": "pe_median",
+        "quantileInAllHistoryMiddlePeTtm": "pe_quantile",
+        "middlePELYR": "pe_lyr_median",
     }
     df = df.rename(columns=col_map)
     keep = {"date", "pe_median", "pe_quantile", "pe_lyr_median"}
@@ -88,7 +88,7 @@ def _fetch_pb() -> list[dict]:
     col_map = {
         "date": "date",
         "middlePB": "pb_median",
-        "quantile": "pb_quantile",
+        "quantileInAllHistoryMiddlePB": "pb_quantile",
     }
     df = df.rename(columns=col_map)
     keep = {"date", "pb_median", "pb_quantile"}
@@ -118,9 +118,9 @@ def _fetch_ebs() -> list[dict]:
         return []
     col_map = {
         "日期": "date",
-        "沪深300": "csi300_close",
+        "沪深300指数": "csi300_close",
         "股债利差": "equity_bond_spread",
-        "均线": "ebs_ma",
+        "股债利差均线": "ebs_ma",
     }
     df = df.rename(columns=col_map)
     keep = {"date", "csi300_close", "equity_bond_spread", "ebs_ma"}
