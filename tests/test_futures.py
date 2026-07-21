@@ -145,6 +145,42 @@ def test_update_futures_all_empty():
     db.save_futures_daily_batch.assert_not_called()
 
 
+def test_update_futures_mixed_results():
+    """部分品种成功、部分失败 → 只保存成功的记录。"""
+    db = MagicMock()
+    db.save_futures_daily_batch.return_value = 3
+    df_valid = _sina_df([100.0, 105.0], ["2026-07-17", "2026-07-18"])
+
+    # 前 3 个品种返回有效数据，其余返回空
+    def _side_effect(symbol, start_date, end_date):
+        # 前 3 个品种（LC0, SI0, PS0）返回数据
+        if symbol in ("LC0", "SI0", "PS0"):
+            return df_valid
+        return pd.DataFrame()
+
+    fake_ak = MagicMock()
+    fake_ak.futures_main_sina.side_effect = _side_effect
+    with patch.object(futures_mod, "ak", fake_ak):
+        res = update_futures(db)
+    assert res["total"] == 3
+    assert res["saved"] == 3
+    assert fake_ak.futures_main_sina.call_count == len(FUTURES_VARIETIES)
+    db.save_futures_daily_batch.assert_called_once()
+
+
+def test_update_futures_partial_save():
+    """db.save 返回的数量与总记录数不同。"""
+    db = MagicMock()
+    db.save_futures_daily_batch.return_value = 2  # 只保存了 2 条
+    df = _sina_df([100.0, 105.0], ["2026-07-17", "2026-07-18"])
+    fake_ak = MagicMock()
+    fake_ak.futures_main_sina.return_value = df
+    with patch.object(futures_mod, "ak", fake_ak):
+        res = update_futures(db)
+    assert res["total"] == len(FUTURES_VARIETIES)
+    assert res["saved"] == 2  # 只有 2 条入库
+
+
 def test_update_futures_saves_all_varieties():
     db = MagicMock()
     db.save_futures_daily_batch.return_value = len(FUTURES_VARIETIES)

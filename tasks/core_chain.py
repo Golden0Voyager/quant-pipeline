@@ -5,11 +5,11 @@ import json  # noqa: F401
 import logging
 import os
 import sqlite3
-import threading
 import time  # noqa: F401
 from collections import defaultdict  # noqa: F401
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime  # noqa: F401
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -144,39 +144,85 @@ def update_indicators(
     failed_count = 0
     insufficient_count = 0
 
-    db_write_lock = threading.Lock()
-
-    def _process_one(symbol: str) -> str:
+    def _process_one(symbol: str) -> tuple[str, list[dict]]:
+        """计算单只股票指标并返回状态与待保存记录。"""
         try:
             df = db.get_daily_bars(symbol)
             if df.empty or len(df) < 60:
-                return "insufficient"
+                return "insufficient", []
 
             if "trade_date" in df.columns and "date" not in df.columns:
                 df = df.rename(columns={"trade_date": "date"})
 
             df_ind = engine.calculate_all_indicators(df)
-            with db_write_lock:
-                db.save_indicators(symbol, df_ind)
-            return "success"
+            if df_ind.empty:
+                return "insufficient", []
+
+            # 统一日期列名
+            date_col = "date" if "date" in df_ind.columns else "trade_date"
+            records = []
+            for _, row in df_ind.iterrows():
+                record: dict[str, Any] = {"ts_code": symbol}
+                trade_date = row.get(date_col)
+                # SQLite executemany 不接受 pandas Timestamp，统一转字符串
+                if hasattr(trade_date, "strftime"):
+                    trade_date = trade_date.strftime("%Y-%m-%d")
+                record["trade_date"] = trade_date
+                for col in (
+                    "close", "volume",
+                    "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+                    "vol_ma5", "vol_ma50", "vol_ma60",
+                    "boll_upper", "boll_mid", "boll_lower", "boll_bandwidth",
+                    "cyc60", "chip_concentration",
+                    "macd_dif", "macd_dea", "macd_hist",
+                    "kdj_k", "kdj_d", "kdj_j",
+                    "rsi6", "rsi12", "rsi24",
+                    "cci",
+                ):
+                    record[col] = row.get(col)
+                records.append(record)
+            return "success", records
         except Exception as e:
             logger.warning(f"  ❌ {symbol} 指标计算失败: {e}")
-            return "failed"
+            return "failed", []
+
+    def _save_batch(records: list[dict]) -> int:
+        """批量写入指标记录。"""
+        if not records:
+            return 0
+        try:
+            return db.save_indicators_batch(records)
+        except Exception as e:
+            logger.warning(f"  ⚠️ 批量保存指标失败: {e}")
+            return 0
 
     workers = min(8, max(4, (os.cpu_count() or 2) + 2))
+    batch_size = 100  # 每 100 只股票触发一次批量保存
+    pending_records: list[dict] = []
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, symbol): symbol for symbol in symbols}
         for i, future in enumerate(as_completed(futures), 1):
-            status = future.result()
+            status, records = future.result()
             if status == "success":
                 success_count += 1
+                pending_records.extend(records)
             elif status == "insufficient":
                 insufficient_count += 1
             else:
                 failed_count += 1
 
+            # 累积到批次大小或最后一批时统一保存，减少连接/提交开销
+            if len(pending_records) >= batch_size or i == total:
+                _save_batch(pending_records)
+                pending_records = []
+
             if i % 100 == 0 or i == total:
                 logger.info(f"  进度: {i}/{total} ({100 * i // total}%)")
+
+    # 兜底：确保任何残留记录也被写入
+    if pending_records:
+        _save_batch(pending_records)
 
     logger.info("\n" + "=" * 60)
     logger.info("📊 技术指标计算完成")

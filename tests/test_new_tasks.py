@@ -9,6 +9,7 @@ point to raise line coverage above the 85% gate (PR #28).
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -18,6 +19,7 @@ import tasks.concept_board as concept_board
 import tasks.convertible_bond as convertible_bond
 import tasks.corporate_actions as corporate_actions
 import tasks.finance_flow as finance_flow
+import tasks.financials as financials
 import tasks.index_chain as index_chain
 import tasks.market_valuation as market_valuation
 import tasks.money_market as money_market
@@ -443,14 +445,21 @@ def _mock_ak_corporate_actions() -> MagicMock:
     ak = MagicMock()
     ak.stock_restricted_release_detail_em.return_value = pd.DataFrame(
         {
-            "股票代码": ["000001"], "股票简称": ["平安银行"], "解禁时间": ["2026-07-15"],
-            "限售股类型": ["首发原股东限售股份"], "实际解禁数量": [100.5], "解禁数量": [200.5],
+            "股票代码": ["000001"],
+            "股票简称": ["平安银行"],
+            "解禁时间": ["2026-07-15"],
+            "限售股类型": ["首发原股东限售股份"],
+            "实际解禁数量": [100.5],
+            "解禁数量": [200.5],
         }
     )
     ak.stock_yjyg_em.return_value = pd.DataFrame(
         {
-            "股票代码": ["000001"], "股票简称": ["平安银行"], "预告类型": ["预增"],
-            "业绩变动幅度": [50.0], "上年同期值": [1.0e9],
+            "股票代码": ["000001"],
+            "股票简称": ["平安银行"],
+            "预告类型": ["预增"],
+            "业绩变动幅度": [50.0],
+            "上年同期值": [1.0e9],
         }
     )
     return ak
@@ -497,8 +506,11 @@ def _mock_ak_finance_flow() -> MagicMock:
     ak = MagicMock()
     ak.stock_hsgt_hist_em.return_value = pd.DataFrame(
         {
-            "日期": ["2024-01-01"], "当日成交净买额": [1.0],
-            "买入成交额": [2.0], "卖出成交额": [1.0], "历史累计净买额": [100.0],
+            "日期": ["2024-01-01"],
+            "当日成交净买额": [1.0],
+            "买入成交额": [2.0],
+            "卖出成交额": [1.0],
+            "历史累计净买额": [100.0],
         }
     )
     ak.stock_zh_ah_spot_em.return_value = pd.DataFrame(
@@ -840,6 +852,79 @@ def test_update_market_valuation_ak_none():
     assert "error" in result
 
 
+def test_to_float_edge_cases():
+    """_to_float: None/NaN/非数值 → None。"""
+    assert market_valuation._to_float(None) is None
+    assert market_valuation._to_float(float("nan")) is None
+    assert market_valuation._to_float("not_a_number") is None
+    assert market_valuation._to_float(42.0) == 42.0
+
+
+def test_try_get_ak_df_raises_returns_none():
+    """_try_get_ak_df: fetcher 抛异常 → None。"""
+    func = MagicMock(side_effect=RuntimeError("network err"), __name__="stock_a_ttm_lyr")
+    with patch.object(market_valuation, "ak", MagicMock()):
+        result = market_valuation._try_get_ak_df(func)
+    assert result is None
+
+
+def test_fetch_pe_empty_df():
+    """_fetch_pe: ak 返回空 → []."""
+    ak = MagicMock()
+    ak.stock_a_ttm_lyr.return_value = pd.DataFrame()
+    with patch.object(market_valuation, "ak", ak):
+        assert market_valuation._fetch_pe() == []
+
+
+def test_fetch_pb_empty_df():
+    """_fetch_pb: ak 返回空 → []."""
+    ak = MagicMock()
+    ak.stock_a_all_pb.return_value = pd.DataFrame()
+    with patch.object(market_valuation, "ak", ak):
+        assert market_valuation._fetch_pb() == []
+
+
+def test_fetch_ebs_empty_df():
+    """_fetch_ebs: ak 返回空 → []."""
+    ak = MagicMock()
+    ak.stock_ebs_lg.return_value = pd.DataFrame()
+    with patch.object(market_valuation, "ak", ak):
+        assert market_valuation._fetch_ebs() == []
+
+
+def test_update_market_valuation_all_empty():
+    """全部 fetcher 返回空 → saved=0。"""
+    ak = MagicMock()
+    ak.stock_a_ttm_lyr.return_value = pd.DataFrame()
+    ak.stock_a_all_pb.return_value = pd.DataFrame()
+    ak.stock_ebs_lg.return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(market_valuation, "ak", ak):
+        result = market_valuation.update_market_valuation(db)
+    assert result["saved"] == 0
+    assert result["全市场PE"] == 0
+    assert result["全市场PB"] == 0
+    assert result["股债利差"] == 0
+
+
+def test_update_market_valuation_fetcher_exception():
+    """fetcher 抛异常时主函数不崩。
+
+    _try_get_ak_df 需要 func.__name__ 做日志，需为 mock 设置该属性。
+    """
+    ak = MagicMock()
+    ak.stock_a_ttm_lyr = MagicMock(side_effect=RuntimeError("PE error"), __name__="stock_a_ttm_lyr")
+    ak.stock_a_all_pb.return_value = pd.DataFrame()
+    ak.stock_ebs_lg.return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(market_valuation, "ak", ak):
+        result = market_valuation.update_market_valuation(db)
+    # 异常在 _try_get_ak_df 内部被捕获，返回 None
+    # _fetch_pe 收到 None 后返回 []，results[name] = 0
+    assert result["全市场PE"] == 0
+    assert result["saved"] == 0
+
+
 # ===========================================================================
 # concept_board
 # ===========================================================================
@@ -944,6 +1029,430 @@ def test_update_concept_member_ak_none():
         result = concept_board.update_concept_member(db)
     assert result["saved"] == 0
     assert "error" in result
+
+
+
+
+
+
+# ===========================================================================
+# money_market — 边缘路径
+# ===========================================================================
+
+
+def test_money_market_empty_fetchers():
+    """money_market: 各 fetcher 返回空 → 各项为 0。"""
+    ak = MagicMock()
+    ak.macro_china_shibor_all.return_value = pd.DataFrame()
+    ak.repo_rate_query.return_value = pd.DataFrame()
+    ak.macro_bank_china_interest_rate.return_value = pd.DataFrame()
+    ak.macro_china_central_bank_balance.return_value = pd.DataFrame()
+    db = MagicMock()
+    db.save_money_market_batch.return_value = 0
+    db.save_central_bank_balance_batch.return_value = 0
+    with patch.object(money_market, "ak", ak):
+        result = money_market.update_money_market(db)
+    assert result["daily_saved"] == 0
+    assert result["balance_saved"] == 0
+
+
+def test_money_market_fetcher_exception():
+    """money_market: fetcher 抛异常。"""
+    ak = MagicMock()
+    ak.macro_china_shibor_all.side_effect = RuntimeError("shibor fail")
+    ak.repo_rate_query.return_value = pd.DataFrame()
+    ak.macro_bank_china_interest_rate.return_value = pd.DataFrame()
+    ak.macro_china_central_bank_balance.return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(money_market, "ak", ak):
+        result = money_market.update_money_market(db)
+    assert result["daily_saved"] == 0
+    assert result["balance_saved"] == 0
+
+
+def test_money_market_balance_exception():
+    """money_market: 资产负债表抛异常。"""
+    ak = _mock_ak_money_market()
+    ak.macro_china_central_bank_balance.side_effect = RuntimeError("balance fail")
+    db = MagicMock()
+    db.save_money_market_batch.return_value = 2
+    with patch.object(money_market, "ak", ak):
+        result = money_market.update_money_market(db)
+    assert result["daily_saved"] > 0
+    assert result["balance_saved"] == 0
+
+
+def test_money_market_to_float():
+    """money_market._to_float: None/NaN/非数值。"""
+    assert money_market._to_float(None) is None
+    assert money_market._to_float(float("nan")) is None
+    assert money_market._to_float("abc") is None
+    assert money_market._to_float(42.5) == 42.5
+
+
+def test_money_market_try_get_ak_df_exception():
+    """money_market._try_get_ak_df: 异常处理。"""
+    func = MagicMock(side_effect=RuntimeError("fail"), __name__="test_func")
+    with patch.object(money_market, "ak", MagicMock()):
+        assert money_market._try_get_ak_df(func) is None
+
+
+def test_money_market_repo_date_none():
+    """_fetch_repo_rates: date 列为 None 时跳过。"""
+    ak = MagicMock()
+    ak.repo_rate_query.return_value = pd.DataFrame({"date": [None], "FR001": [1.0]})
+    with patch.object(money_market, "ak", ak):
+        records = money_market._fetch_repo_rates()
+    assert len(records) == 0
+
+
+def test_money_market_pboc_date_none():
+    """_fetch_pboc_policy_rate: 日期列为 None 时跳过。"""
+    ak = MagicMock()
+    ak.macro_bank_china_interest_rate.return_value = pd.DataFrame({"日期": [None], "今值": [3.0]})
+    with patch.object(money_market, "ak", ak):
+        records = money_market._fetch_pboc_policy_rate()
+    assert len(records) == 0
+
+
+# ===========================================================================
+# sector_derivatives — 边缘路径
+# ===========================================================================
+
+
+def test_sector_derivatives_empty_board():
+    """sector_derivatives: board 列表空。"""
+    ak = MagicMock()
+    ak.stock_board_industry_name_em.return_value = pd.DataFrame()
+    ak.stock_industry_pe_ratio_cninfo.return_value = pd.DataFrame()
+    with patch.object(sector_derivatives, "ak", ak):
+        result = sector_derivatives.update_sector_derivatives(MagicMock())
+    assert result["sector_daily"] == 0
+    assert result["sector_valuation"] == 0
+
+
+def test_sector_derivatives_no_matching_sectors():
+    """sector_derivatives: 无匹配的主要行业板块。"""
+    ak = MagicMock()
+    ak.stock_board_industry_name_em.return_value = pd.DataFrame({"板块名称": ["罕见行业", "其他"]})
+    with patch.object(sector_derivatives, "ak", ak):
+        result = sector_derivatives._fetch_sector_daily()
+    assert result == []
+
+
+def test_sector_derivatives_hist_exception():
+    """sector_derivatives: 板块历史数据抛异常。"""
+    ak = MagicMock()
+    ak.stock_board_industry_name_em.return_value = pd.DataFrame({"板块名称": ["半导体"]})
+    ak.stock_board_industry_hist_em.side_effect = RuntimeError("hist fail")
+    with patch.object(sector_derivatives, "ak", ak), patch.object(sector_derivatives, "_retry", return_value=None):
+        result = sector_derivatives._fetch_sector_daily()
+    assert result == []
+
+
+def test_sector_derivatives_valuation_empty():
+    """sector_derivatives: 估值返回空。"""
+    ak = MagicMock()
+    ak.stock_industry_pe_ratio_cninfo.return_value = pd.DataFrame()
+    with (
+        patch.object(sector_derivatives, "ak", ak),
+        patch.object(sector_derivatives, "get_expected_latest_trading_day", return_value="2026-07-19"),
+    ):
+        result = sector_derivatives._fetch_sector_valuation()
+    assert result == []
+
+
+def test_sector_derivatives_futures_ak_none():
+    """sector_derivatives: ak=None 时 futures 返回空。"""
+    with patch.object(sector_derivatives, "ak", None):
+        assert sector_derivatives._fetch_index_futures_basis() == []
+
+
+def test_sector_derivatives_retry_all_fail():
+    """sector_derivatives._retry: 全部重试失败返回 None。"""
+    fn = MagicMock(side_effect=RuntimeError("fail"))
+    result = sector_derivatives._retry(fn, tries=2, base_delay=0.01, label="test")
+    assert result is None
+    assert fn.call_count == 2
+
+
+def test_sector_derivatives_retry_success():
+    """sector_derivatives._retry: 成功返回结果。"""
+    fn = MagicMock(return_value="ok")
+    result = sector_derivatives._retry(fn, tries=3, label="test")
+    assert result == "ok"
+    assert fn.call_count == 1
+
+
+def test_sector_derivatives_update_exception():
+    """sector_derivatives: update 中 fetcher 抛异常。
+
+    注意: 异常在 _fetch_sector_daily 内部已被捕获，外层 results[name] = 0。
+    """
+    ak = MagicMock()
+    ak.stock_board_industry_name_em.side_effect = RuntimeError("board fail")
+    db = MagicMock()
+    with patch.object(sector_derivatives, "ak", ak):
+        result = sector_derivatives.update_sector_derivatives(db)
+    assert result["sector_daily"] == 0
+
+
+def test_sector_derivatives_to_float():
+    """sector_derivatives._to_float: 边缘情况。"""
+    assert sector_derivatives._to_float(None) is None
+    assert sector_derivatives._to_float(float("nan")) is None
+    assert sector_derivatives._to_float("abc") is None
+    assert sector_derivatives._to_float(42.5) == 42.5
+
+
+# ===========================================================================
+# financials — 边缘路径
+# ===========================================================================
+
+
+def test_financials_shareholder_count_ak_none():
+    db = MagicMock()
+    with patch.object(financials, "ak", None):
+        result = financials.update_shareholder_count(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_financials_shareholder_count_empty():
+    ak = MagicMock()
+    ak.stock_hold_num_cninfo.return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(financials, "ak", ak):
+        result = financials.update_shareholder_count(db)
+    assert result["saved"] == 0
+
+
+def test_financials_shareholder_count_exception():
+    ak = MagicMock()
+    ak.stock_hold_num_cninfo.side_effect = RuntimeError("ak fail")
+    db = MagicMock()
+    with patch.object(financials, "ak", ak):
+        result = financials.update_shareholder_count(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_financials_quarterly_ak_none():
+    db = MagicMock()
+    loader = MagicMock()
+    with patch.object(financials, "ak", None):
+        result = financials.update_quarterly_financials(db, loader)
+    assert result["saved"] == 0
+    assert "error" in result
+
+
+def test_financials_quarterly_empty_stock_list():
+    ak = MagicMock()
+    db = MagicMock()
+    db.get_stock_list.return_value = pd.DataFrame()
+    loader = MagicMock()
+    with patch.object(financials, "ak", ak):
+        result = financials.update_quarterly_financials(db, loader)
+    assert result["saved"] == 0
+    assert result["total"] == 0
+
+
+# ===========================================================================
+# china_macro — 边缘路径
+# ===========================================================================
+
+
+def test_china_macro_parse_quarter_edge_cases():
+    """_parse_quarter: 各种中文和数字格式。"""
+    assert china_macro._parse_quarter("") is None
+    assert china_macro._parse_quarter("2024年第一季度") == "2024-Q1"
+    assert china_macro._parse_quarter("2024年第四季度") == "2024-Q4"
+    assert china_macro._parse_quarter("2024-Q1") == "2024-Q1"  # 数字格式
+
+
+def test_china_macro_empty_fetchers():
+    """china_macro: 所有 fetcher 返回空。"""
+    ak = MagicMock()
+    for attr in [
+        "macro_china_cpi",
+        "macro_china_ppi",
+        "macro_china_pmi",
+        "macro_china_cx_pmi_yearly",
+        "macro_china_money_supply",
+        "macro_china_new_financial_credit",
+        "macro_china_consumer_goods_retail",
+        "macro_china_gdzctz",
+        "macro_china_hgjck",
+        "macro_china_industrial_production_yoy",
+        "macro_china_society_electricity",
+        "macro_china_qyspjg",
+        "macro_china_xfzxx",
+        "macro_china_lpr",
+        "macro_china_gdp",
+    ]:
+        getattr(ak, attr).return_value = pd.DataFrame()
+    db = MagicMock()
+    db.save_macro_monthly_batch.return_value = 0
+    db.save_macro_quarterly_batch.return_value = 0
+    with patch.object(china_macro, "ak", ak):
+        result = china_macro.update_china_macro(db)
+    assert result["monthly_saved"] == 0
+    assert result["quarterly_saved"] == 0
+
+
+def test_china_macro_fetcher_exception():
+    """china_macro: 某个 fetcher 抛异常。
+
+    注意: 异常在 _fetch_cpi 内部已被捕获，外层 results[name] = 0。
+    """
+    ak = MagicMock()
+    ak.macro_china_cpi.side_effect = RuntimeError("cpi fail")
+    for attr in [
+        "macro_china_ppi",
+        "macro_china_pmi",
+        "macro_china_cx_pmi_yearly",
+        "macro_china_money_supply",
+        "macro_china_new_financial_credit",
+        "macro_china_consumer_goods_retail",
+        "macro_china_gdzctz",
+        "macro_china_hgjck",
+        "macro_china_industrial_production_yoy",
+        "macro_china_society_electricity",
+        "macro_china_qyspjg",
+        "macro_china_xfzxx",
+        "macro_china_lpr",
+        "macro_china_gdp",
+    ]:
+        getattr(ak, attr).return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(china_macro, "ak", ak):
+        result = china_macro.update_china_macro(db)
+    assert result["CPI"] == 0
+    assert result["monthly_saved"] == 0
+
+
+def test_china_macro_multiple_fetchers_exception():
+    """china_macro: 多个 fetcher 抛异常。"""
+    ak = MagicMock()
+    for attr in ["macro_china_ppi", "macro_china_lpr"]:
+        getattr(ak, attr).side_effect = RuntimeError(f"{attr} fail")
+    for attr in [
+        "macro_china_cpi",
+        "macro_china_pmi",
+        "macro_china_cx_pmi_yearly",
+        "macro_china_money_supply",
+        "macro_china_new_financial_credit",
+        "macro_china_consumer_goods_retail",
+        "macro_china_gdzctz",
+        "macro_china_hgjck",
+        "macro_china_industrial_production_yoy",
+        "macro_china_society_electricity",
+        "macro_china_qyspjg",
+        "macro_china_xfzxx",
+        "macro_china_gdp",
+    ]:
+        getattr(ak, attr).return_value = pd.DataFrame()
+    db = MagicMock()
+    with patch.object(china_macro, "ak", ak):
+        result = china_macro.update_china_macro(db)
+    assert result["PPI"] == 0
+    assert result["LPR"] == 0
+    assert result["monthly_saved"] == 0
+
+
+def test_china_macro_parse_month_col_no_month():
+    """_parse_month_col: 无月份列时不处理。"""
+    df = pd.DataFrame({"value": [1.0]})
+    result = china_macro._parse_month_col(df)
+    assert list(result.columns) == ["value"]
+
+
+def test_china_macro_gdp_no_quarter():
+    """_fetch_gdp: 无季度列时返回空。"""
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame({"value": [1.0]})
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_gdp()
+    assert records == []
+
+
+def test_china_macro_lpr_no_date():
+    """_fetch_lpr: date 为空时跳过。"""
+    ak = MagicMock()
+    ak.macro_china_lpr.return_value = pd.DataFrame({"TRADE_DATE": [None], "LPR1Y": [3.0]})
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_lpr()
+    assert records == []
+
+
+def test_china_macro_industrial_production_no_date():
+    """_fetch_industrial_production: date 为空时跳过。"""
+    ak = MagicMock()
+    ak.macro_china_industrial_production_yoy.return_value = pd.DataFrame({"日期": [None], "今值": [5.0]})
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_industrial_production()
+    assert records == []
+
+
+def test_china_macro_caixin_pmi_no_date():
+    """_fetch_caixin_pmi: date 为空时跳过。"""
+    ak = MagicMock()
+    ak.macro_china_cx_pmi_yearly.return_value = pd.DataFrame({"日期": [None], "今值": [50.0]})
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_caixin_pmi()
+    assert records == []
+
+
+def test_china_macro_gdp_exception():
+    """_fetch_gdp: 异常处理。"""
+    ak = MagicMock()
+    ak.macro_china_gdp.side_effect = RuntimeError("gdp fail")
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_gdp()
+    assert records == []
+
+
+# ===========================================================================
+# financials — 深入边缘路径
+# ===========================================================================
+
+
+def test_financials_quarterly_with_existing_filter():
+    """quarterly: 过滤已有数据的股票。"""
+    ak = MagicMock()
+    db = MagicMock()
+    db.get_stock_list.return_value = pd.DataFrame(
+        {
+            "code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+        }
+    )
+    db.get_distinct_codes.return_value = {"000001.SZ"}  # 已有数据
+    loader = MagicMock()
+    with patch.object(financials, "ak", ak):
+        result = financials.update_quarterly_financials(db, loader)
+    assert result["total"] == 2  # 000001.SZ 被过滤
+
+
+def test_financials_industry_all_classified(tmp_path: Path):
+    """update_industry: 所有股票已有行业分类 → 提前返回。"""
+    import sqlite3
+
+    db_path = str(tmp_path / "industry.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE stock_list (code TEXT, market TEXT, industry TEXT)")
+    conn.execute("INSERT INTO stock_list VALUES ('000001', 'sz', '银行')")
+    conn.commit()
+    conn.close()
+    db = MagicMock()
+    db.db_path = db_path
+    with (
+        patch.object(financials, "ak", MagicMock()),
+        patch("tasks.financials.logger"),
+        patch("core.lock.TaskLock.acquire", return_value=True),
+        patch("core.lock.TaskLock.release"),
+    ):
+        result = financials.update_industry(db)
+    assert result["total"] == 0
 
 
 def test_concept_to_float_none():

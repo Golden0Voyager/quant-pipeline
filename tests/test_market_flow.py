@@ -231,3 +231,126 @@ def test_update_sector_fund_flow_ak_none():
     ):
         res = mf.update_sector_fund_flow(db)
     assert res["error"] == "akshare not installed"
+
+
+def test_update_margin_trading_empty_data():
+    """融资融券两市均无数据时返回 saved=0。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_margin_detail_sse.return_value = pd.DataFrame()
+    fake_ak.stock_margin_detail_szse.return_value = pd.DataFrame()
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_margin_trading(db)
+    assert res["saved"] == 0
+    assert res["total"] == 0
+    db.save_margin_trading_batch.assert_not_called()
+
+
+def test_update_margin_trading_exception():
+    """融资融券 fetcher 异常时跳过该交易所。"""
+    db = MagicMock()
+    db.save_margin_trading_batch.return_value = 1
+    fake_ak = MagicMock()
+    fake_ak.stock_margin_detail_sse.side_effect = RuntimeError("sse down")
+    fake_ak.stock_margin_detail_szse.return_value = _margin_df("sz")
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_margin_trading(db)
+    assert res["saved"] == 1
+    assert res["total"] == 1
+
+
+def test_update_margin_trading_fallback_date():
+    """当日无数据时回退到前一天。"""
+    db = MagicMock()
+    db.save_margin_trading_batch.return_value = 1
+    fake_ak = MagicMock()
+    # 当天返回空，前一天返回有效数据
+    fake_ak.stock_margin_detail_sse.side_effect = [pd.DataFrame(), _margin_df("sh")]
+    fake_ak.stock_margin_detail_szse.side_effect = [pd.DataFrame(), pd.DataFrame()]
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_margin_trading(db)
+    assert res["saved"] == 1
+
+
+def test_update_dragon_tiger_empty():
+    """龙虎榜空数据时返回 saved=0。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_lhb_detail_em.return_value = pd.DataFrame()
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_dragon_tiger(db)
+    assert res["saved"] == 0
+    db.save_dragon_tiger_batch.assert_not_called()
+
+
+def test_update_dragon_tiger_exception():
+    """龙虎榜 akshare 异常时返回 error。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_lhb_detail_em.side_effect = RuntimeError("lhb down")
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_dragon_tiger(db)
+    assert res["saved"] == 0
+    assert "error" in res
+
+
+def test_update_block_trade_empty():
+    """大宗交易空数据时返回 saved=0。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_dzjy_mrmx.return_value = pd.DataFrame()
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_block_trade(db)
+    assert res["saved"] == 0
+    db.save_block_trade_batch.assert_not_called()
+
+
+def test_update_block_trade_exception():
+    """大宗交易 akshare 异常时返回 error。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_dzjy_mrmx.side_effect = RuntimeError("dzjy down")
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_block_trade(db)
+    assert res["saved"] == 0
+    assert "error" in res
+
+
+def test_update_sector_fund_flow_empty():
+    """板块资金流向空数据时返回 saved=0。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_sector_fund_flow(db)
+    assert res["saved"] == 0
+    db.save_sector_fund_flow_batch.assert_not_called()
+
+
+def test_update_sector_fund_flow_exception():
+    """板块资金流向 akshare 异常时返回 error。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_fund_flow_industry.side_effect = RuntimeError("industry flow down")
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_sector_fund_flow(db)
+    assert res["saved"] == 0
+    assert "error" in res

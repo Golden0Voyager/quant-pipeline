@@ -1,0 +1,197 @@
+"""Edge-path tests for tasks/bars.py.
+
+Fills coverage gaps in:
+- _normalize_trade_date pure function (all branches)
+- _update_single_bar boundary paths (watchlist, db_lock, increment paths)
+"""
+from __future__ import annotations
+
+import threading
+from datetime import date
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+
+from tasks.bars import _normalize_trade_date, _update_single_bar
+
+# ===========================================================================
+# _normalize_trade_date — 纯函数全分支覆盖
+# ===========================================================================
+
+
+class TestNormalizeTradeDate:
+    """_normalize_trade_date 纯函数测试 — 覆盖全部 7 个分支。"""
+
+    def test_none(self):
+        """None → None."""
+        assert _normalize_trade_date(None) is None
+
+    def test_date_object(self):
+        """date 对象 → YYYY-MM-DD 字符串。"""
+        d = date(2026, 7, 19)
+        assert _normalize_trade_date(d) == "2026-07-19"
+
+    def test_non_string_non_date(self):
+        """既不是字符串也不是 date → None。"""
+        assert _normalize_trade_date(20260719) is None
+        assert _normalize_trade_date(3.14) is None
+        assert _normalize_trade_date([2026, 7, 19]) is None
+
+    def test_empty_string(self):
+        """空字符串 → None。"""
+        assert _normalize_trade_date("") is None
+        assert _normalize_trade_date("   ") is None
+
+    def test_already_normalized(self):
+        """YYYY-MM-DD 格式 → 取前 10 位。"""
+        assert _normalize_trade_date("2026-07-19") == "2026-07-19"
+        # 带多余字符
+        assert _normalize_trade_date("2026-07-19 15:30:00") == "2026-07-19"
+
+    def test_digits_compact(self):
+        """8+ 位纯数字 → 格式化为 YYYY-MM-DD。"""
+        assert _normalize_trade_date("20260719") == "2026-07-19"
+        assert _normalize_trade_date("2026-07-19")  # already covered above
+
+    def test_fewer_than_8_digits(self):
+        """不足 8 位数字 → 原样返回。"""
+        assert _normalize_trade_date("abc") == "abc"
+        assert _normalize_trade_date("123") == "123"
+
+    def test_mixed_chars_with_digits(self):
+        """混合字符中包含 8+ 位数字 → 提取并格式化。"""
+        assert _normalize_trade_date("20260719abc") == "2026-07-19"
+        # 注意：提取全部数字后可能有 8 位以上
+        assert _normalize_trade_date("date:20260719") == "2026-07-19"
+
+
+# ===========================================================================
+# _update_single_bar — 边缘路径
+# ===========================================================================
+
+
+def _bars_df(dates: list[str]) -> pd.DataFrame:
+    return pd.DataFrame({
+        "trade_date": dates,
+        "open": [10.0] * len(dates),
+        "close": [10.5] * len(dates),
+        "data_source": ["akshare"] * len(dates),
+    })
+
+
+def _yfinance_df(dates: list[str]) -> pd.DataFrame:
+    return pd.DataFrame({
+        "trade_date": dates,
+        "open": [10.0] * len(dates),
+        "close": [10.5] * len(dates),
+        "data_source": ["yfinance"] * len(dates),
+    })
+
+
+class TestUpdateSingleBarEdge:
+    """补充 test_daily_pipeline.py 中 TestUpdateSingleBar 未覆盖的边界路径。"""
+
+    def test_skipped_when_latest_is_current(self):
+        """latest_date >= expected_latest → 跳过不抓取。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-19"
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+            )
+        assert result == "skipped"
+        loader.incremental_update.assert_not_called()
+
+    def test_yfinance_only_non_watchlist_full_load(self):
+        """非自选股全量加载全部是 yfinance → 返回 failed。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-16"
+        db.get_daily_bars.return_value = pd.DataFrame()  # 无现有数据
+        loader.get_daily_bars.return_value = _yfinance_df(
+            ["2026-07-17", "2026-07-18", "2026-07-19"]
+        )
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+            )
+        assert result == "failed"
+        db.save_daily_bars.assert_not_called()
+
+    def test_watchlist_backfill_with_db_lock(self):
+        """自选股全量回填 + db_lock。"""
+        db = MagicMock()
+        loader = MagicMock()
+        loader.get_daily_bars.return_value = _bars_df(
+            ["2026-01-01", "2026-01-02"]
+        )
+        lock = threading.Lock()
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+                watchlist_symbols={"000001.SZ"},
+                backfilled_symbols=set(),
+                backfill_file=Path("/tmp/test_backfill.txt"),
+                db_lock=lock,
+            )
+        assert result == "success"
+        db.save_daily_bars.assert_called_once()
+
+    def test_incremental_update_unchanged_stale(self):
+        """增量更新未取得新数据且最新日期低于预期 → failed。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-16"
+        existing = _bars_df(["2026-07-16"])
+        db.get_daily_bars.return_value = existing
+        loader.incremental_update.return_value = existing  # 行数不变
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+            )
+        assert result == "failed"
+        db.save_daily_bars.assert_not_called()
+
+    def test_watchlist_backfill_yfinance_all(self):
+        """自选股全量拉取全部是 yfinance → 返回 failed 不保存。"""
+        db = MagicMock()
+        loader = MagicMock()
+        loader.get_daily_bars.return_value = _yfinance_df(
+            ["2026-01-01", "2026-01-02"]
+        )
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+                watchlist_symbols={"000001.SZ"},
+                backfilled_symbols=set(),
+                backfill_file=Path("/tmp/test_backfill_yf.txt"),
+            )
+        assert result == "failed"
+        db.save_daily_bars.assert_not_called()
+
+    def test_full_load_empty_result(self):
+        """全量加载返回空 DataFrame → skipped。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = None  # 全新股票
+        db.get_daily_bars.return_value = pd.DataFrame()
+        loader.get_daily_bars.return_value = pd.DataFrame()
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000001.SZ",
+            )
+        assert result == "skipped"
+        db.save_daily_bars.assert_not_called()
