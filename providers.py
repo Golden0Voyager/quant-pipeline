@@ -204,6 +204,47 @@ class SmartMoneyDBProvider:
                         data_date TEXT
                     )
                 """)
+                # market_valuation（大盘估值：PE/PB中位数+股债利差，日频）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS market_valuation (
+                        date TEXT PRIMARY KEY,
+                        pe_median REAL,
+                        pe_quantile REAL,
+                        pe_lyr_median REAL,
+                        pb_median REAL,
+                        pb_quantile REAL,
+                        equity_bond_spread REAL,
+                        ebs_ma REAL,
+                        csi300_close REAL,
+                        data_source TEXT DEFAULT 'legu',
+                        data_date TEXT
+                    )
+                """)
+                # concept_board（概念板块日线行情）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS concept_board (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date DATE NOT NULL,
+                        concept_code TEXT NOT NULL,
+                        concept_name TEXT,
+                        pct_change REAL,
+                        turnover REAL,
+                        up_count INTEGER,
+                        down_count INTEGER,
+                        data_source TEXT DEFAULT 'ths',
+                        UNIQUE(trade_date, concept_code)
+                    )
+                """)
+                # concept_member（概念板块成分股映射）
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS concept_member (
+                        concept_code TEXT NOT NULL,
+                        concept_name TEXT,
+                        ts_code TEXT NOT NULL,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(concept_code, ts_code)
+                    )
+                """)
                 # south_flow
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS south_flow (
@@ -823,6 +864,69 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 央行资产负债表保存失败: {e}")
+            return 0
+
+    def save_market_valuation_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存大盘估值数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO market_valuation (date, pe_median, pe_quantile, pe_lyr_median, pb_median, pb_quantile, equity_bond_spread, ebs_ma, csi300_close, data_source, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r["date"], r.get("pe_median"), r.get("pe_quantile"), r.get("pe_lyr_median"), r.get("pb_median"), r.get("pb_quantile"), r.get("equity_bond_spread"), r.get("ebs_ma"), r.get("csi300_close"), r.get("data_source", "legu"), r.get("data_date"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 大盘估值数据保存失败: {e}")
+            return 0
+
+    def save_concept_board_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存概念板块日频行情数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO concept_board (trade_date, concept_code, concept_name, pct_change, turnover, up_count, down_count, data_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (r.get("trade_date"), r.get("concept_code"), r.get("concept_name"), r.get("pct_change"), r.get("turnover"), r.get("up_count"), r.get("down_count"), r.get("data_source", "ths"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 概念板块数据保存失败: {e}")
+            return 0
+
+    def save_concept_member_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存概念板块成分股映射数据。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO concept_member (concept_code, concept_name, ts_code) VALUES (?, ?, ?)",
+                    [
+                        (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"))
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 概念板块成分股数据保存失败: {e}")
             return 0
 
     def save_south_flow_batch(self, records: list[dict[str, Any]]) -> int:
