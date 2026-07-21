@@ -76,7 +76,7 @@ from interface import (
 # ── Task module re-exports ──
 from tasks.bars import _update_single_bar, update_bars  # noqa: F401
 from tasks.china_macro import update_china_macro
-from tasks.concept_board import update_concept_board
+from tasks.concept_board import update_concept_board, update_concept_member
 from tasks.convertible_bond import (
     update_cb_index,
     update_cb_quotation,
@@ -444,6 +444,8 @@ def main():
             update_market_valuation(db)
         elif args.task == "update_concept_board":
             update_concept_board(db)
+        elif args.task == "update_concept_member":
+            update_concept_member(db)
         elif args.task == "update_option_sentiment":
             update_option_sentiment(db)
         elif args.task == "update_stock_repurchase":
