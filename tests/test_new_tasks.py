@@ -17,7 +17,58 @@ import tasks.convertible_bond as convertible_bond
 import tasks.corporate_actions as corporate_actions
 import tasks.finance_flow as finance_flow
 import tasks.index_chain as index_chain
+import tasks.money_market as money_market
 import tasks.sector_derivatives as sector_derivatives
+
+# ===========================================================================
+# money_market
+# ===========================================================================
+
+
+def _mock_ak_money_market() -> MagicMock:
+    ak = MagicMock()
+    ak.macro_china_shibor_all.return_value = pd.DataFrame({
+        "日期": ["2024-01-02", "2024-01-03"],
+        "O/N-定价": [1.5, 1.6], "1W-定价": [1.8, 1.9], "2W-定价": [2.0, 2.1],
+        "1M-定价": [2.2, 2.3], "3M-定价": [2.5, 2.6], "6M-定价": [2.7, 2.8],
+        "9M-定价": [2.9, 3.0], "1Y-定价": [3.1, 3.2],
+    })
+    ak.repo_rate_query.return_value = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03"],
+        "FR001": [1.2, 1.3], "FR007": [1.5, 1.6], "FR014": [1.8, 1.9],
+    })
+    ak.macro_bank_china_interest_rate.return_value = pd.DataFrame({
+        "日期": ["2024-01-17"], "今值": [3.45],
+    })
+    ak.macro_china_central_bank_balance.return_value = pd.DataFrame({
+        "统计时间": ["2024.12"], "总资产": [400000], "储备货币": [350000],
+        "发行货币": [120000], "对其他存款性公司债权": [150000],
+        "对政府债权": [50000], "政府存款": [30000],
+        "国外资产": [200000], "外汇": [180000],
+    })
+    return ak
+
+
+def test_update_money_market_runs_all_fetchers():
+    ak = _mock_ak_money_market()
+    db = MagicMock()
+    db.save_money_market_batch.return_value = 1
+    db.save_central_bank_balance_batch.return_value = 1
+    with patch.object(money_market, "ak", ak):
+        result = money_market.update_money_market(db)
+    assert "daily_saved" in result
+    assert "balance_saved" in result
+    assert db.save_money_market_batch.called
+    assert db.save_central_bank_balance_batch.called
+
+
+def test_update_money_market_ak_none():
+    db = MagicMock()
+    with patch.object(money_market, "ak", None):
+        result = money_market.update_money_market(db)
+    assert result["saved"] == 0
+    assert "error" in result
+
 
 # ===========================================================================
 # china_macro
@@ -27,69 +78,65 @@ import tasks.sector_derivatives as sector_derivatives
 def _mock_ak_china_macro() -> MagicMock:
     ak = MagicMock()
     ak.macro_china_cpi.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "cpi当月同比": [0.2], "cpi当月环比": [0.1], "cpi核心当月同比": [0.3]}
+        {"月份": ["2024-01"], "全国-同比增长": [0.2], "全国-环比增长": [0.1]}
     )
     ak.macro_china_ppi.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "ppi当月同比": [0.3], "ppi当月环比": [0.2]}
+        {"月份": ["2024-01"], "当月": [0.3], "当月同比增长": [0.2]}
     )
     ak.macro_china_pmi.return_value = pd.DataFrame(
-        {
-            "年": [2024], "月": [1], "制造业PMI": [50.5], "制造业PMI同比增长": [1.0],
-            "制造业PMI环比变化": [0.5], "制造业PMI环比": [0.2],
-        }
+        {"月份": ["2024-01"], "制造业-指数": [50.5], "制造业-同比增长": [1.0]}
     )
     ak.macro_china_cx_pmi_yearly.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "财新制造业PMI": [51.0]}
+        {"日期": ["2024-01-01"], "今值": [51.0]}
     )
     ak.macro_china_money_supply.return_value = pd.DataFrame(
         {
-            "年": [2024], "月": [1], "M0": [10], "M0同比": [1], "M1": [20], "M1同比": [2],
-            "M2": [30], "M2同比": [3],
+            "月份": ["2024-01"],
+            "货币和准货币(M2)-数量(亿元)": [300], "货币和准货币(M2)-同比增长": [8.0],
+            "货币(M1)-数量(亿元)": [100], "货币(M1)-同比增长": [3.0],
+            "流通中的现金(M0)-数量(亿元)": [10], "流通中的现金(M0)-同比增长": [1.0],
         }
     )
     ak.macro_china_new_financial_credit.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "新增贷款": [100], "新增贷款同比": [5]}
+        {"月份": ["2024-01"], "当月": [100], "当月-同比增长": [5.0]}
     )
     ak.macro_china_consumer_goods_retail.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "社会消费品零售总额同比增长": [4], "社会消费品零售总额累计增长": [4.5]}
+        {"月份": ["2024-01"], "同比增长": [4.0], "累计-同比增长": [4.5]}
     )
     ak.macro_china_gdzctz.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "固定资产投资完成额同比增长": [3], "固定资产投资完成额累计增长": [3.5]}
+        {"月份": ["2024-01"], "同比增长": [3.0], "自年初累计": [3.5]}
     )
     ak.macro_china_hgjck.return_value = pd.DataFrame(
         {
-            "年": [2024], "月": [1], "出口总额": [100], "出口总额同比增长": [2],
-            "进口总额": [90], "进口总额同比增长": [1],
+            "月份": ["2024-01"],
+            "当月出口额-金额": [100], "当月出口额-同比增长": [2.0],
+            "当月进口额-金额": [90], "当月进口额-同比增长": [1.0],
         }
     )
     ak.macro_china_industrial_production_yoy.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "工业增加值同比增长": [5], "工业增加值累计增长": [5.5]}
+        {"日期": ["2024-01-01"], "今值": [5.0]}
     )
     ak.macro_china_society_electricity.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "全社会用电量同比增长": [6], "全社会用电量": [7000]}
+        {"统计时间": ["2024.1"], "全社会用电量": [7000], "全社会用电量同比": [6.0]}
     )
     ak.macro_china_qyspjg.return_value = pd.DataFrame(
-        {"年": [2024], "月": [1], "企业商品价格同比": [1], "企业商品价格环比": [0.5]}
+        {"月份": ["2024-01"], "总指数-指数值": [105], "总指数-同比增长": [1.0], "总指数-环比增长": [0.5]}
     )
     ak.macro_china_xfzxx.return_value = pd.DataFrame(
         {
-            "年": [2024], "月": [1], "消费者信心指数": [120], "消费者满意指数": [115],
-            "消费者预期指数": [125],
+            "月份": ["2024-01"],
+            "消费者信心指数-指数值": [120], "消费者满意指数-指数值": [115],
+            "消费者预期指数-指数值": [125],
         }
     )
     ak.macro_china_lpr.return_value = pd.DataFrame(
-        {"日期": ["2024-01-01", "2024-01-01"], "利率名称": ["1年期LPR", "5年期LPR"], "利率": [3.45, 3.95]}
+        {"TRADE_DATE": ["2024-01-01"], "LPR1Y": [3.45], "LPR5Y": [3.95]}
     )
     ak.macro_china_gdp.return_value = pd.DataFrame(
         {
-            "季度": ["2024年第一季度"], "国内生产总值": [300000], "同比增长": [5.0], "环比增长": [1.0],
-            "第一产业": [10000], "第二产业": [120000], "第三产业": [170000],
-        }
-    )
-    ak.macro_china_shibor_all.return_value = pd.DataFrame(
-        {
-            "日期": ["2024-01-01"], "ON": [1.0], "1W": [1.5], "2W": [2.0], "1M": [2.5],
-            "3M": [3.0], "6M": [3.5], "9M": [3.7], "1Y": [4.0],
+            "季度": ["2024年第一季度"], "国内生产总值（亿元）": [300000], "GDP同比增长": [5.0],
+            "GDP环比增长": [1.0], "第一产业（亿元）": [10000], "第二产业（亿元）": [120000],
+            "第三产业（亿元）": [170000],
         }
     )
     return ak
@@ -100,15 +147,12 @@ def test_update_china_macro_runs_all_fetchers():
     db = MagicMock()
     db.save_macro_monthly_batch.return_value = 1
     db.save_macro_quarterly_batch.return_value = 1
-    db.save_macro_daily_batch.return_value = 1
     with patch.object(china_macro, "ak", ak):
         result = china_macro.update_china_macro(db)
     assert "monthly_saved" in result
     assert "quarterly_saved" in result
-    assert "daily_saved" in result
     assert db.save_macro_monthly_batch.called
     assert db.save_macro_quarterly_batch.called
-    assert db.save_macro_daily_batch.called
 
 
 def test_update_china_macro_ak_none():
