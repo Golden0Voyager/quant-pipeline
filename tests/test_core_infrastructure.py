@@ -195,17 +195,21 @@ class TestDetectMacosProxy:
     def test_already_set(self):
         """代理变量已存在 → 不执行 scutil。"""
         from core.config import _detect_macos_proxy
-        with patch.dict(os.environ, {"HTTP_PROXY": "http://existing:8080"}, clear=False):
-            with patch("core.config.subprocess.run") as mock_run:
-                _detect_macos_proxy()
-                mock_run.assert_not_called()
+        with (
+            patch.dict(os.environ, {"HTTP_PROXY": "http://existing:8080"}, clear=False),
+            patch("core.config.subprocess.run") as mock_run,
+        ):
+            _detect_macos_proxy()
+            mock_run.assert_not_called()
 
     def test_scutil_fails_gracefully(self):
         """subprocess.run 异常 → 静默捕获。"""
         from core.config import _detect_macos_proxy
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("core.config.subprocess.run", side_effect=FileNotFoundError("no scutil")):
-                _detect_macos_proxy()  # Should not raise
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("core.config.subprocess.run", side_effect=FileNotFoundError("no scutil")),
+        ):
+            _detect_macos_proxy()  # Should not raise
 
     def test_scutil_no_http_enable(self):
         """scutil 返回 HTTPEnable: 0 → 不设代理。"""

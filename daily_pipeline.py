@@ -52,7 +52,7 @@ from core.config import (
 from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
 )
-from core.lock import ProcessLock
+from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
 from core.runner import safe_task
@@ -316,13 +316,18 @@ def main():
         else:
             symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
-    lock_acquired = False
+    task_lock_name: str | None = None
     db = None
     try:
-        # 进程锁：防止多实例同时运行（health_check 除外）
-        if args.task != "health_check":
+        # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
+        # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
+        if args.task == "all":
             _acquire_lock()
-            lock_acquired = True
+        elif args.task != "health_check":
+            if not TaskLock.acquire(args.task):
+                print(f"❌ 任务 {args.task} 已在运行，请勿重复启动")
+                sys.exit(1)
+            task_lock_name = args.task
 
         # 初始化 provider
         ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
@@ -467,8 +472,8 @@ def main():
     finally:
         if db is not None:
             db.close()
-        if lock_acquired:
-            _release_lock()
+        if task_lock_name:
+            TaskLock.release(task_lock_name)
 
 
 if __name__ == "__main__":

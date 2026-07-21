@@ -71,6 +71,10 @@ class DatabaseInterface(Protocol):
         """保存技术指标数据。"""
         ...
 
+    def save_indicators_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存技术指标数据，返回实际保存条数。"""
+        ...
+
     def save_fundamentals_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存基本面/估值数据，返回实际保存条数。"""
         ...

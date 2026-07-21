@@ -1,9 +1,4 @@
-"""
-期权情绪数据更新任务
-────────────────────
-QVIX 波动率指数 + 50ETF 期权 PCR (Put/Call Ratio)。
-来源: legulegu (qvix) + sse (50ETF 期权日频)。
-"""
+"""期权情绪数据更新任务——QVIX 波动率指数 + 50ETF 期权 PCR (Put/Call Ratio)。"""
 
 from __future__ import annotations
 
@@ -12,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface
 
 try:
@@ -85,44 +81,50 @@ def _fetch_50etf_daily() -> list[dict]:
     """获取上证50ETF期权日频行情，含成交量、持仓量、PCR。
 
     原接口 ``ak.stock_option_sse_50etf_daily`` 已在 akshare 新版中移除，
-    目前无等效返回 PCR / 认沽认购成交量的历史日频接口。保留函数占位，
-    若未来 akshare 恢复可用接口可在此扩展。
+    改用 ``ak.option_daily_stats_sse`` 获取上交所期权每日统计，过滤 510050。
     """
-    if ak is None or not hasattr(ak, "stock_option_sse_50etf_daily"):
-        logger.warning(
-            "⚠️ akshare 已移除 stock_option_sse_50etf_daily 接口，"
-            "50ETF 期权 PCR 数据暂无法获取"
-        )
+    if ak is None or not hasattr(ak, "option_daily_stats_sse"):
+        logger.warning("⚠️ akshare 缺少 option_daily_stats_sse 接口，50ETF 期权 PCR 数据暂无法获取")
         return []
-    df = _try_get_ak_df(ak.stock_option_sse_50etf_daily)
+
+    trade_date = get_expected_latest_trading_day()
+    df = _try_get_ak_df(ak.option_daily_stats_sse, date=trade_date.replace("-", ""))
     if df is None or df.empty:
         return []
-    records = []
-    for _, row in df.iterrows():
-        date_val = row.get("date") or row.get("日期")
-        if date_val is None:
-            continue
-        date_str = str(date_val).strip()[:10]
-        if not date_str:
-            continue
-        put_vol = _to_int(row.get("put_volume") or row.get("认沽成交量"))
-        call_vol = _to_int(row.get("call_volume") or row.get("认购成交量"))
-        put_oi_val = _to_int(row.get("put_oi") or row.get("认沽持仓量"))
-        call_oi_val = _to_int(row.get("call_oi") or row.get("认购持仓量"))
-        pcr = None
-        if call_vol is not None and call_vol > 0 and put_vol is not None:
-            pcr = round(put_vol / call_vol, 4)
-        implied_vol = _to_float(row.get("implied_vol_avg") or row.get("隐含波动率均值"))
-        records.append({
-            "trade_date": date_str,
-            "pcr": pcr,
-            "put_volume": put_vol,
-            "call_volume": call_vol,
-            "put_oi": put_oi_val,
-            "call_oi": call_oi_val,
-            "implied_vol_avg": implied_vol,
-        })
-    return records
+
+    # 兼容新旧列名
+    code_col = next((c for c in df.columns if "合约标的代码" in c), None)
+    put_vol_col = next((c for c in df.columns if "认沽成交量" in c), None)
+    call_vol_col = next((c for c in df.columns if "认购成交量" in c), None)
+    put_oi_col = next((c for c in df.columns if "未平仓认沽合约数" in c), None)
+    call_oi_col = next((c for c in df.columns if "未平仓认购合约数" in c), None)
+    pcr_col = next((c for c in df.columns if "认沽/认购" in c), None)
+
+    if code_col is None or put_vol_col is None or call_vol_col is None:
+        logger.warning("⚠️ 上交所期权每日统计返回列名异常，跳过 50ETF PCR")
+        return []
+
+    row = df[df[code_col] == "510050"]
+    if row.empty:
+        return []
+
+    row = row.iloc[0]
+    put_vol = _to_int(row.get(put_vol_col))
+    call_vol = _to_int(row.get(call_vol_col))
+    put_oi_val = _to_int(row.get(put_oi_col)) if put_oi_col else None
+    call_oi_val = _to_int(row.get(call_oi_col)) if call_oi_col else None
+    pcr = _to_float(row.get(pcr_col)) if pcr_col else None
+    if pcr is None and call_vol is not None and call_vol > 0 and put_vol is not None:
+        pcr = round(put_vol / call_vol, 4)
+
+    return [{
+        "trade_date": trade_date,
+        "pcr": pcr,
+        "put_volume": put_vol,
+        "call_volume": call_vol,
+        "put_oi": put_oi_val,
+        "call_oi": call_oi_val,
+    }]
 
 
 # ===========================================================================

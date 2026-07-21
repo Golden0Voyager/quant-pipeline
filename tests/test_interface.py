@@ -61,6 +61,10 @@ class MockDatabase:
     def save_indicators(self, symbol: str, df: pd.DataFrame) -> None:
         self._record("save_indicators", symbol, df)
 
+    def save_indicators_batch(self, records: list[dict]) -> int:
+        self._record("save_indicators_batch", records)
+        return len(records)
+
     def save_fundamentals_batch(self, records: list[dict]) -> int:
         self._record("save_fundamentals_batch", records)
         return len(records)
@@ -298,6 +302,7 @@ def test_database_interface_contract():
     db.save_stock_list(sample_df)
     db.save_daily_bars("000001.SZ", sample_df)
     db.save_indicators("000001.SZ", sample_df)
+    assert db.save_indicators_batch([{"ts_code": "000001.SZ", "trade_date": "2024-01-01", "macd_hist": 0.1}]) == 1
 
     assert db.save_fundamentals_batch([{"pe": 10.0}]) == 1
     assert db.save_fund_flow_batch([{"main": 100.0}]) == 1

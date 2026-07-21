@@ -95,10 +95,17 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
 
     records = []
     for _, row in df.iterrows():
+        ts_code = str(row.get("ts_code") or "").strip()
+        trade_date = row.get("trade_date")
+        # 沪深交易所 2024-08-19 起停止每日个股北向披露；akshare 新版
+        # stock_hsgt_individual_em 需指定 symbol 且不再返回个股代码列，
+        # 没有有效代码/日期的记录不应写入 north_hold（NOT NULL 约束）。
+        if not ts_code or not trade_date:
+            continue
         records.append({
-            "ts_code": str(row.get("ts_code") or "").strip(),
+            "ts_code": ts_code,
             "security_name": str(row.get("security_name") or "").strip(),
-            "trade_date": row.get("trade_date"),
+            "trade_date": trade_date,
             "close_price": _to_float(row.get("close_price")),
             "hold_shares": _to_float(row.get("hold_shares")),
             "hold_market_cap": _to_float(row.get("hold_market_cap")),
@@ -108,7 +115,10 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
         })
 
     if not records:
-        logger.warning("⚠️ 北向个股持仓记录为空")
+        logger.warning(
+            "⚠️ 北向个股持仓记录为空。自 2024-08-19 起交易所不再披露每日个股北向数据，"
+            "当前 akshare 接口也已变更，需指定 symbol 获取单只股票历史。"
+        )
         return {"saved": 0, "total": raw_count}
 
     saved = db.save_north_hold_batch(records)

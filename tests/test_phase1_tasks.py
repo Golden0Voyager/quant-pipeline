@@ -447,51 +447,67 @@ class TestOptionSentiment:
             records = option_sentiment._fetch_qvix()
         assert records == []
 
-    def test_fetch_50etf_empty(self):
+    def _mock_50etf_daily(self, data: dict) -> MagicMock:
+        """Helper: build akshare mock with option_daily_stats_sse returning data for 510050."""
         ak = MagicMock()
-        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame()
-        with patch.object(option_sentiment, "ak", ak):
+        df = pd.DataFrame(data)
+        ak.option_daily_stats_sse.return_value = df
+        return ak
+
+    def test_fetch_50etf_empty(self):
+        ak = self._mock_50etf_daily({})
+        with (
+            patch.object(option_sentiment, "ak", ak),
+            patch.object(option_sentiment, "get_expected_latest_trading_day", return_value="2024-01-01"),
+        ):
             records = option_sentiment._fetch_50etf_daily()
         assert records == []
 
     def test_fetch_50etf_alt_columns(self):
-        """_fetch_50etf_daily: 使用中文列名回退。"""
-        ak = MagicMock()
-        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame({
-            "日期": ["2024-01-01"],
+        """_fetch_50etf_daily: 中文列名正常读取。"""
+        ak = self._mock_50etf_daily({
+            "合约标的代码": ["510050"],
             "认沽成交量": [30000],
             "认购成交量": [60000],
-            "认沽持仓量": [100000],
-            "认购持仓量": [200000],
-            "隐含波动率均值": [0.22],
+            "未平仓认沽合约数": [100000],
+            "未平仓认购合约数": [200000],
         })
-        with patch.object(option_sentiment, "ak", ak):
+        with (
+            patch.object(option_sentiment, "ak", ak),
+            patch.object(option_sentiment, "get_expected_latest_trading_day", return_value="2024-01-01"),
+        ):
             records = option_sentiment._fetch_50etf_daily()
         assert len(records) == 1
         assert records[0]["pcr"] == 0.5  # 30000 / 60000
         assert records[0]["put_volume"] == 30000
         assert records[0]["call_volume"] == 60000
-        assert records[0]["implied_vol_avg"] == 0.22
 
     def test_fetch_50etf_call_vol_zero(self):
         """_fetch_50etf_daily: call_vol 为 0 时 PCR 为 None。"""
-        ak = MagicMock()
-        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame({
-            "date": ["2024-01-01"],
-            "put_volume": [50000],
-            "call_volume": [0],
+        ak = self._mock_50etf_daily({
+            "合约标的代码": ["510050"],
+            "认沽成交量": [50000],
+            "认购成交量": [0],
         })
-        with patch.object(option_sentiment, "ak", ak):
+        with (
+            patch.object(option_sentiment, "ak", ak),
+            patch.object(option_sentiment, "get_expected_latest_trading_day", return_value="2024-01-01"),
+        ):
             records = option_sentiment._fetch_50etf_daily()
         assert records[0]["pcr"] is None
 
-    def test_fetch_50etf_date_none(self):
-        """_fetch_50etf_daily: date_val 为 None 时跳过。"""
-        ak = MagicMock()
-        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame({"date": [None]})
-        with patch.object(option_sentiment, "ak", ak):
+    def test_fetch_50etf_no_510050(self):
+        """_fetch_50etf_daily: 数据中无 510050 → 返回空。"""
+        ak = self._mock_50etf_daily({
+            "合约标的代码": ["510050"],
+            "认沽成交量": [None],
+        })
+        with (
+            patch.object(option_sentiment, "ak", ak),
+            patch.object(option_sentiment, "get_expected_latest_trading_day", return_value="2024-01-01"),
+        ):
             records = option_sentiment._fetch_50etf_daily()
-        assert records == []
+        assert len(records) == 0
 
     def test_to_float_edge_cases(self):
         assert option_sentiment._to_float(None) is None

@@ -552,6 +552,73 @@ class SmartMoneyDBProvider:
     def save_indicators(self, symbol: str, df: pd.DataFrame) -> None:
         self._db.save_indicators(symbol, df)
 
+    def save_indicators_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存技术指标数据（使用共享写连接 + 写锁）。
+
+        避免 ThreadPoolExecutor 并发写入时每只股票单独开连接/提交，
+        把多只股票的指标行合并为一次 executemany + 一次 commit。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO indicators (
+                        ts_code, trade_date, close, volume,
+                        ma5, ma10, ma20, ma60, ma120, ma250,
+                        vol_ma5, vol_ma50, vol_ma60,
+                        boll_upper, boll_mid, boll_lower, boll_bandwidth,
+                        cyc60, chip_concentration,
+                        macd_dif, macd_dea, macd_hist,
+                        kdj_k, kdj_d, kdj_j,
+                        rsi6, rsi12, rsi24,
+                        cci
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r.get("ts_code"),
+                            r.get("trade_date"),
+                            r.get("close"),
+                            r.get("volume"),
+                            r.get("ma5"),
+                            r.get("ma10"),
+                            r.get("ma20"),
+                            r.get("ma60"),
+                            r.get("ma120"),
+                            r.get("ma250"),
+                            r.get("vol_ma5"),
+                            r.get("vol_ma50"),
+                            r.get("vol_ma60"),
+                            r.get("boll_upper"),
+                            r.get("boll_mid"),
+                            r.get("boll_lower"),
+                            r.get("boll_bandwidth"),
+                            r.get("cyc60"),
+                            r.get("chip_concentration"),
+                            r.get("macd_dif"),
+                            r.get("macd_dea"),
+                            r.get("macd_hist"),
+                            r.get("kdj_k"),
+                            r.get("kdj_d"),
+                            r.get("kdj_j"),
+                            r.get("rsi6"),
+                            r.get("rsi12"),
+                            r.get("rsi24"),
+                            r.get("cci"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 技术指标批量保存失败: {e}")
+            return 0
+
     def save_fundamentals(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_fundamentals(symbol, data)
 

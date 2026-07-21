@@ -274,13 +274,13 @@ class TestGetJsRuntime:
 
     def test_miniracer_import_fail_returns_none(self):
         """MiniRacer 导入失败 → 返回 None。"""
-        with patch.dict("sys.modules", {"py_mini_racer": None}):
-            # 伪造 MiniRacer 不可用
-            with patch("core.stock_cyq_em.MiniRacer", None):
-                # 重新设置全局标志
-                with patch("core.stock_cyq_em._JS_INITIALIZED", False):
-                    result = _get_js_runtime()
-                    assert result is None
+        with (
+            patch.dict("sys.modules", {"py_mini_racer": None}),
+            patch("core.stock_cyq_em.MiniRacer", None),
+            patch("core.stock_cyq_em._JS_INITIALIZED", False),
+        ):
+            result = _get_js_runtime()
+            assert result is None
 
     def test_js_runtime_fails_returns_none(self):
         """MiniRacer init 正常但 eval 失败 → 返回 None。"""
@@ -301,9 +301,11 @@ class TestCalcOneDay:
 
     def test_js_runtime_none_raises(self):
         """JS runtime 为 None → 抛出 RuntimeError。"""
-        with patch("core.stock_cyq_em._get_js_runtime", return_value=None):
-            with pytest.raises(RuntimeError, match="MiniRacer 未初始化"):
-                _calc_one_day([{"date": "2024-01-01", "open": 10.0, "close": 11.0, "high": 12.0, "low": 9.0, "volume": 1000}], 0)
+        with (
+            patch("core.stock_cyq_em._get_js_runtime", return_value=None),
+            pytest.raises(RuntimeError, match="MiniRacer 未初始化"),
+        ):
+            _calc_one_day([{"date": "2024-01-01", "open": 10.0, "close": 11.0, "high": 12.0, "low": 9.0, "volume": 1000}], 0)
 
     def test_calls_js_runtime(self):
         """正常路径 → 调用 js_env.call('CYQCalculator', ...)。"""
@@ -767,21 +769,25 @@ class TestStockCyqEm:
 
     def test_all_sources_fail_raises_connection_error(self):
         """全部数据源失败 → 抛出 ConnectionError。"""
-        with patch("core.stock_cyq_em._fetch_kline_em", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_db", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_sina", return_value=None):
-            with pytest.raises(ConnectionError, match="均无法获取"):
-                stock_cyq_em("000001", use_local_db=True)
+        with (
+            patch("core.stock_cyq_em._fetch_kline_em", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_db", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_sina", return_value=None),
+            pytest.raises(ConnectionError, match="均无法获取"),
+        ):
+            stock_cyq_em("000001", use_local_db=True)
 
     def test_symbol_suffix_stripped(self):
         """symbol 带 .SZ/.SH 后缀 → 正确剥离传给级联。"""
-        with patch("core.stock_cyq_em._fetch_kline_em", return_value=None) as mock_em, \
-             patch("core.stock_cyq_em._fetch_kline_db", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_sina", return_value=None):
-            with pytest.raises(ConnectionError):
-                stock_cyq_em("000001.SZ", use_local_db=False)
+        with (
+            patch("core.stock_cyq_em._fetch_kline_em", return_value=None) as mock_em,
+            patch("core.stock_cyq_em._fetch_kline_db", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_sina", return_value=None),
+            pytest.raises(ConnectionError),
+        ):
+            stock_cyq_em("000001.SZ", use_local_db=False)
             # 验证传给 _fetch_kline_em 的是纯代码
             call_ts_code = mock_em.call_args[0][0]
             assert call_ts_code == "000001"

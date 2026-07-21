@@ -83,7 +83,7 @@ class TestAllClassified:
             ("600000", "sh", "保险"),
         ])
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time:
+             patch.object(financials, "time"):
             result = financials.update_industry(db)
         assert result["saved"] == 0
         assert result["total"] == 0
@@ -107,7 +107,7 @@ class TestStrategyA:
         f10_resp = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
@@ -139,7 +139,7 @@ class TestStrategyA:
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -171,7 +171,7 @@ class TestStrategyA:
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -194,7 +194,7 @@ class TestStrategyA:
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -230,7 +230,7 @@ class TestStrategyBFallback:
         })
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", ak), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -254,7 +254,7 @@ class TestStrategyBFallback:
         ak.stock_individual_info_em.return_value = pd.DataFrame()
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", ak), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -293,7 +293,7 @@ class TestStrategyCFallback:
         sina_ok = _mock_resp(200, text=html)
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -318,7 +318,7 @@ class TestStrategyCFallback:
         sina_fail = _mock_resp(200, text=html)
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -365,7 +365,7 @@ class TestF10Blocked:
             return sina_ok
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -413,7 +413,7 @@ class TestAllStrategiesFail:
         sina_err = _mock_resp(404)
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -450,7 +450,7 @@ class TestBatchProcessing:
         f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
@@ -467,7 +467,7 @@ class TestBatchProcessing:
             "SELECT code, industry FROM stock_list ORDER BY code"
         ).fetchall()
         assert len(rows) == 3
-        for code, industry in rows:
+        for _, industry in rows:
             assert industry == "银行"
         conn.close()
 
@@ -506,7 +506,7 @@ class TestBatchProcessing:
                 return sina_err
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
@@ -572,7 +572,7 @@ class TestExchangePrefix:
         f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
@@ -594,7 +594,7 @@ class TestExchangePrefix:
         f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
@@ -615,7 +615,7 @@ class TestExchangePrefix:
         f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
-             patch.object(financials, "time") as mock_time, \
+             patch.object(financials, "time"), \
              patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
