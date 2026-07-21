@@ -4,7 +4,7 @@ The newly-added network task modules (china_macro / convertible_bond /
 corporate_actions / finance_flow / sector_derivatives / index_chain) are the
 biggest coverage gaps. These tests mock ``akshare`` so no network calls are
 made, while still exercising every ``_fetch_*`` helper and ``update_*`` entry
-point to raise line coverage above the 85% gate.
+point to raise line coverage above the 85% gate (PR #28).
 """
 
 from __future__ import annotations
