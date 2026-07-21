@@ -11,6 +11,7 @@ import logging
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -51,10 +52,10 @@ def _fetch_south_flow() -> list[dict]:
         col_map = {
             "日期": "trade_date",
             "板块": "market",
-            "成交净买额": "net_buy_amount",
-            "买入额": "buy_amount",
-            "卖出额": "sell_amount",
-            "历史净流入": "cumulative_net_buy",
+            "当日成交净买额": "net_buy_amount",
+            "买入成交额": "buy_amount",
+            "卖出成交额": "sell_amount",
+            "历史累计净买额": "cumulative_net_buy",
         }
         rename = {k: v for k, v in col_map.items() if k in df.columns}
         df = df.rename(columns=rename)
@@ -63,7 +64,7 @@ def _fetch_south_flow() -> list[dict]:
             records.append(
                 {
                     "trade_date": str(row.get("trade_date", ""))[:10],
-                    "market": str(row.get("market", "")).strip(),
+                    "market": str(row.get("market", "") or "南向").strip(),
                     "net_buy_amount": _to_float(row.get("net_buy_amount")),
                     "buy_amount": _to_float(row.get("buy_amount")),
                     "sell_amount": _to_float(row.get("sell_amount")),
@@ -88,6 +89,7 @@ def update_south_flow(db: DatabaseInterface) -> dict:
         if not records:
             logger.warning("⚠️ 南向资金无数据")
             return {"saved": 0, "total": 0}
+        warn_if_all_empty(records, ["net_buy_amount", "buy_amount"], "south_flow")
         saved = db.save_south_flow_batch(records)
         logger.info(f"✅ 南向资金保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}
@@ -190,19 +192,14 @@ _ETF_CODES: list[tuple[str, str]] = [
 ]
 
 
-def _etf_market_prefix(code: str) -> str:
-    return "sh" if code.startswith(("51", "52", "588")) else "sz"
-
-
 def _fetch_etf_daily(start_date: str, end_date: str) -> list[dict]:
     if ak is None:
         return []
     records: list[dict] = []
     for code, name in _ETF_CODES:
         try:
-            symbol = _etf_market_prefix(code) + code
             df = ak.fund_etf_hist_em(
-                symbol=symbol,
+                symbol=code,
                 period="daily",
                 start_date=start_date,
                 end_date=end_date,
@@ -256,6 +253,7 @@ def update_etf_daily(db: DatabaseInterface) -> dict:
         if not records:
             logger.warning("⚠️ ETF 日线无数据")
             return {"saved": 0, "total": 0}
+        warn_if_all_empty(records, ["close", "volume"], "etf_daily")
         saved = db.save_etf_daily_batch(records)
         logger.info(f"✅ ETF 日线保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}

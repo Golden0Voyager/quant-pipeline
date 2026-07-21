@@ -231,14 +231,14 @@ def _mock_ak_corporate_actions() -> MagicMock:
     ak = MagicMock()
     ak.stock_restricted_release_detail_em.return_value = pd.DataFrame(
         {
-            "代码": ["000001"], "名称": ["平安银行"], "实际解禁数量": [100.5],
-            "总解禁量": [200.5], "市场类型": ["深市"],
+            "股票代码": ["000001"], "股票简称": ["平安银行"], "解禁时间": ["2026-07-15"],
+            "限售股类型": ["首发原股东限售股份"], "实际解禁数量": [100.5], "解禁数量": [200.5],
         }
     )
-    ak.stock_profit_forecast_em.return_value = pd.DataFrame(
+    ak.stock_yjyg_em.return_value = pd.DataFrame(
         {
-            "代码": ["000001"], "名称": ["平安银行"], "报告期": ["2026-06-30"],
-            "预告类型": ["预增"], "净利润变动幅度": ["50%"], "上年同期净利润": ["10亿"],
+            "股票代码": ["000001"], "股票简称": ["平安银行"], "预告类型": ["预增"],
+            "业绩变动幅度": [50.0], "上年同期值": [1.0e9],
         }
     )
     return ak
@@ -283,8 +283,8 @@ def _mock_ak_finance_flow() -> MagicMock:
     ak = MagicMock()
     ak.stock_hsgt_hist_em.return_value = pd.DataFrame(
         {
-            "日期": ["2024-01-01"], "板块": ["港股通"], "成交净买额": [1.0],
-            "买入额": [2.0], "卖出额": [1.0], "历史净流入": [100.0],
+            "日期": ["2024-01-01"], "当日成交净买额": [1.0],
+            "买入成交额": [2.0], "卖出成交额": [1.0], "历史累计净买额": [100.0],
         }
     )
     ak.stock_zh_ah_spot_em.return_value = pd.DataFrame(

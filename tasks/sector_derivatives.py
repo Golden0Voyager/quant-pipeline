@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
+from core.calendar import get_expected_latest_trading_day
+from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -72,6 +75,20 @@ def _to_float(val: Any) -> float | None:
         return None
 
 
+def _retry(fn, *, tries: int = 3, base_delay: float = 1.0, label: str = ""):
+    """对易受网络波动影响的 AkShare 调用做指数退避重试，全部失败返回 None。"""
+    last_exc: Exception | None = None
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — 网络类异常统一重试
+            last_exc = e
+            if i < tries - 1:
+                time.sleep(base_delay * (2**i))
+    logger.warning(f"⚠️ {label} 重试 {tries} 次仍失败: {last_exc}")
+    return None
+
+
 # ===========================================================================
 # 1. 行业板块涨跌幅
 # ===========================================================================
@@ -82,7 +99,9 @@ def _fetch_sector_daily() -> list[dict]:
     if ak is None:
         return []
     try:
-        board_df = ak.stock_board_industry_name_em()
+        board_df = _retry(
+            ak.stock_board_industry_name_em, label="行业板块列表"
+        )
         if board_df is None or board_df.empty:
             return []
         sector_names = board_df["板块名称"].tolist() if "板块名称" in board_df.columns else []
@@ -94,13 +113,17 @@ def _fetch_sector_daily() -> list[dict]:
         logger.info(f"📋 行业板块: {len(targets)} 个")
 
         records: list[dict] = []
+        start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+        end_date = datetime.now().strftime("%Y%m%d")
         for sector in targets:
             try:
-                end_date = datetime.now().strftime("%Y%m%d")
-                df = ak.stock_board_industry_hist_em(
-                    symbol=sector,
-                    start_date="20200101",
-                    end_date=end_date,
+                df = _retry(
+                    lambda s=sector, sd=start_date, ed=end_date: ak.stock_board_industry_hist_em(
+                        symbol=s,
+                        start_date=sd,
+                        end_date=ed,
+                    ),
+                    label=f"行业板块 {sector} 历史",
                 )
                 if df is None or df.empty:
                     continue
@@ -152,8 +175,14 @@ def _fetch_sector_valuation() -> list[dict]:
     if ak is None:
         return []
     try:
-        date_compact = datetime.now().strftime("%Y%m%d")
-        df = ak.stock_industry_pe_ratio_cninfo(date=date_compact)
+        # cninfo 估值接口需传有效交易日；用今天常返回空并触发内部 'records' 报错
+        date_compact = get_expected_latest_trading_day().replace("-", "")
+        df = _retry(
+            lambda: ak.stock_industry_pe_ratio_cninfo(
+                symbol="证监会行业分类", date=date_compact
+            ),
+            label="板块估值",
+        )
         if df is None or df.empty:
             return []
         col_map = {
@@ -211,25 +240,19 @@ def _fetch_index_futures_basis() -> list[dict]:
         return []
     records: list[dict] = []
     for futures_code, (index_code, index_name) in FUTURES_CONTRACTS.items():
-        try:
-            # 期货日线（可能超时，单独 try/except）
-            try:
-                futures_df = ak.futures_zh_daily_sina(symbol=futures_code)
-            except Exception as e:
-                logger.warning(f"⚠️ {futures_code}({index_name}) 期货数据获取失败(超时/其他): {e}")
-                continue
-            if futures_df is None or futures_df.empty:
-                logger.warning(f"⚠️ {futures_code} 期货数据为空")
-                continue
-        except Exception as e:
-            logger.warning(f"⚠️ {futures_code}({index_name}) 期货数据获取失败: {e}")
+        # 期货日线（新浪接口易超时，做退避重试）
+        futures_df = _retry(
+            lambda fc=futures_code: ak.futures_zh_daily_sina(symbol=fc),
+            label=f"{futures_code}({index_name}) 期货",
+        )
+        if futures_df is None or futures_df.empty:
             continue
 
-        try:
-            index_df = ak.stock_zh_index_daily_tx(symbol=index_code)
-        except Exception as e:
-            logger.warning(f"⚠️ {index_name}({index_code}) 指数数据获取失败: {e}")
-            continue
+        # 腾讯指数接口偶发 'qfqday' 内部错误，做退避重试
+        index_df = _retry(
+            lambda ic=index_code: ak.stock_zh_index_daily_tx(symbol=ic),
+            label=f"{index_name}({index_code}) 指数",
+        )
         if index_df is None or index_df.empty:
             continue
 
@@ -308,6 +331,7 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
     try:
         records = _fetch_sector_daily()
         if records:
+            warn_if_all_empty(records, ["close", "pct_change"], "sector_daily")
             saved = db.save_sector_daily_batch(records)
             results["sector_daily"] = saved
             logger.info(f"✅ 行业涨跌幅保存完成: {saved} 条")
@@ -322,6 +346,7 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
     try:
         records = _fetch_sector_valuation()
         if records:
+            warn_if_all_empty(records, ["pe", "total_mv"], "sector_valuation")
             saved = db.save_sector_valuation_batch(records)
             results["sector_valuation"] = saved
             logger.info(f"✅ 板块估值保存完成: {saved} 条")
@@ -336,6 +361,7 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
     try:
         records = _fetch_index_futures_basis()
         if records:
+            warn_if_all_empty(records, ["basis", "futures_price"], "index_futures_basis")
             saved = db.save_index_futures_basis_batch(records)
             results["index_futures_basis"] = saved
             logger.info(f"✅ 基差数据保存完成: {saved} 条")
