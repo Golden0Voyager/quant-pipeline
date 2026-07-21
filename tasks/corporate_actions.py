@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -41,51 +42,48 @@ def _to_float(value: object) -> float | None:
 def _fetch_restricted_share() -> list[dict]:
     """获取限售解禁数据。
 
-    stock_restricted_release_detail_em 按日期查询（YYYYMMDD 紧凑格式），
-    单日查询常返回空，故向后回溯数天尝试多个日期以获取有效记录。
+    ``stock_restricted_release_detail_em`` 接受日期区间（YYYYMMDD 紧凑格式），
+    单次查询近 30 天以覆盖最新解禁记录。列名以实际返回为准：
+    ``股票代码``/``股票简称``/``解禁时间``/``限售股类型``/``解禁数量``/``实际解禁数量``。
     """
     if ak is None:
         return []
     today = get_expected_latest_trading_day()
-    # 尝试今天及回溯最多 7 天
-    candidates = [today]
     base = datetime.strptime(today, "%Y-%m-%d")
-    for i in range(1, 8):
-        d = (base - timedelta(days=i)).strftime("%Y-%m-%d")
-        candidates.append(d)
+    start_compact = (base - timedelta(days=30)).strftime("%Y%m%d")
+    end_compact = base.strftime("%Y%m%d")
+
+    try:
+        df = ak.stock_restricted_release_detail_em(
+            start_date=start_compact,
+            end_date=end_compact,
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ 限售解禁获取失败: {e}")
+        return []
+    if df is None or df.empty:
+        return []
 
     seen: set[str] = set()
     records: list[dict] = []
-    for date_str in candidates:
-        date_compact = date_str.replace("-", "")
-        try:
-            df = ak.stock_restricted_release_detail_em(
-                start_date=date_compact,
-                end_date=date_compact,
-            )
-            if df is None or df.empty:
-                continue
-            for _, row in df.iterrows():
-                ts_code = str(row.get("代码", "")).strip()
-                # deduplicate by ts_code + release_date
-                release_date = date_str
-                key = f"{ts_code}_{release_date}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                records.append(
-                    {
-                        "ts_code": ts_code,
-                        "name": str(row.get("名称", "")).strip(),
-                        "release_date": release_date,
-                        "actual_release": _to_float(row.get("实际解禁数量")),
-                        "total_shares": _to_float(row.get("总解禁量")),
-                        "market_type": str(row.get("市场类型", "")).strip(),
-                        "data_source": "akshare",
-                    }
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ 限售解禁 {date_str} 获取失败: {e}")
+    for _, row in df.iterrows():
+        ts_code = str(row.get("股票代码", "")).strip()
+        release_date = str(row.get("解禁时间", ""))[:10]
+        key = f"{ts_code}_{release_date}"
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(
+            {
+                "ts_code": ts_code,
+                "name": str(row.get("股票简称", "")).strip(),
+                "release_date": release_date,
+                "actual_release": _to_float(row.get("实际解禁数量")),
+                "total_shares": _to_float(row.get("解禁数量")),
+                "market_type": str(row.get("限售股类型", "")).strip(),
+                "data_source": "akshare",
+            }
+        )
     return records
 
 
@@ -104,6 +102,7 @@ def update_restricted_share(db: DatabaseInterface) -> dict:
         if not records:
             logger.warning("⚠️ 限售解禁无数据")
             return {"saved": 0, "total": 0}
+        warn_if_all_empty(records, ["ts_code", "total_shares"], "restricted_share")
         saved = db.save_restricted_share_batch(records)
         logger.info(f"✅ 限售解禁保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}
@@ -117,31 +116,57 @@ def update_restricted_share(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
+def _recent_report_periods(count: int = 2) -> list[str]:
+    """返回最近 count 个已结束的财报报告期（YYYYMMDD），最新在前。"""
+    today = datetime.strptime(get_expected_latest_trading_day(), "%Y-%m-%d")
+    quarter_ends = [(3, 31), (6, 30), (9, 30), (12, 31)]
+    candidates = [
+        datetime(y, m, d)
+        for y in (today.year, today.year - 1)
+        for m, d in quarter_ends
+    ]
+    past = sorted((c for c in candidates if c <= today), reverse=True)
+    return [c.strftime("%Y%m%d") for c in past[:count]]
+
+
 def _fetch_earnings_forecast() -> list[dict]:
-    """获取全市场业绩预告数据。"""
+    """获取全市场业绩预告数据。
+
+    使用 ``ak.stock_yjyg_em(date=报告期)``（业绩预告，按报告期查询）。
+    早期误用的 ``stock_profit_forecast_em`` 实为券商 EPS 预测，字段不匹配。
+    实际列：``股票代码``/``股票简称``/``预告类型``/``业绩变动幅度``/``上年同期值``。
+    """
     if ak is None:
         return []
-    try:
-        df = ak.stock_profit_forecast_em()
+    seen: set[str] = set()
+    records: list[dict] = []
+    for period in _recent_report_periods(2):
+        end_date = f"{period[:4]}-{period[4:6]}-{period[6:]}"
+        try:
+            df = ak.stock_yjyg_em(date=period)
+        except Exception as e:
+            logger.warning(f"⚠️ 业绩预告 {period} 获取失败: {e}")
+            continue
         if df is None or df.empty:
-            return []
-        records: list[dict] = []
+            continue
         for _, row in df.iterrows():
+            ts_code = str(row.get("股票代码", "")).strip()
+            key = f"{ts_code}_{end_date}"
+            if key in seen:
+                continue
+            seen.add(key)
             records.append(
                 {
-                    "ts_code": str(row.get("代码", "")).strip(),
-                    "name": str(row.get("名称", "")).strip(),
-                    "end_date": str(row.get("报告期", ""))[:10],
+                    "ts_code": ts_code,
+                    "name": str(row.get("股票简称", "")).strip(),
+                    "end_date": end_date,
                     "forecast_type": str(row.get("预告类型", "")).strip(),
-                    "net_profit_change": row.get("净利润变动幅度"),
-                    "previous_profit": row.get("上年同期净利润"),
+                    "net_profit_change": _to_float(row.get("业绩变动幅度")),
+                    "previous_profit": _to_float(row.get("上年同期值")),
                     "data_source": "akshare",
                 }
             )
-        return records
-    except Exception as e:
-        logger.warning(f"⚠️ 业绩预告获取失败: {e}")
-        return []
+    return records
 
 
 def update_earnings_forecast(db: DatabaseInterface) -> dict:
@@ -159,6 +184,7 @@ def update_earnings_forecast(db: DatabaseInterface) -> dict:
         if not records:
             logger.warning("⚠️ 业绩预告无数据")
             return {"saved": 0, "total": 0}
+        warn_if_all_empty(records, ["forecast_type", "net_profit_change"], "earnings_forecast")
         saved = db.save_earnings_forecast_batch(records)
         logger.info(f"✅ 业绩预告保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}
