@@ -119,7 +119,6 @@ from tasks.macro import (
     update_us_treasury,
     update_usd,
 )
-from tasks.money_market import update_money_market
 from tasks.market_flow import (
     _fetch_sector_fund_flow,  # noqa: F401
     update_block_trade,
@@ -128,6 +127,7 @@ from tasks.market_flow import (
     update_margin_trading,
     update_sector_fund_flow,
 )
+from tasks.money_market import update_money_market
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
