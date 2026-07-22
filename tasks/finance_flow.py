@@ -7,10 +7,26 @@
 from __future__ import annotations
 
 import logging
+import random
+import sqlite3
+import time
+from datetime import datetime, timedelta
 
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.config import (
+    MAX_RETRY_VAL as MAX_RETRY,
+)
+from core.config import (
+    PER_STOCK_MAX_SLEEP_VAL as PER_STOCK_MAX_SLEEP,
+)
+from core.config import (
+    PER_STOCK_MIN_SLEEP_VAL as PER_STOCK_MIN_SLEEP,
+)
+from core.config import (
+    RETRY_DELAY_VAL as RETRY_DELAY,
+)
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -192,11 +208,41 @@ _ETF_CODES: list[tuple[str, str]] = [
 ]
 
 
-def _fetch_etf_daily(start_date: str, end_date: str) -> list[dict]:
+def _get_etf_update_range(db: DatabaseInterface) -> tuple[str, str, str | None]:
+    """返回 ETF 增量更新需要的 (start_date, end_date, latest_date)。
+
+    - 若数据库已有数据：从最新日期前推 5 天开始，补齐可能缺失的近期数据
+    - 若数据库为空：拉取最近 30 天
+    日期格式均为 YYYYMMDD。
+    """
+    today = get_expected_latest_trading_day()
+    end_date = today.replace("-", "")
+    db_path = getattr(db, "db_path", None)
+    latest_date: str | None = None
+    if db_path:
+        try:
+            with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT MAX(trade_date) FROM etf_daily")
+                row = cur.fetchone()
+                if row and row[0]:
+                    latest_date = str(row[0])[:10]
+        except Exception:
+            pass
+    if latest_date:
+        start_dt = datetime.strptime(latest_date, "%Y-%m-%d") - timedelta(days=5)
+        start_date = start_dt.strftime("%Y%m%d")
+    else:
+        start_dt = datetime.strptime(end_date, "%Y%m%d") - timedelta(days=30)
+        start_date = start_dt.strftime("%Y%m%d")
+    return start_date, end_date, latest_date
+
+
+def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> list[dict]:
+    """获取单只 ETF 日线，带重试与指数退避。"""
     if ak is None:
         return []
-    records: list[dict] = []
-    for code, name in _ETF_CODES:
+    for attempt in range(MAX_RETRY):
         try:
             df = ak.fund_etf_hist_em(
                 symbol=code,
@@ -207,7 +253,7 @@ def _fetch_etf_daily(start_date: str, end_date: str) -> list[dict]:
             )
             if df is None or df.empty:
                 logger.warning(f"⚠️ ETF {name}({code}) 无数据")
-                continue
+                return []
             col_map = {
                 "日期": "trade_date",
                 "开盘": "open",
@@ -219,6 +265,7 @@ def _fetch_etf_daily(start_date: str, end_date: str) -> list[dict]:
             }
             rename = {k: v for k, v in col_map.items() if k in df.columns}
             df = df.rename(columns=rename)
+            records: list[dict] = []
             for _, row in df.iterrows():
                 records.append(
                     {
@@ -235,8 +282,34 @@ def _fetch_etf_daily(start_date: str, end_date: str) -> list[dict]:
                     }
                 )
             logger.info(f"  ✅ {name}({code}): {len(df)} 条")
+            return records
         except Exception as e:
-            logger.warning(f"⚠️ ETF {name}({code}) 获取失败: {e}")
+            if attempt < MAX_RETRY - 1:
+                sleep_time = RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"⚠️ ETF {name}({code}) 第 {attempt + 1} 次失败，"
+                    f"{sleep_time:.1f}s 后重试: {e}"
+                )
+                time.sleep(sleep_time)
+            else:
+                logger.warning(f"⚠️ ETF {name}({code}) 获取失败（已重试 {MAX_RETRY} 次）: {e}")
+    return []
+
+
+def _fetch_etf_daily(
+    start_date: str,
+    end_date: str,
+    db_path: str | None = None,
+) -> list[dict]:
+    if ak is None:
+        return []
+    records: list[dict] = []
+    for idx, (code, name) in enumerate(_ETF_CODES):
+        records.extend(_fetch_single_etf(code, name, start_date, end_date))
+        # 请求间随机间隔，降低被服务端断连概率
+        if idx < len(_ETF_CODES) - 1:
+            sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP)
+            time.sleep(sleep_time)
     return records
 
 
@@ -246,10 +319,22 @@ def update_etf_daily(db: DatabaseInterface) -> dict:
     logger.info("=" * 60)
     if ak is None:
         return {"saved": 0, "error": "akshare not installed"}
+
+    now = datetime.now()
+    if now.hour == 15:
+        logger.warning(
+            f"当前时间 {now.hour}:{now.minute:02d}，处于收盘结算窗口（15:00~16:00），"
+            "东财接口可能返回 RemoteDisconnected，建议等到 16:00 后再运行"
+        )
+
     try:
-        today = get_expected_latest_trading_day()
-        end_date = today.replace("-", "")
-        records = _fetch_etf_daily("20100101", end_date)
+        start_date, end_date, latest_date = _get_etf_update_range(db)
+        if latest_date:
+            logger.info(f"📅 增量更新：从 {start_date} 到 {end_date}（数据库最新: {latest_date}）")
+        else:
+            logger.info(f"📅 首次/空表更新：从 {start_date} 到 {end_date}（最近 30 天）")
+
+        records = _fetch_etf_daily(start_date, end_date)
         if not records:
             logger.warning("⚠️ ETF 日线无数据")
             return {"saved": 0, "total": 0}
@@ -277,10 +362,11 @@ def update_finance_flow(db: DatabaseInterface) -> dict:
 
     results: dict[str, object] = {}
 
+    etf_start, etf_end, _ = _get_etf_update_range(db)
     sub_tasks = [
         ("south_flow", _fetch_south_flow, db.save_south_flow_batch, None),
         ("ah_premium", _fetch_ah_premium, db.save_ah_premium_batch, None),
-        ("etf_daily", _fetch_etf_daily, db.save_etf_daily_batch, ("20100101", get_expected_latest_trading_day().replace("-", ""))),
+        ("etf_daily", _fetch_etf_daily, db.save_etf_daily_batch, (etf_start, etf_end)),
     ]
 
     for name, fetch_fn, save_fn, extra_args in sub_tasks:

@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
+from collections.abc import Generator
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -94,75 +96,168 @@ def _retry(fn, *, tries: int = 3, base_delay: float = 1.0, label: str = ""):
 # ===========================================================================
 
 
-def _fetch_sector_daily() -> list[dict]:
-    """获取主要行业板块日线涨跌幅数据。"""
+@contextlib.contextmanager
+def _suppress_akshare_tqdm() -> Generator[None, None, None]:
+    """临时禁用 akshare 内部的 tqdm 进度条，避免污染 TUI 日志。"""
+    try:
+        from akshare.utils import tqdm as _tqdm_mod
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    orig = _tqdm_mod.get_tqdm
+    _tqdm_mod.get_tqdm = lambda enable=True: lambda iterable, *args, **kwargs: iterable
+    try:
+        yield
+    finally:
+        _tqdm_mod.get_tqdm = orig
+
+
+def _records_from_hist_df(df: pd.DataFrame, sector: str) -> list[dict]:
+    """把带标准列名的历史 DataFrame 转为 sector_daily 记录。"""
+    keep = {"trade_date", "open", "close", "high", "low", "volume", "amount", "pct_change"}
+    available = [c for c in keep if c in df.columns]
+    if not available:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "sector_name": sector,
+                "trade_date": str(row.get("trade_date", ""))[:10],
+                "open": _to_float(row.get("open")),
+                "close": _to_float(row.get("close")),
+                "high": _to_float(row.get("high")),
+                "low": _to_float(row.get("low")),
+                "volume": _to_float(row.get("volume")),
+                "amount": _to_float(row.get("amount")),
+                "pct_change": _to_float(row.get("pct_change")),
+                "data_source": "akshare",
+            }
+        )
+    return records
+
+
+def _fetch_sector_daily_em() -> tuple[list[dict], bool]:
+    """通过东方财富获取主要行业板块日线。返回 (records, source_ok)。
+
+    source_ok=False 表示列表接口失败，可尝试备用数据源。
+    """
+    board_df = _retry(
+        ak.stock_board_industry_name_em, label="东方财富行业板块列表"
+    )
+    if board_df is None:
+        return [], False
+    if board_df.empty:
+        return [], True
+    sector_names = board_df["板块名称"].tolist() if "板块名称" in board_df.columns else []
+    targets = [s for s in sector_names if s in MAJOR_SECTORS]
+    if not targets:
+        logger.warning("⚠️ 未找到匹配的主要行业板块")
+        return [], True
+    logger.info(f"📋 东方财富行业板块: {len(targets)} 个")
+
+    records: list[dict] = []
+    start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+    for sector in targets:
+        try:
+            df = _retry(
+                lambda s=sector, sd=start_date, ed=end_date: ak.stock_board_industry_hist_em(
+                    symbol=s,
+                    start_date=sd,
+                    end_date=ed,
+                ),
+                label=f"东方财富行业板块 {sector} 历史",
+            )
+            if df is None or df.empty:
+                continue
+            col_map = {
+                "日期": "trade_date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+                "涨跌幅": "pct_change",
+            }
+            df = df.rename(columns=col_map)
+            records.extend(_records_from_hist_df(df, sector))
+        except Exception as e:
+            logger.warning(f"⚠️ 东方财富行业板块 {sector} 历史数据获取失败: {e}")
+    return records, True
+
+
+def _fetch_sector_daily_ths() -> list[dict]:
+    """通过同花顺获取全部行业板块日线，作为东方财富的备用数据源。"""
     if ak is None:
         return []
+    if not hasattr(ak, "stock_board_industry_name_ths") or not hasattr(
+        ak, "stock_board_industry_index_ths"
+    ):
+        return []
     try:
-        board_df = _retry(
-            ak.stock_board_industry_name_em, label="行业板块列表"
-        )
+        with _suppress_akshare_tqdm():
+            board_df = _retry(
+                ak.stock_board_industry_name_ths, label="同花顺行业板块列表"
+            )
         if board_df is None or board_df.empty:
             return []
-        sector_names = board_df["板块名称"].tolist() if "板块名称" in board_df.columns else []
-        # 过滤出主要行业板块
-        targets = [s for s in sector_names if s in MAJOR_SECTORS]
-        if not targets:
-            logger.warning("⚠️ 未找到匹配的行业板块")
+        sector_names = board_df["name"].tolist() if "name" in board_df.columns else []
+        if not sector_names:
             return []
-        logger.info(f"📋 行业板块: {len(targets)} 个")
+        logger.info(f"📋 同花顺行业板块: {len(sector_names)} 个")
 
         records: list[dict] = []
         start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
         end_date = datetime.now().strftime("%Y%m%d")
-        for sector in targets:
+        for sector in sector_names:
             try:
-                df = _retry(
-                    lambda s=sector, sd=start_date, ed=end_date: ak.stock_board_industry_hist_em(
-                        symbol=s,
-                        start_date=sd,
-                        end_date=ed,
-                    ),
-                    label=f"行业板块 {sector} 历史",
-                )
+                with _suppress_akshare_tqdm():
+                    df = _retry(
+                        lambda s=sector, sd=start_date, ed=end_date: ak.stock_board_industry_index_ths(
+                            symbol=s,
+                            start_date=sd,
+                            end_date=ed,
+                        ),
+                        label=f"同花顺行业板块 {sector} 历史",
+                    )
                 if df is None or df.empty:
                     continue
                 col_map = {
                     "日期": "trade_date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
+                    "开盘价": "open",
+                    "收盘价": "close",
+                    "最高价": "high",
+                    "最低价": "low",
                     "成交量": "volume",
                     "成交额": "amount",
-                    "涨跌幅": "pct_change",
                 }
                 df = df.rename(columns=col_map)
-                keep = {"trade_date", "open", "close", "high", "low", "volume", "amount", "pct_change"}
-                available = [c for c in keep if c in df.columns]
-                if not available:
+                if "close" not in df.columns or "trade_date" not in df.columns:
                     continue
-                for _, row in df.iterrows():
-                    records.append(
-                        {
-                            "sector_name": sector,
-                            "trade_date": str(row.get("trade_date", ""))[:10],
-                            "open": _to_float(row.get("open")),
-                            "close": _to_float(row.get("close")),
-                            "high": _to_float(row.get("high")),
-                            "low": _to_float(row.get("low")),
-                            "volume": _to_float(row.get("volume")),
-                            "amount": _to_float(row.get("amount")),
-                            "pct_change": _to_float(row.get("pct_change")),
-                            "data_source": "akshare",
-                        }
-                    )
+                df = df.sort_values("trade_date").reset_index(drop=True)
+                df["pct_change"] = (df["close"].pct_change() * 100).round(4)
+                records.extend(_records_from_hist_df(df, sector))
             except Exception as e:
-                logger.warning(f"⚠️ 行业板块 {sector} 历史数据获取失败: {e}")
+                logger.warning(f"⚠️ 同花顺行业板块 {sector} 历史数据获取失败: {e}")
         return records
     except Exception as e:
-        logger.warning(f"⚠️ 行业板块列表获取失败: {e}")
+        logger.warning(f"⚠️ 同花顺行业板块数据获取失败: {e}")
         return []
+
+
+def _fetch_sector_daily() -> list[dict]:
+    """获取主要行业板块日线涨跌幅数据，东方财富失败时自动回退到同花顺。"""
+    if ak is None:
+        return []
+    records, source_ok = _fetch_sector_daily_em()
+    if records:
+        return records
+    if source_ok:
+        return records
+    logger.info("🔄 东方财富行业板块列表不可用，尝试同花顺数据源...")
+    return _fetch_sector_daily_ths()
 
 
 # ===========================================================================

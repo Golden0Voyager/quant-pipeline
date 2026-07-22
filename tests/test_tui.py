@@ -599,8 +599,8 @@ async def test_data_completeness_sorts_by_freshness():
         assert -1 not in positions.values(), f"标签缺失: {positions}"
         assert (
             positions["日线行情"]
-            < positions["汇率"]
             < positions["融资融券"]
+            < positions["汇率"]
             < positions["全球指数"]
             < positions["机构持仓"]
             < positions["季度财务"]
@@ -1196,3 +1196,53 @@ async def test_action_clean_logs_opens_screen():
             await app.action_clean_logs()
             mock_push.assert_called_once()
             assert isinstance(mock_push.call_args[0][0], LogCleanupScreen)
+
+
+@pytest.mark.asyncio
+async def test_task_group_widget_present():
+    from tui import TaskGroupWidget
+    app = PipelineApp()
+    async with app.run_test():
+        tabs = app.query_one("#task-tabs")
+        assert tabs is not None
+        group_widget = app.query_one("#task-groups", TaskGroupWidget)
+        assert group_widget is not None
+
+
+@pytest.mark.asyncio
+async def test_task_group_buttons():
+    from tui import TASK_GROUPS, TaskGroupWidget
+    app = PipelineApp()
+    async with app.run_test():
+        widget = app.query_one("#task-groups", TaskGroupWidget)
+        buttons = list(widget.query("Button"))
+        assert len(buttons) == len(TASK_GROUPS)
+        for key in TASK_GROUPS:
+            assert widget.query_one(f"#group-{key}") is not None
+
+
+@pytest.mark.asyncio
+async def test_action_run_task_group():
+    from tui import TASK_GROUPS
+    app = PipelineApp()
+    async with app.run_test() as pilot:
+        with patch.object(app, "_run_in_background", return_value=0) as mock_run:
+            await app.action_run_task_group("valuation")
+            # 让后台任务有机会执行
+            await pilot.pause()
+        expected_tasks = TASK_GROUPS["valuation"]
+        assert mock_run.call_count == len(expected_tasks)
+        for i, task in enumerate(expected_tasks):
+            args = mock_run.call_args_list[i][0]
+            assert "--task" in args
+            assert task in args
+
+
+@pytest.mark.asyncio
+async def test_action_run_task_group_unknown():
+    app = PipelineApp()
+    async with app.run_test() as pilot:
+        with patch.object(app, "notify") as mock_notify:
+            await app.action_run_task_group("nonexistent")
+            await pilot.pause()
+        assert any("未知任务分组" in str(call) for call in mock_notify.call_args_list)

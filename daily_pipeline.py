@@ -104,13 +104,11 @@ from tasks.financials import (
     update_shareholder_count,
 )
 from tasks.futures import update_futures
-from tasks.hkscc_holder import update_hkscc_holder
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
     update_index_daily,
 )
-from tasks.insider_trading import update_insider_trading
 from tasks.institution_survey import update_institution_survey
 from tasks.macro import (
     update_crude_oil,
@@ -225,12 +223,8 @@ def run_all(
     # ── Phase 2: 事件型强信号 ──
     results["option_sentiment"] = _safe_task("update_option_sentiment", update_option_sentiment, db)
     results["stock_repurchase"] = _safe_task("update_stock_repurchase", update_stock_repurchase, db)
-    results["insider_trading"] = _safe_task("update_insider_trading", update_insider_trading, db)
     results["institution_survey"] = _safe_task("update_institution_survey", update_institution_survey, db)
     results["stock_pledge"] = _safe_task("update_stock_pledge", update_stock_pledge, db)
-
-    # ── Phase 3: 锦上添花 ──
-    results["hkscc_holder"] = _safe_task("update_hkscc_holder", update_hkscc_holder, db)
 
     # ── 新增衍生数据任务 ──
     results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
@@ -455,14 +449,10 @@ def main():
             update_option_sentiment(db)
         elif args.task == "update_stock_repurchase":
             update_stock_repurchase(db)
-        elif args.task == "update_insider_trading":
-            update_insider_trading(db)
         elif args.task == "update_institution_survey":
             update_institution_survey(db)
         elif args.task == "update_stock_pledge":
             update_stock_pledge(db)
-        elif args.task == "update_hkscc_holder":
-            update_hkscc_holder(db)
         elif args.task == "retry":
             retry_failed(db, loader)
         elif args.task == "health_check":

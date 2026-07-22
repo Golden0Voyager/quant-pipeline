@@ -28,6 +28,8 @@ from textual.widgets import (
     RichLog,
     Select,
     Static,
+    TabbedContent,
+    TabPane,
 )
 
 from core.calendar import get_expected_latest_trading_day
@@ -628,6 +630,8 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "ah_premium": "trade_date",
     "etf_daily": "trade_date",
     "cb_index": "trade_date",
+    "cb_quotation": "updated_at",
+    "cb_redeem": "updated_at",
     "restricted_share": "release_date",
     "earnings_forecast": "end_date",
     "sector_daily": "trade_date",
@@ -649,16 +653,22 @@ QUARTERLY_TABLES: set[str] = {
     "shareholder_count",
     "quarterly_financials",
     "macro_quarterly",
+    "north_hold",
+    "earnings_forecast",
 }
 
 # T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
 DELAYED_PUBLISH_TABLES: set[str] = {
     "fx_rate",
     "us_treasury",
+    "margin_trading",
+    "dragon_tiger",
+    "block_trade",
 }
 
 # 无有意义日期列的表（不显示新鲜度标记，只显示行数）
-NO_DATE_TABLES: set[str] = set()
+NO_DATE_TABLES: set[str] = {
+}
 
 
 
@@ -955,63 +965,111 @@ class DashboardWidget(Static):
 
 
 class SingleTaskWidget(Static):
-    """Single task selector with a dropdown."""
+    """Single task selector with a dropdown, organized by task groups."""
 
-    SINGLE_TASKS: list[tuple[str, str]] = [
-        # ── 全量 ──
-        ("全量更新 (Full Update)", "all"),
-        # ── 核心行情 ──
-        ("日线行情 (Daily Bars)", "update_bars"),
-        ("技术指标 (Indicators)", "update_indicators"),
-        ("筹码分布 (Chip Dist.)", "update_chip_distribution"),
-        ("筹码分布线上 (Chip EM)", "update_chip_distribution_em"),
-        ("筹码分布全市场 (Full Market Chip EM)", "update_chip_distribution_em_fullmarket"),
-        ("基本面数据 (Fundamentals)", "update_fundamentals"),
-        ("行情快照 (Market Snapshot)", "update_market_snapshot"),
-        # ── 资金面 ──
-        ("资金流向 (Fund Flow)", "update_fund_flow"),
-        ("板块资金 (Sector Fund Flow)", "update_sector_fund_flow"),
-        ("北向资金 (North Flow)", "update_north_flow"),
-        ("北向持仓 (North Hold)", "update_north_hold"),
-        ("融资融券 (Margin Trading)", "update_margin_trading"),
-        ("龙虎榜 (Dragon Tiger)", "update_dragon_tiger"),
-        ("大宗交易 (Block Trade)", "update_block_trade"),
-        # ── 行业/大盘 ──
-        ("行业分类 (Sector Industry)", "update_sector_industry"),
-        ("行业更新 (Industry)", "update_industry"),
-        ("大盘指数 (Index Daily)", "update_index_daily"),
-        ("涨跌停 (Limit U/D)", "update_limit_up_down"),
-        # ── 估值/财务 ──
-        ("历史估值 (Valuation)", "update_historical_valuation"),
-        ("季度财务 (Quarterly Fin.)", "update_quarterly_financials"),
-        ("股东户数 (Shareholders)", "update_shareholder_count"),
-        ("分红信息 (Dividends)", "update_dividend_summary"),
-        # ── 宏观 ──
-        ("黄金价格 (Gold Price)", "update_gold_price"),
-        ("原油价格 (Crude Oil)", "update_crude_oil"),
-        ("汇率 (USD/CNY)", "update_usd"),
-        ("全球指数 (Global Index)", "update_global_index"),
-        ("美债收益率 (US Treasury)", "update_us_treasury"),
-        ("期货日线 (Futures)", "update_futures"),
-        # ── 衍生数据 ──
-        ("南向资金 (South Flow)", "update_south_flow"),
-        ("AH溢价 (AH Premium)", "update_ah_premium"),
-        ("ETF日线 (ETF Daily)", "update_etf_daily"),
-        ("可转债行情 (CB Quotation)", "update_cb_quotation"),
-        ("可转债强赎 (CB Redeem)", "update_cb_redeem"),
-        ("可转债指数 (CB Index)", "update_cb_index"),
-        ("限售解禁 (Restricted Share)", "update_restricted_share"),
-        ("业绩预告 (Earnings Forecast)", "update_earnings_forecast"),
-        ("行业板块 (Sector Derivatives)", "update_sector_derivatives"),
-        ("中国宏观 (China Macro)", "update_china_macro"),
-        # ── 工具 ──
+    # 与 Groups tab 保持一致的分组定义
+    _SINGLE_TASK_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+        (
+            "核心行情",
+            [
+                ("日线行情 (Daily Bars)", "update_bars"),
+                ("技术指标 (Indicators)", "update_indicators"),
+                ("筹码分布 (Chip Dist.)", "update_chip_distribution"),
+                ("筹码分布线上 (Chip EM)", "update_chip_distribution_em"),
+                ("筹码分布全市场 (Full Market Chip EM)", "update_chip_distribution_em_fullmarket"),
+                ("基本面数据 (Fundamentals)", "update_fundamentals"),
+                ("行情快照 (Market Snapshot)", "update_market_snapshot"),
+            ],
+        ),
+        (
+            "资金面",
+            [
+                ("资金流向 (Fund Flow)", "update_fund_flow"),
+                ("板块资金 (Sector Fund Flow)", "update_sector_fund_flow"),
+                ("北向资金 (North Flow)", "update_north_flow"),
+                ("北向持仓 (North Hold)", "update_north_hold"),
+                ("融资融券 (Margin Trading)", "update_margin_trading"),
+                ("龙虎榜 (Dragon Tiger)", "update_dragon_tiger"),
+                ("大宗交易 (Block Trade)", "update_block_trade"),
+            ],
+        ),
+        (
+            "估值/财务",
+            [
+                ("历史估值 (Valuation)", "update_historical_valuation"),
+                ("季度财务 (Quarterly Fin.)", "update_quarterly_financials"),
+                ("股东户数 (Shareholders)", "update_shareholder_count"),
+                ("分红信息 (Dividends)", "update_dividend_summary"),
+            ],
+        ),
+        (
+            "宏观/全球",
+            [
+                ("中国宏观 (China Macro)", "update_china_macro"),
+                ("黄金价格 (Gold Price)", "update_gold_price"),
+                ("原油价格 (Crude Oil)", "update_crude_oil"),
+                ("汇率 (USD/CNY)", "update_usd"),
+                ("全球指数 (Global Index)", "update_global_index"),
+                ("美债收益率 (US Treasury)", "update_us_treasury"),
+                ("期货日线 (Futures)", "update_futures"),
+            ],
+        ),
+        (
+            "行业/大盘",
+            [
+                ("行业分类 (Sector Industry)", "update_sector_industry"),
+                ("行业更新 (Industry)", "update_industry"),
+                ("行业板块 (Sector Derivatives)", "update_sector_derivatives"),
+                ("大盘指数 (Index Daily)", "update_index_daily"),
+                ("涨跌停 (Limit U/D)", "update_limit_up_down"),
+            ],
+        ),
+        (
+            "ETF/可转债/港通",
+            [
+                ("ETF日线 (ETF Daily)", "update_etf_daily"),
+                ("可转债行情 (CB Quotation)", "update_cb_quotation"),
+                ("可转债强赎 (CB Redeem)", "update_cb_redeem"),
+                ("可转债指数 (CB Index)", "update_cb_index"),
+                ("南向资金 (South Flow)", "update_south_flow"),
+                ("AH溢价 (AH Premium)", "update_ah_premium"),
+            ],
+        ),
+        (
+            "事件信号",
+            [
+                ("限售解禁 (Restricted Share)", "update_restricted_share"),
+                ("业绩预告 (Earnings Forecast)", "update_earnings_forecast"),
+                ("股票回购 (Stock Repurchase)", "update_stock_repurchase"),
+                ("机构调研 (Institution Survey)", "update_institution_survey"),
+                ("股票质押 (Stock Pledge)", "update_stock_pledge"),
+                ("期权情绪 (Option Sentiment)", "update_option_sentiment"),
+            ],
+        ),
+    ]
+
+    _SINGLE_TASK_UTILS: list[tuple[str, str]] = [
         ("股票列表 (Stock List)", "update_stock_list"),
         ("重试失败 (Retry Failed)", "retry"),
         ("健康检查 (Health Check)", "health_check"),
     ]
 
+    SINGLE_TASKS: list[tuple[str, str]] = []
+
+    @classmethod
+    def _build_single_tasks(cls) -> list[tuple[str, str]]:
+        """把分组定义展开为带分隔符的下拉选项列表。"""
+        options: list[tuple[str, str]] = [("全量更新 (Full Update)", "all")]
+        for group_name, tasks in cls._SINGLE_TASK_GROUPS:
+            options.append((f"[dim]── {group_name} ──[/dim]", f"__sep__{group_name}"))
+            options.extend(tasks)
+        options.append(("[dim]── 工具 ──[/dim]", "__sep__tools"))
+        options.extend(cls._SINGLE_TASK_UTILS)
+        return options
+
     def on_mount(self) -> None:
         self.border_title = "Single Task"
+        self.SINGLE_TASKS = self._build_single_tasks()
         select = Select(
             options=self.SINGLE_TASKS,
             prompt="选择一项任务...",
@@ -1022,11 +1080,105 @@ class SingleTaskWidget(Static):
     async def on_select_changed(self, event: Select.Changed) -> None:
         # event.value 在 clear() 后为 Select.NULL（NoSelection 对象），
         # 只有 str 类型才是真实任务名，避免误触发导致杀进程
-        if isinstance(event.value, str) and event.value:
+        value = event.value
+        select = self.query_one("#task-select", Select)
+        if isinstance(value, str) and value and not value.startswith("__sep__"):
             from typing import cast
-            await cast(PipelineApp, self.app).action_run_single_task(event.value)
-            # 重置回提示状态（会触发新的 Select.Changed 但被上面过滤掉）
-            self.query_one("#task-select", Select).clear()
+            await cast(PipelineApp, self.app).action_run_single_task(value)
+        # 无论选中真实任务还是分组分隔符，都重置回提示状态
+        # （会触发新的 Select.Changed 但被上面过滤掉）
+        select.clear()
+
+
+# ===========================================================================
+# 任务分组：把相似的 single task 聚合成一键顺序执行的按钮组
+# ===========================================================================
+
+TASK_GROUPS: dict[str, list[str]] = {
+    "core": [
+        "update_bars",
+        "update_indicators",
+        "update_fundamentals",
+        "update_chip_distribution",
+        "update_chip_distribution_em",
+        "update_chip_distribution_em_fullmarket",
+        "update_market_snapshot",
+    ],
+    "fund": [
+        "update_fund_flow",
+        "update_sector_fund_flow",
+        "update_north_flow",
+        "update_north_hold",
+        "update_margin_trading",
+        "update_dragon_tiger",
+        "update_block_trade",
+    ],
+    "valuation": [
+        "update_historical_valuation",
+        "update_quarterly_financials",
+        "update_shareholder_count",
+        "update_dividend_summary",
+    ],
+    "macro": [
+        "update_china_macro",
+        "update_gold_price",
+        "update_crude_oil",
+        "update_usd",
+        "update_global_index",
+        "update_us_treasury",
+        "update_futures",
+    ],
+    "sector_index": [
+        "update_sector_industry",
+        "update_industry",
+        "update_sector_derivatives",
+        "update_index_daily",
+        "update_limit_up_down",
+    ],
+    "derivatives": [
+        "update_etf_daily",
+        "update_cb_quotation",
+        "update_cb_redeem",
+        "update_cb_index",
+        "update_south_flow",
+        "update_ah_premium",
+    ],
+    "events": [
+        "update_restricted_share",
+        "update_earnings_forecast",
+        "update_stock_repurchase",
+        "update_institution_survey",
+        "update_stock_pledge",
+        "update_option_sentiment",
+    ],
+}
+
+
+class TaskGroupWidget(Static):
+    """任务分组面板：一键顺序执行同组任务。"""
+
+    GROUP_LABELS: dict[str, str] = {
+        "core": "核心行情",
+        "fund": "资金面",
+        "valuation": "估值/财务",
+        "macro": "宏观/全球",
+        "sector_index": "行业/大盘",
+        "derivatives": "ETF/可转债/港通",
+        "events": "事件信号",
+    }
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="group-buttons"):
+            for key, label in self.GROUP_LABELS.items():
+                yield Button(label, id=f"group-{key}", variant="primary")
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id is None:
+            return
+        group_key = button_id.replace("group-", "")
+        from typing import cast
+        await cast(PipelineApp, self.app).action_run_task_group(group_key)
 
 
 class DataCompletenessWidget(VerticalScroll):
@@ -1652,6 +1804,40 @@ class PipelineApp(App):
     Select > .select-list > .select-list-item.button {
         background: #2563eb;
     }
+    #task-tabs {
+        border: round $blue-normal;
+        background: $surface;
+        padding: 0;
+    }
+    #task-tabs TabPane {
+        padding: 0;
+    }
+    #task-tabs:focus {
+        border: round $blue-focus;
+    }
+    #group-buttons {
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 1;
+        width: 100%;
+        height: auto;
+        padding: 0;
+    }
+    #group-buttons Button {
+        width: 100%;
+        height: 2;
+        min-height: 1;
+        padding: 0 1;
+        margin: 0;
+        border: none;
+        color: $text;
+        content-align: center middle;
+        text-style: none;
+    }
+    #group-buttons Button:hover {
+        background: $blue-hover;
+        text-style: bold;
+    }
     #status-dashboard, #scraping-progress {
         border: round $blue-normal;
         background: $surface;
@@ -1761,7 +1947,11 @@ class PipelineApp(App):
         with Grid(id="main-grid"):
             yield DashboardWidget(id="status-dashboard")
             yield LogsWidget(id="live-logs")
-            yield SingleTaskWidget(id="single-task")
+            with TabbedContent(id="task-tabs"):
+                with TabPane("Single", id="tab-single"):
+                    yield SingleTaskWidget(id="single-task")
+                with TabPane("Groups", id="tab-groups"):
+                    yield TaskGroupWidget(id="task-groups")
             yield ProgressWidget(id="scraping-progress")
             yield DataCompletenessWidget(id="data-completeness")
         yield Footer(show_command_palette=False)
@@ -1792,12 +1982,14 @@ class PipelineApp(App):
         finally:
             self._current_process = None
 
-    async def _run_in_background(self, *args: str) -> None:
+    async def _run_in_background(self, *args: str) -> int | None:
+        """在后台运行子进程，返回其退出码（被外部中断时返回 None）。"""
         env = get_subprocess_env()
         logger = logging.getLogger("quant_pipeline.tui")
 
         await self._stop_current_process()
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -1810,8 +2002,10 @@ class PipelineApp(App):
             await proc.wait()
             if proc.returncode != 0:
                 logger.error(f"Subprocess {' '.join(args)} exited with code {proc.returncode}")
+            return proc.returncode
         except Exception:
             logger.exception(f"Exception running subprocess {' '.join(args)}")
+            return None
         finally:
             self._current_process = None
 
@@ -1929,6 +2123,66 @@ class PipelineApp(App):
             f"单任务: {task}",
             sys.executable, pipeline_path, "--task", task, "--force",
         )
+
+    async def action_run_task_group(self, group_key: str) -> None:
+        """顺序执行某一任务分组内的所有 single task。"""
+        tasks = TASK_GROUPS.get(group_key)
+        if not tasks:
+            self.notify(f"未知任务分组: {group_key}", severity="error", timeout=3.0)
+            return
+
+        label = TaskGroupWidget.GROUP_LABELS.get(group_key, group_key)
+        self.notify(
+            f"开始执行分组「{label}」，共 {len(tasks)} 个任务，按顺序运行",
+            timeout=4.0,
+        )
+        self._create_background_task(self._run_task_group(label, tasks))
+
+    async def _run_task_group(self, label: str, tasks: list[str]) -> None:
+        """在后台协程中依次执行分组任务。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        failed: list[str] = []
+        for task in tasks:
+            self.notify(
+                f"[{label}] 正在运行: {task}",
+                severity="information",
+                timeout=2.0,
+            )
+            returncode = await self._run_in_background(
+                sys.executable, pipeline_path, "--task", task, "--force"
+            )
+            # returncode 为 None 表示进程被外部中断或发生异常
+            if returncode is None or returncode < 0:
+                self.notify(
+                    f"[{label}] 任务 {task} 被中断，分组执行停止",
+                    severity="warning",
+                    timeout=4.0,
+                )
+                failed.append(task)
+                break
+            if returncode != 0:
+                self.notify(
+                    f"[{label}] 任务 {task} 退出码 {returncode}，继续执行下一任务",
+                    severity="warning",
+                    timeout=3.0,
+                )
+                failed.append(task)
+                # 单个任务失败不阻塞同组其他任务
+                continue
+        else:
+            self.notify(
+                f"[{label}] 分组全部完成（共 {len(tasks)} 个任务）",
+                severity="information",
+                timeout=4.0,
+            )
+            return
+
+        if failed:
+            self.notify(
+                f"[{label}] 分组执行结束，失败/中断 {len(failed)} 个任务",
+                severity="warning",
+                timeout=4.0,
+            )
 
     async def action_toggle_theme(self) -> None:
         """轮换主题并持久化。"""
