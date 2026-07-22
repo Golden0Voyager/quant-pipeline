@@ -10,20 +10,12 @@ import logging
 import random
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
-from core.config import (
-    MAX_RETRY_VAL as MAX_RETRY,
-)
-from core.config import (
-    PER_STOCK_MAX_SLEEP_VAL as PER_STOCK_MAX_SLEEP,
-)
-from core.config import (
-    PER_STOCK_MIN_SLEEP_VAL as PER_STOCK_MIN_SLEEP,
-)
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,
 )
@@ -242,7 +234,10 @@ def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> l
     """获取单只 ETF 日线，带重试与指数退避。"""
     if ak is None:
         return []
-    for attempt in range(MAX_RETRY):
+    # ETF 接口偶发 15s 读超时，为避免 TUI 2 分钟超时窗口内未完成，
+    # 本地限制重试次数，宁可丢单只 ETF 数据也不拖垮整个任务。
+    etf_max_retry = 1
+    for attempt in range(etf_max_retry):
         try:
             df = ak.fund_etf_hist_em(
                 symbol=code,
@@ -284,7 +279,7 @@ def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> l
             logger.info(f"  ✅ {name}({code}): {len(df)} 条")
             return records
         except Exception as e:
-            if attempt < MAX_RETRY - 1:
+            if attempt < etf_max_retry - 1:
                 sleep_time = RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(
                     f"⚠️ ETF {name}({code}) 第 {attempt + 1} 次失败，"
@@ -292,7 +287,7 @@ def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> l
                 )
                 time.sleep(sleep_time)
             else:
-                logger.warning(f"⚠️ ETF {name}({code}) 获取失败（已重试 {MAX_RETRY} 次）: {e}")
+                logger.warning(f"⚠️ ETF {name}({code}) 获取失败（已重试 {etf_max_retry} 次）: {e}")
     return []
 
 
@@ -304,12 +299,20 @@ def _fetch_etf_daily(
     if ak is None:
         return []
     records: list[dict] = []
-    for idx, (code, name) in enumerate(_ETF_CODES):
-        records.extend(_fetch_single_etf(code, name, start_date, end_date))
-        # 请求间随机间隔，降低被服务端断连概率
-        if idx < len(_ETF_CODES) - 1:
-            sleep_time = random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP)
-            time.sleep(sleep_time)
+    max_workers = min(5, max(2, (len(_ETF_CODES) // 4) + 1))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 按 _ETF_CODES 顺序提交，确保结果顺序与列表一致
+        futures = [
+            executor.submit(_fetch_single_etf, code, name, start_date, end_date)
+            for code, name in _ETF_CODES
+        ]
+        for future in futures:
+            try:
+                etf_records = future.result(timeout=25)
+                records.extend(etf_records)
+            except Exception as e:
+                logger.warning(f"⚠️ ETF 获取异常: {e}")
     return records
 
 
