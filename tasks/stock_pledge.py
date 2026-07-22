@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
+from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface
 
 try:
@@ -65,6 +68,21 @@ _COLUMN_MAP = {
 }
 
 
+def _get_latest_stock_pledge_date(db: DatabaseInterface) -> str | None:
+    """查询数据库中股权质押已有数据的最大日期，用于 API 无最新日期时回退。"""
+    db_path = getattr(db, "db_path", None)
+    if not db_path:
+        return None
+    try:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(trade_date) FROM stock_pledge")
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
 def update_stock_pledge(db: DatabaseInterface) -> dict:
     """获取股权质押数据并保存。"""
     logger.info("\n" + "=" * 60)
@@ -79,7 +97,23 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ akshare 不存在 stock_gpzy_pledge_ratio_em 接口，跳过股权质押更新")
         return {"saved": 0}
 
-    df = _try_get_ak_df(ak.stock_gpzy_pledge_ratio_em)
+    target_date = get_expected_latest_trading_day()
+    target_dates = [target_date]
+    for i in range(1, 8):
+        target_dates.append(
+            (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=i)).strftime("%Y-%m-%d")
+        )
+    latest_db_date = _get_latest_stock_pledge_date(db)
+    if latest_db_date and latest_db_date not in target_dates:
+        target_dates.append(latest_db_date)
+
+    df = None
+    for date in target_dates:
+        df = _try_get_ak_df(ak.stock_gpzy_pledge_ratio_em, date=date.replace("-", ""))
+        if df is not None and not df.empty:
+            logger.info(f"  股权质押使用日期 {date}")
+            break
+
     if df is None or df.empty:
         logger.warning("⚠️ 股权质押数据为空")
         return {"saved": 0}

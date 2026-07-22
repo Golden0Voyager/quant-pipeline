@@ -120,9 +120,10 @@ def update_margin_trading(db: DatabaseInterface, symbols: list[str] | None = Non
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = get_expected_latest_trading_day().replace("-", "")
-    previous_date = (datetime.strptime(target_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-    target_dates = [target_date, previous_date]
+    target_date = get_expected_latest_trading_day()
+    api_date = target_date.replace("-", "")
+    previous_date = (datetime.strptime(api_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+    target_dates = [api_date, previous_date]
     batch_records = []
     total = 0
 
@@ -152,7 +153,7 @@ def update_margin_trading(db: DatabaseInterface, symbols: list[str] | None = Non
                     continue
                 batch_records.append({
                     "ts_code": code,
-                    "trade_date": actual_date,
+                    "trade_date": datetime.strptime(actual_date, "%Y%m%d").strftime("%Y-%m-%d"),
                     "margin_balance": row.get("融资余额" if exchange == "sh" else "融资余额"),
                     "margin_buy": row.get("融资买入额" if exchange == "sh" else "融资买入额"),
                     "margin_repay": row.get("融资偿还额" if exchange == "sh" else None),
@@ -193,9 +194,9 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = get_expected_latest_trading_day().replace("-", "")
+    target_date = get_expected_latest_trading_day()
     try:
-        df = ak.stock_lhb_detail_em(start_date=target_date, end_date=target_date)
+        df = ak.stock_lhb_detail_em(start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
         if df is None or df.empty:
             logger.warning("⚠️  龙虎榜无数据")
             return {"saved": 0, "total": 0}
@@ -253,9 +254,9 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = get_expected_latest_trading_day().replace("-", "")
+    target_date = get_expected_latest_trading_day()
     try:
-        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date, end_date=target_date)
+        df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
         if df is None or df.empty:
             logger.warning("⚠️  大宗交易无数据")
             return {"saved": 0, "total": 0}

@@ -371,7 +371,8 @@ def _process_chip_one(
         ]
         records = []
         for _, row in df_chip.iterrows():
-            rec: dict[str, object] = {"ts_code": symbol, "trade_date": str(row["trade_date"])}
+            trade_date = pd.to_datetime(row["trade_date"]).strftime("%Y-%m-%d")
+            rec: dict[str, object] = {"ts_code": symbol, "trade_date": trade_date}
             for col in numeric_cols:
                 val = row.get(col)
                 # 抵御 pandas NaT / NaN / None → 存 None 避免 float() 崩溃
