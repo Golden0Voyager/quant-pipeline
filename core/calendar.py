@@ -101,3 +101,26 @@ def get_expected_latest_trading_day() -> str:
     while target.weekday() >= 5:
         target -= timedelta(days=1)
     return target.strftime("%Y-%m-%d")
+
+
+def get_recent_trading_days(end_date: str, count: int) -> list[str]:
+    """返回不晚于 end_date 的最近若干交易日，按新到旧排列。"""
+    if count <= 0:
+        return []
+
+    trade_dates = _load_cached_calendar()
+    if trade_dates is None:
+        trade_dates = _fetch_trading_calendar()
+        if trade_dates:
+            _save_calendar_cache(trade_dates)
+
+    if trade_dates:
+        return sorted((d for d in trade_dates if d <= end_date), reverse=True)[:count]
+
+    current = datetime.strptime(end_date, "%Y-%m-%d").date()
+    result: list[str] = []
+    while len(result) < count:
+        if not _is_weekend(current):
+            result.append(current.strftime("%Y-%m-%d"))
+        current -= timedelta(days=1)
+    return result
