@@ -34,6 +34,7 @@ class SmartMoneyDBProvider:
         self._db = DatabaseManager(db_path=db_path)
         self._ensure_wal_mode()
         self._ensure_tables()
+        self._migrate_phase2_tables()
         # 共享写连接 + 写锁：所有 batch 写入串行化，避免并发写导致 database is locked
         self._write_lock = threading.Lock()
         self._write_conn: sqlite3.Connection | None = None
@@ -455,11 +456,13 @@ class SmartMoneyDBProvider:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS stock_repurchase (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT,
-                        stock_code TEXT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
                         stock_name TEXT,
                         repurchase_amount REAL,
                         repurchase_price REAL,
+                        repurchase_price_lower REAL,
+                        repurchase_price_upper REAL,
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
                         UNIQUE(trade_date, stock_code)
@@ -484,13 +487,13 @@ class SmartMoneyDBProvider:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS institution_survey (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT,
-                        stock_code TEXT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
                         stock_name TEXT,
                         survey_org TEXT,
                         survey_type TEXT,
                         survey_count INTEGER,
-                        UNIQUE(trade_date, stock_code, survey_org)
+                        UNIQUE(trade_date, stock_code)
                     )
                 """)
                 # ==================== Phase 2: 股权质押 ====================
@@ -509,6 +512,90 @@ class SmartMoneyDBProvider:
                 """)
         except Exception as e:
             logger.warning(f"⚠️ _ensure_tables 创建表失败: {e}")
+
+    def _migrate_phase2_tables(self) -> None:
+        """独立执行 Phase 2 兼容迁移，避免被其他兜底 DDL 的异常阻断。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_repurchase (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
+                        stock_name TEXT,
+                        repurchase_amount REAL,
+                        repurchase_price REAL,
+                        repurchase_price_lower REAL,
+                        repurchase_price_upper REAL,
+                        repurchase_quantity INTEGER,
+                        progress_status TEXT,
+                        UNIQUE(trade_date, stock_code)
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS institution_survey (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
+                        stock_name TEXT,
+                        survey_org TEXT,
+                        survey_type TEXT,
+                        survey_count INTEGER,
+                        UNIQUE(trade_date, stock_code)
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_pledge (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_date TEXT,
+                        stock_code TEXT,
+                        stock_name TEXT,
+                        pledger TEXT,
+                        pledge_amount REAL,
+                        pledge_ratio REAL,
+                        pledge_org TEXT,
+                        UNIQUE(trade_date, stock_code, pledger)
+                    )
+                """)
+                conn.commit()
+                existing_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
+                }
+                for column in ("repurchase_price_lower", "repurchase_price_upper"):
+                    if column not in existing_columns:
+                        conn.execute(f"ALTER TABLE stock_repurchase ADD COLUMN {column} REAL")
+                conn.commit()
+
+                conn.execute("""
+                    DELETE FROM stock_repurchase
+                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
+                       OR stock_code IS NULL OR TRIM(stock_code) = ''
+                """)
+                conn.commit()
+                conn.execute("""
+                    DELETE FROM institution_survey
+                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
+                       OR stock_code IS NULL OR TRIM(stock_code) = ''
+                """)
+                conn.execute("""
+                    DELETE FROM institution_survey
+                    WHERE id NOT IN (
+                        SELECT MAX(id) FROM institution_survey GROUP BY trade_date, stock_code
+                    )
+                """)
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_institution_survey_date_code
+                    ON institution_survey(trade_date, stock_code)
+                """)
+                conn.commit()
+                conn.execute("""
+                    DELETE FROM stock_pledge
+                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
+                       OR stock_code IS NULL OR TRIM(stock_code) = ''
+                """)
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
 
     @property
     def db_path(self) -> str:
@@ -1522,19 +1609,21 @@ class SmartMoneyDBProvider:
 
     def save_stock_repurchase_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存股票回购数据。"""
-        if not records:
+        valid_records = [r for r in records if r.get("trade_date") and r.get("stock_code")]
+        if not valid_records:
             return 0
         try:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 conn.executemany(
-                    "INSERT OR REPLACE INTO stock_repurchase (trade_date, stock_code, stock_name, repurchase_amount, repurchase_price, repurchase_quantity, progress_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO stock_repurchase (trade_date, stock_code, stock_name, repurchase_amount, repurchase_price, repurchase_price_lower, repurchase_price_upper, repurchase_quantity, progress_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("repurchase_amount"), r.get("repurchase_price"),
+                         r.get("repurchase_price_lower"), r.get("repurchase_price_upper"),
                          r.get("repurchase_quantity"), r.get("progress_status"))
-                        for r in records
+                        for r in valid_records
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
@@ -1569,18 +1658,28 @@ class SmartMoneyDBProvider:
 
     def save_institution_survey_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存机构调研数据。"""
-        if not records:
+        valid_records = [r for r in records if r.get("trade_date") and r.get("stock_code")]
+        if not valid_records:
             return 0
         try:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 conn.executemany(
-                    "INSERT OR REPLACE INTO institution_survey (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count) VALUES (?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO institution_survey
+                        (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(trade_date, stock_code) DO UPDATE SET
+                        stock_name = excluded.stock_name,
+                        survey_org = excluded.survey_org,
+                        survey_type = excluded.survey_type,
+                        survey_count = excluded.survey_count
+                    """,
                     [
                         (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("survey_org"), r.get("survey_type"), r.get("survey_count"))
-                        for r in records
+                        for r in valid_records
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
@@ -1591,7 +1690,8 @@ class SmartMoneyDBProvider:
 
     def save_stock_pledge_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存股权质押数据。"""
-        if not records:
+        valid_records = [r for r in records if r.get("trade_date") and r.get("stock_code")]
+        if not valid_records:
             return 0
         try:
             with self._write_lock:
@@ -1603,7 +1703,7 @@ class SmartMoneyDBProvider:
                         (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("pledger"), r.get("pledge_amount"),
                          r.get("pledge_ratio"), r.get("pledge_org"))
-                        for r in records
+                        for r in valid_records
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
