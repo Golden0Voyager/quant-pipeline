@@ -60,14 +60,21 @@ def _fetch_qvix() -> list[dict]:
         return []
     records = []
     for _, row in df.iterrows():
-        date_val = row.get("date") or row.get("日期")
-        if date_val is None:
+        date_val = row.get("date")
+        if date_val is None or pd.isna(date_val):
+            date_val = row.get("日期")
+        if date_val is None or pd.isna(date_val):
             continue
         date_str = str(date_val).strip()[:10]
         if date_str:
+            qvix = _to_float(row.get("close"))
+            if qvix is None:
+                qvix = _to_float(row.get("qvix"))
+            if qvix is None:
+                qvix = _to_float(row.get("QVIX"))
             records.append({
                 "trade_date": date_str,
-                "qvix": _to_float(row.get("qvix") or row.get("QVIX")),
+                "qvix": qvix,
             })
     return records
 
