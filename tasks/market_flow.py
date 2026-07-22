@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 import time  # noqa: F401
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from core.calendar import get_expected_latest_trading_day
+from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -121,9 +121,7 @@ def update_margin_trading(db: DatabaseInterface, symbols: list[str] | None = Non
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
     target_date = get_expected_latest_trading_day()
-    api_date = target_date.replace("-", "")
-    previous_date = (datetime.strptime(api_date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-    target_dates = [api_date, previous_date]
+    target_dates = [date.replace("-", "") for date in get_recent_trading_days(target_date, 3)]
     batch_records = []
     total = 0
 

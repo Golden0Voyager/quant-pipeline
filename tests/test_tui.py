@@ -558,6 +558,24 @@ def test_status_for_table_with_timestamp():
     assert status == "略滞后"
 
 
+def test_phase2_event_tables_are_registered_everywhere():
+    from tui import TABLE_DATE_COLUMNS, DataCompletenessWidget, get_all_table_counts
+
+    tables = {
+        "stock_repurchase": "update_stock_repurchase",
+        "institution_survey": "update_institution_survey",
+        "stock_pledge": "update_stock_pledge",
+        "option_sentiment": "update_option_sentiment",
+    }
+    count_constants = repr(get_all_table_counts.__code__.co_consts)
+    for table, task in tables.items():
+        assert table in count_constants
+        assert TABLE_DATE_COLUMNS[table] == "trade_date"
+        assert DataCompletenessWidget.TASK_TO_TABLE[task] == [table]
+        assert table in DataCompletenessWidget.TABLE_LABELS
+        assert table in DataCompletenessWidget.TABLE_LABELS_CN
+
+
 
 
 @pytest.mark.asyncio

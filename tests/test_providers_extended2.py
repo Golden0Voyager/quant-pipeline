@@ -75,6 +75,64 @@ class TestConnectionEdgeCases:
         """无 daily_bars 数据 → 返回 None。"""
         assert provider.get_latest_bar_date("000001.SZ") is None
 
+    def test_phase2_schema_migrates_legacy_tables(self, tmp_path):
+        db_path = tmp_path / "legacy.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""
+                CREATE TABLE stock_repurchase (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date TEXT,
+                    stock_code TEXT,
+                    stock_name TEXT,
+                    repurchase_amount REAL,
+                    repurchase_price REAL,
+                    repurchase_quantity INTEGER,
+                    progress_status TEXT,
+                    UNIQUE(trade_date, stock_code)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE institution_survey (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date TEXT,
+                    stock_code TEXT,
+                    stock_name TEXT,
+                    survey_org TEXT,
+                    survey_type TEXT,
+                    survey_count INTEGER,
+                    UNIQUE(trade_date, stock_code, survey_org)
+                )
+            """)
+            conn.execute("INSERT INTO institution_survey (trade_date, stock_code) VALUES (NULL, '')")
+
+        migrated = SmartMoneyDBProvider(db_path=str(db_path))
+        # conftest 的 DatabaseManager mock 固定使用全局路径，显式绑定本用例数据库。
+        migrated._db.db_path = str(db_path)
+        migrated._migrate_phase2_tables()
+        try:
+            with sqlite3.connect(db_path) as conn:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")}
+                assert {"repurchase_price_lower", "repurchase_price_upper"} <= columns
+                assert conn.execute("SELECT COUNT(*) FROM institution_survey").fetchone()[0] == 0
+
+            record = {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "平安银行",
+                "survey_type": "电话会议",
+                "survey_count": 3,
+            }
+            assert migrated.save_institution_survey_batch([record]) == 1
+            assert migrated.save_institution_survey_batch([{**record, "survey_count": 4}]) >= 1
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT survey_count FROM institution_survey WHERE trade_date = ? AND stock_code = ?",
+                    ("2026-07-21", "000001"),
+                ).fetchall()
+            assert rows == [(4,)]
+        finally:
+            migrated.close()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. 空记录路径 — 所有 batch save 方法在 records=[] 时应返回 0

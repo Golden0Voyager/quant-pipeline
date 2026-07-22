@@ -19,12 +19,6 @@ from core.config import (
     MAX_RETRY_VAL as MAX_RETRY,
 )
 from core.config import (
-    PER_STOCK_MAX_SLEEP_VAL as PER_STOCK_MAX_SLEEP,
-)
-from core.config import (
-    PER_STOCK_MIN_SLEEP_VAL as PER_STOCK_MIN_SLEEP,
-)
-from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,
 )
 from interface import DatabaseInterface
@@ -185,10 +179,6 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
 
             if i % 100 == 0 or i == total:
                 logger.info(f"  进度: {i}/{total} ({100 * i // total}%), 成功 {len(records)}，失败 {len(failed)}")
-
-            # 请求间随机间隔，降低被服务端断连概率
-            if i < total:
-                time.sleep(random.uniform(PER_STOCK_MIN_SLEEP, PER_STOCK_MAX_SLEEP))
 
     if not records:
         logger.warning(

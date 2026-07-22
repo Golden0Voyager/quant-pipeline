@@ -61,6 +61,26 @@ def test_get_expected_weekday_after_1530_uses_today():
         assert cal.get_expected_latest_trading_day() == "2026-07-20"
 
 
+def test_get_recent_trading_days_uses_calendar_and_skips_weekend():
+    cached = ["2026-07-16", "2026-07-17", "2026-07-20"]
+    with patch.object(cal, "_load_cached_calendar", return_value=cached):
+        assert cal.get_recent_trading_days("2026-07-20", 3) == [
+            "2026-07-20",
+            "2026-07-17",
+            "2026-07-16",
+        ]
+
+
+def test_get_recent_trading_days_falls_back_to_weekdays():
+    with patch.object(cal, "_load_cached_calendar", return_value=None), patch.object(
+        cal, "_fetch_trading_calendar", return_value=[]
+    ):
+        assert cal.get_recent_trading_days("2026-07-20", 2) == [
+            "2026-07-20",
+            "2026-07-17",
+        ]
+
+
 # ───────────────────────── 交易日历获取 / 缓存 ─────────────────────────
 
 

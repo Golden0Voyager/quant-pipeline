@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
+import tasks.hkscc_holder as hkscc_holder
 import tasks.institution_survey as institution_survey
 import tasks.option_sentiment as option_sentiment
 import tasks.stock_pledge as stock_pledge
@@ -51,29 +52,29 @@ def _repurchase_df() -> pd.DataFrame:
     return pd.DataFrame({
         "股票代码": ["000001"],
         "股票简称": ["平安银行"],
-        "公告日期": ["2024-01-01"],
-        "回购金额": [5e8],
-        "回购价格": [12.5],
-        "回购数量": [40000000],
-        "进度": ["已完成"],
+        "最新公告日期": ["2024-01-01"],
+        "已回购金额": [5e8],
+        "已回购股份价格区间-下限": [11.5],
+        "已回购股份价格区间-上限": [12.5],
+        "已回购股份数量": [40000000],
+        "实施进度": ["完成实施"],
     })
 
 
 def _survey_df() -> pd.DataFrame:
     return pd.DataFrame({
-        "股票代码": ["000001"],
-        "股票简称": ["平安银行"],
-        "调研日期": ["2024-01-01"],
-        "调研机构": ["华夏基金"],
-        "调研类型": ["实地调研"],
-        "接待人数": [5],
+        "代码": ["000001"],
+        "名称": ["平安银行"],
+        "接待日期": ["2024-01-01"],
+        "接待方式": ["实地调研"],
+        "接待机构数量": [5],
     })
 
 
 def _qvix_df() -> pd.DataFrame:
     return pd.DataFrame({
         "date": ["2024-01-01"],
-        "qvix": [18.5],
+        "close": [18.5],
     })
 
 
@@ -143,6 +144,30 @@ class TestStockPledge:
             assert stock_pledge._try_get_ak_df(func) is None
         assert func.call_count == 1
 
+    def test_latest_date_ignores_mock_db_path(self):
+        assert stock_pledge._get_latest_stock_pledge_date(MagicMock()) is None
+
+    def test_searches_recent_trading_days_beyond_seven_calendar_days(self):
+        db = MagicMock()
+        db.save_stock_pledge_batch.return_value = 1
+        ak = MagicMock()
+
+        def fetch(*, date):
+            return _pledge_df() if date == "20260630" else pd.DataFrame()
+
+        ak.stock_gpzy_pledge_ratio_em.side_effect = fetch
+        candidates = ["2026-07-22", "2026-06-30"]
+        with (
+            patch.object(stock_pledge, "ak", ak),
+            patch.object(stock_pledge, "get_expected_latest_trading_day", return_value="2026-07-22"),
+            patch.object(stock_pledge, "get_recent_trading_days", return_value=candidates, create=True),
+            patch.object(stock_pledge, "_get_latest_stock_pledge_date", return_value="2026-03-31"),
+        ):
+            result = stock_pledge.update_stock_pledge(db)
+
+        assert result["saved"] == 1
+        assert any(call.kwargs.get("date") == "20260630" for call in ak.stock_gpzy_pledge_ratio_em.call_args_list)
+
 
 # ===========================================================================
 # 2. stock_repurchase
@@ -156,7 +181,26 @@ class TestStockRepurchase:
         with patch.object(stock_repurchase, "ak", _ak_with(_repurchase_df())):
             result = stock_repurchase.update_stock_repurchase(db)
         assert result["saved"] == 1
-        assert db.save_stock_repurchase_batch.called
+        record = db.save_stock_repurchase_batch.call_args.args[0][0]
+        assert record == {
+            "trade_date": "2024-01-01",
+            "stock_code": "000001",
+            "stock_name": "平安银行",
+            "repurchase_amount": 5e8,
+            "repurchase_price": 12.5,
+            "repurchase_price_lower": 11.5,
+            "repurchase_price_upper": 12.5,
+            "repurchase_quantity": 40000000,
+            "progress_status": "完成实施",
+        }
+
+    def test_invalid_key_fields_are_not_saved(self):
+        db = MagicMock()
+        frame = _repurchase_df().assign(最新公告日期=None)
+        with patch.object(stock_repurchase, "ak", _ak_with(frame)):
+            result = stock_repurchase.update_stock_repurchase(db)
+        assert result["saved"] == 0
+        db.save_stock_repurchase_batch.assert_not_called()
 
     def test_ak_none(self):
         db = MagicMock()
@@ -208,10 +252,34 @@ class TestInstitutionSurvey:
     def test_happy_path(self):
         db = MagicMock()
         db.save_institution_survey_batch.return_value = 1
-        with patch.object(institution_survey, "ak", _ak_with(_survey_df())):
+        ak = _ak_with(_survey_df())
+        with (
+            patch.object(institution_survey, "ak", ak),
+            patch.object(institution_survey, "get_expected_latest_trading_day", return_value="2024-01-31", create=True),
+        ):
             result = institution_survey.update_institution_survey(db)
         assert result["saved"] == 1
-        assert db.save_institution_survey_batch.called
+        ak.stock_jgdy_tj_em.assert_called_once_with(date="20240101")
+        record = db.save_institution_survey_batch.call_args.args[0][0]
+        assert record == {
+            "trade_date": "2024-01-01",
+            "stock_code": "000001",
+            "stock_name": "平安银行",
+            "survey_org": None,
+            "survey_type": "实地调研",
+            "survey_count": 5,
+        }
+
+    def test_invalid_key_fields_are_not_saved(self):
+        db = MagicMock()
+        frame = _survey_df().assign(代码="")
+        with (
+            patch.object(institution_survey, "ak", _ak_with(frame)),
+            patch.object(institution_survey, "get_expected_latest_trading_day", return_value="2024-01-31", create=True),
+        ):
+            result = institution_survey.update_institution_survey(db)
+        assert result["saved"] == 0
+        db.save_institution_survey_batch.assert_not_called()
 
     def test_ak_none(self):
         db = MagicMock()
@@ -263,6 +331,13 @@ class TestOptionSentiment:
             result = option_sentiment.update_option_sentiment(db)
         assert result["saved"] == 2
         assert db.save_option_sentiment_batch.called
+
+    def test_fetch_qvix_uses_real_close_column(self):
+        ak = MagicMock()
+        ak.index_option_50etf_qvix.return_value = _qvix_df()
+        with patch.object(option_sentiment, "ak", ak):
+            records = option_sentiment._fetch_qvix()
+        assert records == [{"trade_date": "2024-01-01", "qvix": 18.5}]
 
     def test_ak_none(self):
         db = MagicMock()
@@ -392,3 +467,19 @@ class TestOptionSentiment:
         func = MagicMock(side_effect=RuntimeError("fail"), __name__="test_func")
         with patch.object(option_sentiment, "ak", MagicMock()):
             assert option_sentiment._try_get_ak_df(func) is None
+
+
+def test_hkscc_result_collection_does_not_sleep_per_symbol():
+    db = MagicMock()
+    db.get_stock_list.return_value = pd.DataFrame({"code": ["000001", "000002", "000003"]})
+    db.save_north_hold_batch.return_value = 3
+    record = {"trade_date": "2026-07-21", "ts_code": "000001"}
+
+    with (
+        patch.object(hkscc_holder, "_fetch_single_north_hold", return_value=record),
+        patch.object(hkscc_holder.time, "sleep") as sleep,
+    ):
+        result = hkscc_holder.update_hkscc_holder(db)
+
+    assert result["saved"] == 3
+    sleep.assert_not_called()

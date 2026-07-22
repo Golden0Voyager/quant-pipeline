@@ -54,6 +54,12 @@ def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
 _COLUMN_MAP = {
     "股票代码": "stock_code",
     "股票简称": "stock_name",
+    "最新公告日期": "trade_date",
+    "已回购金额": "repurchase_amount",
+    "已回购股份价格区间-下限": "repurchase_price_lower",
+    "已回购股份价格区间-上限": "repurchase_price_upper",
+    "已回购股份数量": "repurchase_quantity",
+    "实施进度": "progress_status",
     "公告日期": "trade_date",
     "回购金额": "repurchase_amount",
     "回购价格": "repurchase_price",
@@ -64,9 +70,17 @@ _COLUMN_MAP = {
     "stock_name": "stock_name",
     "repurchase_amount": "repurchase_amount",
     "repurchase_price": "repurchase_price",
+    "repurchase_price_lower": "repurchase_price_lower",
+    "repurchase_price_upper": "repurchase_price_upper",
     "repurchase_quantity": "repurchase_quantity",
     "progress_status": "progress_status",
 }
+
+
+def _to_text(val: Any) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    return str(val).strip()
 
 
 def update_stock_repurchase(db: DatabaseInterface) -> dict:
@@ -87,7 +101,8 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
     raw_count = len(df)
     df = df.rename(columns=_COLUMN_MAP)
     keep = {"trade_date", "stock_code", "stock_name",
-            "repurchase_amount", "repurchase_price",
+            "repurchase_amount", "repurchase_price", "repurchase_price_lower",
+            "repurchase_price_upper",
             "repurchase_quantity", "progress_status"}
     available = [c for c in keep if c in df.columns]
     df = df[available]
@@ -100,14 +115,25 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
 
     records = []
     for _, row in df.iterrows():
+        trade_date = row.get("trade_date")
+        stock_code = _to_text(row.get("stock_code"))
+        if not trade_date or not stock_code:
+            continue
+        price_lower = _to_float(row.get("repurchase_price_lower"))
+        price_upper = _to_float(row.get("repurchase_price_upper"))
+        price = _to_float(row.get("repurchase_price"))
+        if price is None:
+            price = price_upper
         records.append({
-            "trade_date": row.get("trade_date"),
-            "stock_code": str(row.get("stock_code") or "").strip(),
-            "stock_name": str(row.get("stock_name") or "").strip(),
+            "trade_date": trade_date,
+            "stock_code": stock_code,
+            "stock_name": _to_text(row.get("stock_name")),
             "repurchase_amount": _to_float(row.get("repurchase_amount")),
-            "repurchase_price": _to_float(row.get("repurchase_price")),
+            "repurchase_price": price,
+            "repurchase_price_lower": price_lower,
+            "repurchase_price_upper": price_upper,
             "repurchase_quantity": _to_int(row.get("repurchase_quantity")),
-            "progress_status": str(row.get("progress_status", "")).strip() or None,
+            "progress_status": _to_text(row.get("progress_status")) or None,
         })
 
     if not records:

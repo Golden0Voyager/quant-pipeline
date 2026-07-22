@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
+from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface
 
 try:
@@ -42,6 +44,11 @@ def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
 
 
 _COLUMN_MAP = {
+    "代码": "stock_code",
+    "名称": "stock_name",
+    "接待日期": "trade_date",
+    "接待方式": "survey_type",
+    "接待机构数量": "survey_count",
     "股票代码": "stock_code",
     "股票简称": "stock_name",
     "调研日期": "trade_date",
@@ -57,6 +64,12 @@ _COLUMN_MAP = {
 }
 
 
+def _to_text(val: Any) -> str:
+    if val is None or pd.isna(val):
+        return ""
+    return str(val).strip()
+
+
 def update_institution_survey(db: DatabaseInterface) -> dict:
     """获取机构调研数据并保存。"""
     logger.info("\n" + "=" * 60)
@@ -67,7 +80,9 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "error": "akshare not installed"}
 
-    df = _try_get_ak_df(ak.stock_jgdy_tj_em)
+    latest_date = get_expected_latest_trading_day()
+    start_date = (datetime.strptime(latest_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y%m%d")
+    df = _try_get_ak_df(ak.stock_jgdy_tj_em, date=start_date)
     if df is None or df.empty:
         logger.warning("⚠️ 机构调研数据为空")
         return {"saved": 0}
@@ -85,12 +100,16 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
 
     records = []
     for _, row in df.iterrows():
+        trade_date = row.get("trade_date")
+        stock_code = _to_text(row.get("stock_code"))
+        if not trade_date or not stock_code:
+            continue
         records.append({
-            "trade_date": row.get("trade_date"),
-            "stock_code": str(row.get("stock_code") or "").strip(),
-            "stock_name": str(row.get("stock_name") or "").strip(),
-            "survey_org": str(row.get("survey_org", "")).strip(),
-            "survey_type": str(row.get("survey_type", "")).strip(),
+            "trade_date": trade_date,
+            "stock_code": stock_code,
+            "stock_name": _to_text(row.get("stock_name")),
+            "survey_org": _to_text(row.get("survey_org")) or None,
+            "survey_type": _to_text(row.get("survey_type")) or None,
             "survey_count": _to_int(row.get("survey_count")),
         })
 

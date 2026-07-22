@@ -278,6 +278,32 @@ def test_update_margin_trading_fallback_date():
     assert res["saved"] == 1
 
 
+def test_update_margin_trading_monday_falls_back_to_friday():
+    db = MagicMock()
+    db.save_margin_trading_batch.return_value = 1
+    fake_ak = MagicMock()
+
+    def fetch(*, date):
+        return _margin_df("sh") if date == "20260717" else pd.DataFrame()
+
+    fake_ak.stock_margin_detail_sse.side_effect = fetch
+    fake_ak.stock_margin_detail_szse.return_value = pd.DataFrame()
+    with (
+        patch.object(mf, "ak", fake_ak),
+        patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"),
+        patch.object(
+            mf,
+            "get_recent_trading_days",
+            return_value=["2026-07-20", "2026-07-17", "2026-07-16"],
+            create=True,
+        ),
+    ):
+        result = mf.update_margin_trading(db)
+
+    assert result["saved"] == 1
+    assert any(call.kwargs.get("date") == "20260717" for call in fake_ak.stock_margin_detail_sse.call_args_list)
+
+
 def test_update_dragon_tiger_empty():
     """龙虎榜空数据时返回 saved=0。"""
     db = MagicMock()

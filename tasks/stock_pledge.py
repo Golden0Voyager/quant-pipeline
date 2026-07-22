@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
-from core.calendar import get_expected_latest_trading_day
+from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.utils import is_real_db_path
 from interface import DatabaseInterface
 
 try:
@@ -71,7 +71,7 @@ _COLUMN_MAP = {
 def _get_latest_stock_pledge_date(db: DatabaseInterface) -> str | None:
     """查询数据库中股权质押已有数据的最大日期，用于 API 无最新日期时回退。"""
     db_path = getattr(db, "db_path", None)
-    if not db_path:
+    if not is_real_db_path(db_path):
         return None
     try:
         with sqlite3.connect(str(db_path), timeout=5.0) as conn:
@@ -98,11 +98,7 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
         return {"saved": 0}
 
     target_date = get_expected_latest_trading_day()
-    target_dates = [target_date]
-    for i in range(1, 8):
-        target_dates.append(
-            (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=i)).strftime("%Y-%m-%d")
-        )
+    target_dates = get_recent_trading_days(target_date, 30)
     latest_db_date = _get_latest_stock_pledge_date(db)
     if latest_db_date and latest_db_date not in target_dates:
         target_dates.append(latest_db_date)
