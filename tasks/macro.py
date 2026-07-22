@@ -67,7 +67,12 @@ def _fetch_north_flow(trade_date: str) -> list[dict]:
 
 
 def update_north_flow(db: DatabaseInterface) -> dict:
-    """获取北向资金流向数据并保存。"""
+    """获取北向资金流向数据并保存。
+
+    注：港交所自 2024-08 起停止披露日度北向资金净买入额，akshare 接口会返回全零
+    成交净买额。为避免写入误导性零值（下游策略会误读为"北向零流入"），当抓取到的
+    记录其 net_buy_amount 全为 None/0/NaN 时，跳过写入并记录停滞状态。
+    """
     logger.info("\n" + "=" * 60)
     logger.info("🌐 任务: 更新北向资金流向")
     logger.info("=" * 60)
@@ -81,6 +86,21 @@ def update_north_flow(db: DatabaseInterface) -> dict:
         if not records:
             logger.warning("⚠️ 北向资金无数据")
             return {"saved": 0, "total": 0}
+
+        # 零数据护栏：检测数据源停更（成交净买额全为零/NaN），不写入误导性占位行
+        def _is_zero(v: object) -> bool:
+            try:
+                return float(v) == 0.0  # noqa: PLR2004
+            except (TypeError, ValueError):
+                return True
+
+        if all(_is_zero(r.get("net_buy_amount")) for r in records):
+            logger.warning(
+                "⏸️  北向资金成交净买额全为零（港交所自 2024-08 停止日度披露），"
+                "跳过写入以避免误导性零值进入策略"
+            )
+            return {"saved": 0, "total": len(records), "status": "dead_source"}
+
         saved = db.save_north_flow_batch(records)
         logger.info(f"✅ 北向资金保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}

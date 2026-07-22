@@ -11,9 +11,12 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ===========================================================================
 # 数据库接口
@@ -440,6 +443,7 @@ class ProviderFactory:
             cls._db_provider = SmartMoneyDBProvider(db_path=db_path)
             cls._loader_provider = SmartMoneyLoaderProvider()
             cls._indicator_provider = SmartMoneyIndicatorProvider()
+            logger.info("🛡️ AkShare 防限流监控已注入")
         else:
             raise ValueError(f"Unknown provider: {provider}")
 

@@ -8,9 +8,11 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -309,6 +311,7 @@ class SmartMoneyDBProvider:
                         double_low REAL,
                         expire_date TEXT,
                         data_source TEXT,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(ts_code)
                     )
                 """)
@@ -322,9 +325,14 @@ class SmartMoneyDBProvider:
                         redeem_price REAL,
                         redeem_date TEXT,
                         data_source TEXT,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(ts_code)
                     )
                 """)
+                # migration: add updated_at to existing tables
+                for tbl in ("cb_quotation", "cb_redeem"):
+                    with contextlib.suppress(Exception):
+                        conn.execute(f"ALTER TABLE {tbl} ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
                 # cb_index
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS cb_index (
@@ -1143,16 +1151,17 @@ class SmartMoneyDBProvider:
         """批量保存可转债行情数据。"""
         if not records:
             return 0
-        try:
-            with self._write_lock:
-                conn = self._get_write_conn()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._write_lock:
+            conn = self._get_write_conn()
+            try:
                 before_changes = conn.total_changes
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO cb_quotation (
                         ts_code, bond_name, price, premium,
-                        double_low, expire_date, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        double_low, expire_date, data_source, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1163,30 +1172,46 @@ class SmartMoneyDBProvider:
                             r.get("double_low"),
                             r.get("expire_date"),
                             r.get("data_source"),
+                            now,
                         )
                         for r in records
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.warning(f"⚠️ 可转债行情批量保存失败: {e}")
-            return 0
+            except Exception as e:
+                err = str(e).lower()
+                if "no column named updated_at" in err:
+                    try:
+                        conn.execute("ALTER TABLE cb_quotation ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+                        before_changes = conn.total_changes
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO cb_quotation (ts_code, bond_name, price, premium, double_low, expire_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            [(r["ts_code"], r.get("bond_name"), r.get("price"), r.get("premium"), r.get("double_low"), r.get("expire_date"), r.get("data_source"), now) for r in records],
+                        )
+                        return self._commit_delta(conn, before_changes)
+                    except Exception as e2:
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"⚠️ 可转债行情保存失败（迁移后仍失败）: {e2}")
+                        return 0
+                logger = logging.getLogger(__name__)
+                logger.warning(f"⚠️ 可转债行情批量保存失败: {e}")
+                return 0
 
     def save_cb_redeem_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存可转债强赎数据。"""
         if not records:
             return 0
-        try:
-            with self._write_lock:
-                conn = self._get_write_conn()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._write_lock:
+            conn = self._get_write_conn()
+            try:
                 before_changes = conn.total_changes
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO cb_redeem (
                         ts_code, bond_name, redeem_flag,
-                        redeem_price, redeem_date, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        redeem_price, redeem_date, data_source, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1196,15 +1221,30 @@ class SmartMoneyDBProvider:
                             r.get("redeem_price"),
                             r.get("redeem_date"),
                             r.get("data_source"),
+                            now,
                         )
                         for r in records
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.warning(f"⚠️ 可转债强赎批量保存失败: {e}")
-            return 0
+            except Exception as e:
+                err = str(e).lower()
+                if "no column named updated_at" in err:
+                    try:
+                        conn.execute("ALTER TABLE cb_redeem ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+                        before_changes = conn.total_changes
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO cb_redeem (ts_code, bond_name, redeem_flag, redeem_price, redeem_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            [(r["ts_code"], r.get("bond_name"), r.get("redeem_flag"), r.get("redeem_price"), r.get("redeem_date"), r.get("data_source"), now) for r in records],
+                        )
+                        return self._commit_delta(conn, before_changes)
+                    except Exception as e2:
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"⚠️ 可转债强赎保存失败（迁移后仍失败）: {e2}")
+                        return 0
+                logger = logging.getLogger(__name__)
+                logger.warning(f"⚠️ 可转债强赎批量保存失败: {e}")
+                return 0
 
     def save_cb_index_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存可转债指数数据。"""
