@@ -1062,8 +1062,35 @@ class SingleTaskWidget(Static):
     SINGLE_TASKS: list[tuple[str, str]] = []
 
     @classmethod
+    def _validate_against_registry(cls) -> None:
+        """Assert every referenced task name exists in TASK_REGISTRY.
+
+        Keeps TUI display labels flexible while preventing drift from
+        the single source of truth for task identity.
+        """
+        try:
+            from core.task_registry import lookup_task
+
+            all_task_names: set[str] = set()
+            for _, tasks in cls._SINGLE_TASK_GROUPS:
+                for _, name in tasks:
+                    all_task_names.add(name)
+            for _, name in cls._SINGLE_TASK_UTILS:
+                all_task_names.add(name)
+
+            missing = [n for n in sorted(all_task_names) if lookup_task(n) is None]
+            if missing:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "TUI references unregistered tasks: %s", missing
+                )
+        except ImportError:
+            pass  # registry not available (e.g. test environment)
+
+    @classmethod
     def _build_single_tasks(cls) -> list[tuple[str, str]]:
         """把分组定义展开为带分隔符的下拉选项列表。"""
+        cls._validate_against_registry()
         options: list[tuple[str, str]] = [("全量更新 (Full Update)", "all")]
         for group_name, tasks in cls._SINGLE_TASK_GROUPS:
             options.append((f"[dim]── {group_name} ──[/dim]", f"__sep__{group_name}"))
