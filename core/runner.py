@@ -1,7 +1,7 @@
 """
 任务安全执行模块
 ────────────────
-提供 safe_task 包装器和 TaskTimer 计时器。
+提供 safe_task 包装器、TaskTimer 计时器和 TaskResult 结果归一化。
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
+
+from core.task_result import ErrorKind, TaskResult, TaskStatus, normalize_task_result
 
 logger = logging.getLogger(__name__)
 
@@ -33,27 +35,43 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     """
     安全执行单个任务，异常时记录日志不影响后续任务。
 
-    返回包含 status, error, elapsed 的结构化结果。
+    返回包含 status, error, elapsed 的结构化结果（``TaskResult.to_dict()``）。
     """
     task_start = time.time()
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
-        result = fn(*args, **kwargs)
-        elapsed = time.time() - task_start
-        if isinstance(result, dict) and _task_result_has_errors(result):
-            result.setdefault("status", "completed_with_errors")
-            logger.warning(f"⚠️ 任务 {name} 完成但存在错误，耗时 {elapsed:.1f}s")
+        raw = fn(*args, **kwargs)
+        result = normalize_task_result(
+            name, raw if isinstance(raw, dict | TaskResult) else {}
+        )
+        result.metadata["elapsed_seconds"] = round(time.time() - task_start, 3)
+
+        if result.status in (TaskStatus.SUCCESS, TaskStatus.NO_DATA):
+            logger.info(f"✅ 任务 {name} 完成，耗时 {result.metadata['elapsed_seconds']:.1f}s")
         else:
-            logger.info(f"✅ 任务 {name} 完成，耗时 {elapsed:.1f}s")
-        return result
+            logger.warning(
+                f"⚠️ 任务 {name} [{result.status}] 耗时 "
+                f"{result.metadata['elapsed_seconds']:.1f}s"
+                + (f": {result.error}" if result.error else "")
+            )
+        return result.to_dict()
     except Exception as e:
         elapsed = time.time() - task_start
         logger.error(f"❌ 任务 {name} 异常终止 (耗时 {elapsed:.1f}s): {e}", exc_info=True)
-        return {"error": str(e), "status": "crashed"}
+        result = TaskResult.failed(
+            name, ErrorKind.INTERNAL, str(e)[:2000],
+        )
+        result.metadata["elapsed_seconds"] = round(elapsed, 3)
+        return result.to_dict()
 
 
 def _task_result_has_errors(result: dict[str, Any]) -> bool:
-    """Return True when a task completed but reported a non-empty error state."""
+    """Return True when a task completed but reported a non-empty error state.
+
+    .. deprecated::
+       Use ``normalize_task_result`` and check ``TaskResult.exit_failure``
+       instead. Kept for existing callers during migration.
+    """
     if result.get("error") or result.get("aborted"):
         return True
     failed = result.get("failed")
