@@ -9,10 +9,10 @@ A-share quantitative data automation pipeline. Fetches, stores, and maintains da
 | Item | Value |
 |------|-------|
 | Database | `~/Code/quant_data/quant_core.db` (SQLite) |
-| Stocks | ~5528 |
-| Daily bars | ~7,160,000 rows |
+| Stocks | ~5,530 |
+| Daily bars | ~7,237,000 rows |
 | Date range | 1996-07-02 ~ current |
-| Indicators | ~4,290,000 rows |
+| Indicators | ~7,236,000 rows |
 | Python | `uv`-managed, `.venv/` in project root |
 | TUI | Textual-based (`tui.py`) |
 
