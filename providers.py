@@ -8,7 +8,6 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
-import contextlib
 import logging
 import sqlite3
 import threading
@@ -34,10 +33,41 @@ class SmartMoneyDBProvider:
         self._db = DatabaseManager(db_path=db_path)
         self._ensure_wal_mode()
         self._ensure_tables()
-        self._migrate_phase2_tables()
+        self._run_versioned_migrations()
         # 共享写连接 + 写锁：所有 batch 写入串行化，避免并发写导致 database is locked
         self._write_lock = threading.Lock()
         self._write_conn: sqlite3.Connection | None = None
+
+    def _run_versioned_migrations(self) -> None:
+        """Run the versioned migration system in-place.
+
+        Replaces the old ``_ensure_tables`` / ``_migrate_phase2_tables``
+        ad-hoc DDL with tracked, versioned migrations from ``migrations/``.
+
+        If the engine is not available (e.g. import error), logs a warning
+        and falls back to the legacy ``_migrate_phase2_tables`` so the
+        pipeline remains operational during the transition.
+        """
+        try:
+            from core.migrations import run_migrations
+
+            db_str = str(self._db.db_path)
+            results = run_migrations(db_path=db_str)
+            applied = [r for r in results if r.get("applied")]
+            if applied:
+                for r in applied:
+                    logger.info("  ✅ migration %03d: %s (%dms)", r["version"], r["description"], r["duration_ms"])
+            errors = [r for r in results if r.get("error")]
+            if errors:
+                for r in errors:
+                    logger.error("  ❌ migration %03d failed: %s", r["version"], r["error"])
+        except Exception:
+            logger.warning("⚠️ versioned migrations unavailable, falling back to legacy DDL")
+            self._legacy_migrate_phase2_tables()
+
+    def _legacy_migrate_phase2_tables(self) -> None:
+        """Fallback: original ad-hoc phase-2 migration."""
+        self._old_migrate_phase2_tables()
 
     def _get_write_conn(self) -> sqlite3.Connection:
         """复用单个写连接（类似 DatabaseManager._connect_for_write）。
@@ -330,10 +360,6 @@ class SmartMoneyDBProvider:
                         UNIQUE(ts_code)
                     )
                 """)
-                # migration: add updated_at to existing tables
-                for tbl in ("cb_quotation", "cb_redeem"):
-                    with contextlib.suppress(Exception):
-                        conn.execute(f"ALTER TABLE {tbl} ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
                 # cb_index
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS cb_index (
@@ -513,7 +539,7 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logger.warning(f"⚠️ _ensure_tables 创建表失败: {e}")
 
-    def _migrate_phase2_tables(self) -> None:
+    def _old_migrate_phase2_tables(self) -> None:
         """独立执行 Phase 2 兼容迁移，避免被其他兜底 DDL 的异常阻断。"""
         try:
             with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
