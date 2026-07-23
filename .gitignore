@@ -24,3 +24,8 @@ logs/
 
 # Environment config (may contain secrets)
 .env
+
+# SQLite databases (test artifacts, scratch copies)
+*.db
+*.db-wal
+*.db-shm
