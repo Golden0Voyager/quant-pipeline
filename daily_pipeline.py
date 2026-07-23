@@ -24,6 +24,7 @@ import sys
 import time
 from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
 from pathlib import Path
+from typing import Any
 
 # 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
 _CODE_DIR = os.path.expanduser("~/Code")
@@ -159,6 +160,138 @@ _release_lock = ProcessLock.release
 _safe_task = safe_task
 _lower_process_priority = lower_process_priority
 _should_update = should_update
+
+# ── Registry-backed task callable map ─────────────────────────────────
+# Maps CLI task names to their callable functions, enabling the registry
+# to drive task routing instead of the hardcoded if-elif chain.
+_TASK_CALLABLES: dict[str, Any] = {
+    "update_stock_list": update_stock_list,
+    "update_bars": update_bars,
+    "update_indicators": update_indicators,
+    "update_fundamentals": update_fundamentals,
+    "update_market_snapshot": update_market_snapshot,
+    "update_fund_flow": update_fund_flow,
+    "update_margin_trading": update_margin_trading,
+    "update_dragon_tiger": update_dragon_tiger,
+    "update_block_trade": update_block_trade,
+    "update_sector_fund_flow": update_sector_fund_flow,
+    "update_shareholder_count": update_shareholder_count,
+    "update_quarterly_financials": update_quarterly_financials,
+    "update_historical_valuation": update_historical_valuation,
+    "update_sector_industry": update_sector_industry,
+    "update_industry": update_industry,
+    "update_north_flow": update_north_flow,
+    "update_north_hold": update_north_hold,
+    "update_south_flow": update_south_flow,
+    "update_ah_premium": update_ah_premium,
+    "update_etf_daily": update_etf_daily,
+    "update_index_daily": update_index_daily,
+    "update_cb_quotation": update_cb_quotation,
+    "update_cb_redeem": update_cb_redeem,
+    "update_cb_index": update_cb_index,
+    "update_restricted_share": update_restricted_share,
+    "update_earnings_forecast": update_earnings_forecast,
+    "update_limit_up_down": update_limit_up_down,
+    "update_dividend_summary": update_dividend_summary,
+    "update_china_macro": update_china_macro,
+    "update_money_market": update_money_market,
+    "update_gold_price": update_gold_price,
+    "update_crude_oil": update_crude_oil,
+    "update_usd": update_usd,
+    "update_global_index": update_global_index,
+    "update_us_treasury": update_us_treasury,
+    "update_futures": update_futures,
+    "update_concept_board": update_concept_board,
+    "update_concept_member": update_concept_member,
+    "update_market_valuation": update_market_valuation,
+    "update_sector_derivatives": update_sector_derivatives,
+    "update_option_sentiment": update_option_sentiment,
+    "update_stock_repurchase": update_stock_repurchase,
+    "update_institution_survey": update_institution_survey,
+    "update_stock_pledge": update_stock_pledge,
+    "update_chip_distribution": update_chip_distribution,
+    "update_chip_distribution_em": update_chip_distribution_em,
+    "update_chip_distribution_em_fullmarket": update_chip_distribution_em_fullmarket,
+    "retry": retry_failed,
+    "health_check": health_check,
+}
+
+
+def _run_registry_task(
+    task_name: str,
+    db: DatabaseInterface,
+    loader: DataLoaderInterface | None = None,
+    engine: IndicatorEngineInterface | None = None,
+    *,
+    symbols: list[str] | None = None,
+    limit: int | None = None,
+    resume: bool = False,
+    force: bool = False,
+) -> Any:
+    fn = _TASK_CALLABLES.get(task_name)
+    if fn is None:
+        raise ValueError(f"unknown task: {task_name}")
+
+    if task_name == "update_indicators":
+        if force or symbols:
+            return _dispatch_indicators_force(fn, db, engine, symbols)
+        return fn(db, engine)
+
+    if task_name == "update_chip_distribution":
+        if force or symbols:
+            return _dispatch_chip_force(fn, db, symbols)
+        return fn(db)
+
+    if task_name in ("update_bars",):
+        return fn(db, loader, limit=limit, resume=resume, symbols=symbols, force=force)
+
+    if task_name in ("update_fundamentals", "update_fund_flow", "update_quarterly_financials"):
+        return fn(db, loader, symbols=symbols)
+
+    if task_name in (
+        "update_margin_trading", "update_dragon_tiger",
+        "update_block_trade", "update_shareholder_count",
+        "update_historical_valuation",
+    ):
+        return fn(db, symbols=symbols)
+
+    if task_name == "retry":
+        return fn(db, loader)
+
+    return fn(db)
+
+
+def _dispatch_indicators_force(
+    fn: Any, db: DatabaseInterface, engine: IndicatorEngineInterface,
+    symbols: list[str] | None,
+) -> Any:
+    conn_kw = sqlite3.connect(str(db.db_path))
+    if symbols:
+        target_symbols = symbols
+    else:
+        target_symbols = [
+            row[0] for row in
+            conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code")
+        ]
+    conn_kw.close()
+    logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的技术指标")
+    return fn(db, engine, symbols_to_update=target_symbols)
+
+
+def _dispatch_chip_force(
+    fn: Any, db: DatabaseInterface, symbols: list[str] | None,
+) -> Any:
+    conn_kw = sqlite3.connect(str(db.db_path))
+    if symbols:
+        target_symbols = symbols
+    else:
+        target_symbols = [
+            row[0] for row in
+            conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code")
+        ]
+    conn_kw.close()
+    logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的筹码分布")
+    return fn(db, symbols_to_update=target_symbols)
 
 
 # ===========================================================================
@@ -339,124 +472,15 @@ def main():
             results = run_all(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
-        elif args.task == "update_stock_list":
-            update_stock_list(db)
-        elif args.task == "update_bars":
-            update_bars(db, loader, limit=args.limit, resume=args.resume, symbols=symbols, force=args.force)
-        elif args.task == "update_indicators":
-            if args.force or symbols:
-                conn_kw = sqlite3.connect(str(db.db_path))
-                if symbols:
-                    target_symbols = symbols
-                else:
-                    target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
-                conn_kw.close()
-                logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的技术指标")
-                update_indicators(db, engine, symbols_to_update=target_symbols)
-            else:
-                update_indicators(db, engine)
-        elif args.task == "update_chip_distribution":
-            if args.force or symbols:
-                conn_kw = sqlite3.connect(str(db.db_path))
-                if symbols:
-                    target_symbols = symbols
-                else:
-                    target_symbols = [row[0] for row in conn_kw.execute("SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code").fetchall()]
-                conn_kw.close()
-                logger.info(f"🔁 强制/指定股票模式：重算 {len(target_symbols)} 只股票的筹码分布")
-                update_chip_distribution(db, symbols_to_update=target_symbols)
-            else:
-                update_chip_distribution(db)
-        elif args.task == "update_chip_distribution_em":
-            update_chip_distribution_em(db)
-        elif args.task == "update_chip_distribution_em_fullmarket":
-            update_chip_distribution_em_fullmarket(db)
-        elif args.task == "update_fundamentals":
-            update_fundamentals(db, loader, symbols=symbols)
-        elif args.task == "update_market_snapshot":
-            update_market_snapshot(db)
-        elif args.task == "update_fund_flow":
-            update_fund_flow(db, loader, symbols=symbols)
-        elif args.task == "update_margin_trading":
-            update_margin_trading(db, symbols=symbols)
-        elif args.task == "update_dragon_tiger":
-            update_dragon_tiger(db, symbols=symbols)
-        elif args.task == "update_block_trade":
-            update_block_trade(db, symbols=symbols)
-        elif args.task == "update_sector_fund_flow":
-            update_sector_fund_flow(db)
-        elif args.task == "update_shareholder_count":
-            update_shareholder_count(db, symbols=symbols)
-        elif args.task == "update_quarterly_financials":
-            update_quarterly_financials(db, loader, symbols=symbols)
-        elif args.task == "update_historical_valuation":
-            update_historical_valuation(db, symbols=symbols)
-        elif args.task == "update_sector_industry":
-            update_sector_industry(db)
-        elif args.task == "update_industry":
-            update_industry(db)
-        elif args.task == "update_north_flow":
-            update_north_flow(db)
-        elif args.task == "update_north_hold":
-            update_north_hold(db)
-        elif args.task == "update_index_daily":
-            update_index_daily(db)
-        elif args.task == "update_limit_up_down":
-            update_limit_up_down(db)
-        elif args.task == "update_dividend_summary":
-            update_dividend_summary(db)
-        elif args.task == "update_gold_price":
-            update_gold_price(db)
-        elif args.task == "update_crude_oil":
-            update_crude_oil(db)
-        elif args.task == "update_usd":
-            update_usd(db)
-        elif args.task == "update_global_index":
-            update_global_index(db)
-        elif args.task == "update_us_treasury":
-            update_us_treasury(db)
-        elif args.task == "update_futures":
-            update_futures(db)
-        elif args.task == "update_south_flow":
-            update_south_flow(db)
-        elif args.task == "update_ah_premium":
-            update_ah_premium(db)
-        elif args.task == "update_etf_daily":
-            update_etf_daily(db)
-        elif args.task == "update_cb_quotation":
-            update_cb_quotation(db)
-        elif args.task == "update_cb_redeem":
-            update_cb_redeem(db)
-        elif args.task == "update_cb_index":
-            update_cb_index(db)
-        elif args.task == "update_restricted_share":
-            update_restricted_share(db)
-        elif args.task == "update_earnings_forecast":
-            update_earnings_forecast(db)
-        elif args.task == "update_sector_derivatives":
-            update_sector_derivatives(db)
-        elif args.task == "update_china_macro":
-            update_china_macro(db)
-        elif args.task == "update_money_market":
-            update_money_market(db)
-        elif args.task == "update_market_valuation":
-            update_market_valuation(db)
-        elif args.task == "update_concept_board":
-            update_concept_board(db)
-        elif args.task == "update_concept_member":
-            update_concept_member(db)
-        elif args.task == "update_option_sentiment":
-            update_option_sentiment(db)
-        elif args.task == "update_stock_repurchase":
-            update_stock_repurchase(db)
-        elif args.task == "update_institution_survey":
-            update_institution_survey(db)
-        elif args.task == "update_stock_pledge":
-            update_stock_pledge(db)
-        elif args.task == "retry":
-            retry_failed(db, loader)
-        elif args.task == "health_check":
-            health_check(db)
+        elif args.task in _TASK_CALLABLES:
+            _run_registry_task(
+                args.task, db, loader, engine,
+                symbols=symbols, limit=args.limit,
+                resume=args.resume, force=args.force,
+            )
+        else:
+            logger.error("未知任务: %s", args.task)
+            sys.exit(1)
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在退出...")
     finally:
