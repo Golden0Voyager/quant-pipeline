@@ -108,7 +108,7 @@ class TestConnectionEdgeCases:
         migrated = SmartMoneyDBProvider(db_path=str(db_path))
         # conftest 的 DatabaseManager mock 固定使用全局路径，显式绑定本用例数据库。
         migrated._db.db_path = str(db_path)
-        migrated._migrate_phase2_tables()
+        migrated._old_migrate_phase2_tables()
         try:
             with sqlite3.connect(db_path) as conn:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")}
