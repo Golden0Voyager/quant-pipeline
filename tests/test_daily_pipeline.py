@@ -842,13 +842,13 @@ class TestMain:
     def test_health_check(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "health_check"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.health_check") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": MagicMock()}) as fn_dict:
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once()
+            fn_dict["health_check"].assert_called_once()
 
     def test_main_does_not_create_magicmock_file(self, weekday_mock, tmp_path):
         """main() 不应在 ProviderFactory.get_db() 为 MagicMock 时生成垃圾 SQLite 文件。"""
@@ -870,15 +870,16 @@ class TestMain:
             assert not new_magicmock
 
     def test_update_bars_with_limit(self, weekday_mock):
+        mock_fn = MagicMock()
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--limit", "5"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_bars") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}):
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None, force=False)
+            mock_fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None, force=False)
 
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
@@ -892,15 +893,16 @@ class TestMain:
             fn.assert_called_once_with(db, loader, engine, resume=True, force=True)
 
     def test_task_retry(self, weekday_mock):
+        mock_fn = MagicMock()
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "retry"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.retry_failed") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"retry": mock_fn}):
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader)
+            mock_fn.assert_called_once_with(db, loader)
 
 
 # ===========================================================================
