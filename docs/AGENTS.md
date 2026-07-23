@@ -94,6 +94,7 @@ AkShare (Sina) ──► daily_pipeline.py ──► quant_core.db
 - **Beijing stocks**: Skipped by default (`INCLUDE_BJ=1` to include)
 - **Disciplined codebase**: ruff + mypy + pytest CI gate
 - **No `as any` / `# type: ignore`** unless absolutely necessary
+- **Git workflow**: 开发新功能 (new feature) 时，建议走 `/git-feature` 流程（使用 `/git-feature start` 创建分支，完成开发后使用 `/git-feature done` 完成推送/PR/合入/清理全流程）。
 
 ## TUI Architecture
 
