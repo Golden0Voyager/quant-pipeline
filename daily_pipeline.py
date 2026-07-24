@@ -104,6 +104,7 @@ from tasks.financials import (
     update_quarterly_financials,
     update_shareholder_count,
 )
+from tasks.financial_history import update_financial_history
 from tasks.futures import update_futures
 from tasks.index_chain import (
     update_chip_distribution_em,
@@ -212,6 +213,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_chip_distribution": update_chip_distribution,
     "update_chip_distribution_em": update_chip_distribution_em,
     "update_chip_distribution_em_fullmarket": update_chip_distribution_em_fullmarket,
+    "update_financial_history": update_financial_history,
     "retry": retry_failed,
     "health_check": health_check,
 }
@@ -374,6 +376,9 @@ def run_all(
     )
     results["chip_distribution_em"] = _safe_task(
         "update_chip_distribution_em", update_chip_distribution_em, db
+    )
+    results["financial_history"] = _safe_task(
+        "update_financial_history", update_financial_history, db
     )
 
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
