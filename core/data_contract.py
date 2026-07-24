@@ -10,6 +10,7 @@ structured violation list.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -299,3 +300,152 @@ def validate_frame(
         source_columns=source_columns,
         schema_fingerprint=fingerprint,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Contract registry — one DataContract per writable dataset
+# ═══════════════════════════════════════════════════════════════════════
+
+MARKET_VALUATION_CONTRACT = DataContract(
+    name="market_valuation",
+    fields=(
+        FieldRule("date", required=True, nullable=False),
+        FieldRule("pe_median"),
+        FieldRule("pe_quantile"),
+        FieldRule("pe_lyr_median"),
+        FieldRule("pb_median"),
+        FieldRule("pb_quantile"),
+        FieldRule("equity_bond_spread", min_non_null_ratio=0.5),
+        FieldRule("ebs_ma"),
+        FieldRule("csi300_close"),
+        FieldRule("data_source", nullable=False),
+    ),
+    unique_by=("date",),
+    min_rows=1,
+)
+
+CONCEPT_BOARD_CONTRACT = DataContract(
+    name="concept_board",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("concept_code", required=True, nullable=False),
+        FieldRule("concept_name"),
+        FieldRule("pct_change"),
+        FieldRule("turnover"),
+        FieldRule("up_count"),
+        FieldRule("down_count"),
+        FieldRule("data_source", nullable=False),
+    ),
+    unique_by=("trade_date", "concept_code"),
+    min_rows=1,
+)
+
+STOCK_REPURCHASE_CONTRACT = DataContract(
+    name="stock_repurchase",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("stock_code", required=True, nullable=False),
+        FieldRule("stock_name"),
+        FieldRule("repurchase_amount"),
+        FieldRule("repurchase_price"),
+        FieldRule("repurchase_price_lower"),
+        FieldRule("repurchase_price_upper"),
+        FieldRule("repurchase_quantity"),
+        FieldRule("progress_status"),
+    ),
+    unique_by=("trade_date", "stock_code"),
+    min_rows=1,
+)
+
+INSTITUTION_SURVEY_CONTRACT = DataContract(
+    name="institution_survey",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("stock_code", required=True, nullable=False),
+        FieldRule("stock_name"),
+        FieldRule("survey_org"),
+        FieldRule("survey_type"),
+        FieldRule("survey_count"),
+    ),
+    unique_by=("trade_date", "stock_code"),
+    min_rows=1,
+)
+
+STOCK_PLEDGE_CONTRACT = DataContract(
+    name="stock_pledge",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("stock_code", required=True, nullable=False),
+        FieldRule("stock_name"),
+        FieldRule("pledger"),
+        FieldRule("pledge_amount"),
+        FieldRule("pledge_ratio"),
+        FieldRule("pledge_org"),
+    ),
+    unique_by=("trade_date", "stock_code"),
+    min_rows=1,
+)
+
+OPTION_SENTIMENT_CONTRACT = DataContract(
+    name="option_sentiment",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("qvix"),
+        FieldRule("pcr"),
+        FieldRule("put_volume"),
+        FieldRule("call_volume"),
+        FieldRule("put_oi"),
+        FieldRule("call_oi"),
+        FieldRule("implied_vol_avg"),
+    ),
+    unique_by=("trade_date",),
+    min_rows=1,
+)
+
+QUARTERLY_FINANCIALS_CONTRACT = DataContract(
+    name="quarterly_financials",
+    fields=(
+        FieldRule("ts_code", required=True, nullable=False),
+        FieldRule("report_period", required=True, nullable=False),
+        FieldRule("announced_date"),
+        FieldRule("basic_eps", min_non_null_ratio=0.5),
+        FieldRule("diluted_eps"),
+        FieldRule("revenue"),
+        FieldRule("net_profit"),
+        FieldRule("roe"),
+        FieldRule("roe_diluted"),
+        FieldRule("gross_margin"),
+        FieldRule("net_margin"),
+        FieldRule("data_source"),
+    ),
+    unique_by=("ts_code", "report_period"),
+    min_rows=1,
+)
+
+
+# ── helper for task modules ────────────────────────────────────────────
+
+
+def validate_records(
+    records: list[dict],
+    contract: DataContract,
+    logger: logging.Logger | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Validate a list of record dicts against a contract.
+
+    Returns ``(valid_records, violations)``.  When *violations* is non-empty
+    the caller should still save *valid_records* (they passed row-level
+    checks) but log a warning.
+    """
+    if not records:
+        return [], []
+    df = pd.DataFrame(records)
+    result = validate_frame(df, contract)
+    if result.can_write:
+        return records, []
+    if logger:
+        for v in result.violations:
+            logger.warning("🚫 数据合约校验失败 [%s]: %s", contract.name, v)
+    if result.accepted.empty:
+        return [], result.violations
+    return result.accepted.to_dict("records"), result.violations
