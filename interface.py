@@ -110,6 +110,35 @@ class DatabaseInterface(Protocol):
         """批量保存季度财务指标数据，返回实际保存条数。"""
         ...
 
+    def get_financial_period_coverage(self, periods: list[str]) -> dict[str, int]:
+        """查询各报告期的股票覆盖数，用于周期级增量检测。
+
+        Args:
+            periods: 报告期列表，如 ["20251231", "20250930", ...]
+
+        Returns:
+            {period: count_of_distinct_ts_codes, ...}
+        """
+        ...
+
+    def save_financial_history_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        """原子写入季度财务历史，同时更新最新视图。
+
+        每条记录必须含 ts_code、report_period、publish_date。
+        写入 quarterly_financials_history (INSERT OR REPLACE)，
+        并按 (ts_code, report_period) 取最新 publish_date 刷新 quarterly_financials。
+
+        Returns:
+            {"history_saved": int, "latest_updated": int}
+        """
+        ...
+
+    def get_financials_as_of(
+        self, symbol: str, as_of_date: str,
+    ) -> dict[str, Any] | None:
+        """返回给定截止日前已知的最新财务数据（无未来信息）。"""
+        ...
+
     def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存大宗交易数据，返回实际保存条数。"""
         ...
