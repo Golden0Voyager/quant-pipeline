@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from tasks.financial_history import (
     _closed_report_periods,
     _minimum_market_coverage,
