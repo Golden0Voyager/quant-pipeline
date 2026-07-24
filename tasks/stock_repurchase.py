@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -38,16 +39,6 @@ def _to_int(val: Any) -> int | None:
         v = int(float(val))
         return None if pd.isna(val) else v
     except (ValueError, TypeError):
-        return None
-
-
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
         return None
 
 
@@ -93,8 +84,9 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "error": "akshare not installed"}
 
-    df = _try_get_ak_df(ak.stock_repurchase_em)
-    if df is None or df.empty:
+    resp = get_default_client().call("eastmoney", lambda: ak.stock_repurchase_em())
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         logger.warning("⚠️ 股票回购数据为空")
         return {"saved": 0, "total": 0}
 
