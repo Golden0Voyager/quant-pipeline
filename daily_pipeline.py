@@ -57,6 +57,7 @@ from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
 from core.runner import safe_task
+from core.task_result import TaskResult, normalize_task_result
 from core.utils import (
     infer_market as _infer_market,  # noqa: F401
 )
@@ -99,18 +100,19 @@ from tasks.finance_flow import (
     update_etf_daily,
     update_south_flow,
 )
+from tasks.financial_history import update_financial_history
 from tasks.financials import (
     update_industry,
     update_quarterly_financials,
     update_shareholder_count,
 )
-from tasks.financial_history import update_financial_history
 from tasks.futures import update_futures
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
     update_index_daily,
 )
+from tasks.index_membership import update_index_membership
 from tasks.institution_survey import update_institution_survey
 from tasks.macro import (
     update_crude_oil,
@@ -214,6 +216,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_chip_distribution_em": update_chip_distribution_em,
     "update_chip_distribution_em_fullmarket": update_chip_distribution_em_fullmarket,
     "update_financial_history": update_financial_history,
+    "update_index_membership": update_index_membership,
     "retry": retry_failed,
     "health_check": health_check,
 }
@@ -380,6 +383,12 @@ def run_all(
     results["financial_history"] = _safe_task(
         "update_financial_history", update_financial_history, db
     )
+    results["index_membership"] = _safe_task(
+        "update_index_membership", update_index_membership, db
+    )
+    results["concept_member"] = _safe_task(
+        "update_concept_member", update_concept_member, db
+    )
 
     results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
     results["health"] = _safe_task("health_check", health_check, db)
@@ -392,12 +401,10 @@ def run_all(
     logger.info("=" * 60)
 
     # 检查是否有任务失败，供 main() 决定退出码
+    # 使用 TaskResult.exit_failure 语义：degraded / failed / aborted
     results["crashed"] = any(
         isinstance(v, dict)
-        and (
-            v.get("status") in {"crashed", "completed_with_errors"}
-            or bool(v.get("error"))
-        )
+        and v.get("status") in {"degraded", "failed", "aborted"}
         for v in results.values()
     )
     return results
@@ -478,11 +485,15 @@ def main():
             if results.get("crashed"):
                 sys.exit(1)
         elif args.task in _TASK_CALLABLES:
-            _run_registry_task(
+            raw = _run_registry_task(
                 args.task, db, loader, engine,
                 symbols=symbols, limit=args.limit,
                 resume=args.resume, force=args.force,
             )
+            if isinstance(raw, dict | TaskResult):
+                result = normalize_task_result(args.task, raw)
+                if result.exit_failure:
+                    sys.exit(1)
         else:
             logger.error("未知任务: %s", args.task)
             sys.exit(1)
