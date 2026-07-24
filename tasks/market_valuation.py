@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -32,16 +33,6 @@ def _to_float(val: Any) -> float | None:
         return None
 
 
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
-        return None
-
-
 # ===========================================================================
 # 大盘 PE(TTM + LYR) 中位数
 # ===========================================================================
@@ -49,8 +40,9 @@ def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
 
 def _fetch_pe() -> list[dict]:
     """获取全市场 PE(TTM/LYR) 中位数及历史分位。"""
-    df = _try_get_ak_df(ak.stock_a_ttm_lyr)
-    if df is None or df.empty:
+    resp = get_default_client().call("legu", lambda: ak.stock_a_ttm_lyr())
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
         "date": "date",
@@ -82,8 +74,9 @@ def _fetch_pe() -> list[dict]:
 
 def _fetch_pb() -> list[dict]:
     """获取全市场 PB 中位数及历史分位。"""
-    df = _try_get_ak_df(ak.stock_a_all_pb)
-    if df is None or df.empty:
+    resp = get_default_client().call("legu", lambda: ak.stock_a_all_pb())
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
         "date": "date",
@@ -113,8 +106,9 @@ def _fetch_pb() -> list[dict]:
 
 def _fetch_ebs() -> list[dict]:
     """获取股债利差（沪深300 vs 10年国债）。"""
-    df = _try_get_ak_df(ak.stock_ebs_lg)
-    if df is None or df.empty:
+    resp = get_default_client().call("legu", lambda: ak.stock_ebs_lg())
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
         "日期": "date",
