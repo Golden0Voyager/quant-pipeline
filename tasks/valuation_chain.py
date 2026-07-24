@@ -17,6 +17,7 @@ from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
+from core.source_client import get_default_client
 from core.utils import infer_market, should_skip_beijing  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
 
@@ -60,13 +61,8 @@ def update_fundamentals(
         logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
         return {"saved": 0, "total": 0, "skipped": True}
 
-    import requests as _req
-
-    session = _req.Session()
-    session.proxies = {"http": None, "https": None}
-    session.trust_env = False
-
     all_records = []
+    session = get_default_client().get_session("eastmoney")
     for td in trade_dates:
         if all_records:
             break
