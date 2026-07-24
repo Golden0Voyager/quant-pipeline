@@ -8,9 +8,11 @@ SmartMoney Provider 实现
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,14 @@ from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.indicators import IndicatorCalculator
 
 logger = logging.getLogger(__name__)
+
+
+def _prev_date(d: str) -> str:
+    """Return YYYY-MM-DD one day before *d*."""
+    from datetime import timedelta
+    dt = datetime.strptime(d, "%Y-%m-%d") - timedelta(days=1)
+    return dt.strftime("%Y-%m-%d")
+
 
 # ===========================================================================
 # Database Provider
@@ -44,30 +54,25 @@ class SmartMoneyDBProvider:
         Replaces the old ``_ensure_tables`` / ``_migrate_phase2_tables``
         ad-hoc DDL with tracked, versioned migrations from ``migrations/``.
 
-        If the engine is not available (e.g. import error), logs a warning
-        and falls back to the legacy ``_migrate_phase2_tables`` so the
-        pipeline remains operational during the transition.
+        Any migration failure is treated as a hard failure and propagated,
+        so operators cannot mistake a silently-fallback database for a
+        correctly-migrated one.
         """
-        try:
-            from core.migrations import run_migrations
+        from core.migrations import MigrationError, run_migrations
 
-            db_str = str(self._db.db_path)
-            results = run_migrations(db_path=db_str)
-            applied = [r for r in results if r.get("applied")]
-            if applied:
-                for r in applied:
-                    logger.info("  ✅ migration %03d: %s (%dms)", r["version"], r["description"], r["duration_ms"])
-            errors = [r for r in results if r.get("error")]
-            if errors:
-                for r in errors:
-                    logger.error("  ❌ migration %03d failed: %s", r["version"], r["error"])
-        except Exception:
-            logger.warning("⚠️ versioned migrations unavailable, falling back to legacy DDL")
-            self._legacy_migrate_phase2_tables()
-
-    def _legacy_migrate_phase2_tables(self) -> None:
-        """Fallback: original ad-hoc phase-2 migration."""
-        self._old_migrate_phase2_tables()
+        db_str = str(self._db.db_path)
+        results = run_migrations(db_path=db_str)
+        applied = [r for r in results if r.get("applied")]
+        if applied:
+            for r in applied:
+                logger.info("  ✅ migration %03d: %s (%dms)", r["version"], r["description"], r["duration_ms"])
+        errors = [r for r in results if r.get("error")]
+        if errors:
+            for r in errors:
+                logger.error("  ❌ migration %03d failed: %s", r["version"], r["error"])
+            raise MigrationError(
+                f"{len(errors)} versioned migration(s) failed; see logs above"
+            )
 
     def _get_write_conn(self) -> sqlite3.Connection:
         """复用单个写连接（类似 DatabaseManager._connect_for_write）。
@@ -645,6 +650,72 @@ class SmartMoneyDBProvider:
     def get_last_task_run(self, task_name: str) -> str | None:
         return self._db.get_last_task_run(task_name)
 
+    def record_ingestion_run(self, result: dict[str, Any]) -> None:
+        """把 ``TaskResult.to_dict()`` 写入 ``ingestion_runs`` 审计表。"""
+        if not result:
+            return
+        metadata = result.get("metadata") or {}
+        if isinstance(metadata, dict):
+            metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
+        else:
+            metadata_json = str(metadata)
+
+        run_id = result.get("run_id") or str(uuid.uuid4())
+        finished_at = result.get("finished_at") or datetime.utcnow().isoformat(timespec="seconds")
+        started_at = result.get("started_at") or finished_at
+
+        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+            conn.execute(
+                """
+                INSERT INTO ingestion_runs (
+                    run_id, task_name, source, status, started_at, finished_at,
+                    requested_date, data_date, attempts, fetched_rows, accepted_rows,
+                    rejected_rows, saved_rows, schema_fingerprint, error_kind,
+                    error_message, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    result.get("task_name", ""),
+                    result.get("source"),
+                    result.get("status", ""),
+                    started_at,
+                    finished_at,
+                    None,
+                    result.get("data_date"),
+                    result.get("attempted", 0),
+                    result.get("fetched", 0),
+                    result.get("accepted", 0),
+                    result.get("rejected", 0),
+                    result.get("saved", 0),
+                    result.get("schema_fingerprint"),
+                    result.get("error_kind"),
+                    result.get("error"),
+                    metadata_json,
+                ),
+            )
+            conn.commit()
+
+    def record_ingestion_rejection(
+        self,
+        run_id: str,
+        row_number: int,
+        reason: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """把被拒绝的单行数据写入 ``ingestion_rejections`` 审计表。"""
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ingestion_rejections
+                    (run_id, row_number, reason, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, row_number, reason, payload_json),
+            )
+            conn.commit()
+
     def get_stock_list(self) -> pd.DataFrame:
         return self._db.get_stock_list()
 
@@ -879,7 +950,7 @@ class SmartMoneyDBProvider:
             if row is None:
                 return None
             columns = [d[0] for d in cur.description]
-            return dict(zip(columns, row))
+            return dict(zip(columns, row, strict=True))
         finally:
             conn.close()
 
@@ -1292,6 +1363,78 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 概念板块成分股数据保存失败: {e}")
             return 0
 
+    def save_concept_member_history_batch(
+        self,
+        records: list[dict[str, Any]],
+        run_id: str,
+        valid_from: str,
+    ) -> int:
+        """批量保存概念板块成分股 PIT 历史快照。"""
+        if not records:
+            return 0
+        try:
+            valid_to = _prev_date(valid_from)
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                # close previous active records
+                conn.execute(
+                    "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                    (valid_to,),
+                )
+                # insert new snapshot
+                conn.executemany(
+                    """INSERT INTO concept_member_history
+                       (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
+                       VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                    [
+                        (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
+                         valid_from, r.get("source", "akshare"), run_id)
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 概念板块成分股 PIT 历史保存失败: {e}")
+            return 0
+
+    def save_index_member_history_batch(
+        self,
+        records: list[dict[str, Any]],
+        run_id: str,
+        valid_from: str,
+    ) -> int:
+        """批量保存指数成分股 PIT 历史快照。"""
+        if not records:
+            return 0
+        try:
+            valid_to = _prev_date(valid_from)
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                # close previous active records
+                conn.execute(
+                    "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                    (valid_to,),
+                )
+                # insert new snapshot
+                conn.executemany(
+                    """INSERT INTO index_member_history
+                       (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
+                       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
+                    [
+                        (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
+                         r.get("weight"), valid_from, r.get("source", "akshare"), run_id)
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 指数成分股 PIT 历史保存失败: {e}")
+            return 0
+
     def save_south_flow_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存南向资金流向数据。"""
         if not records:
@@ -1396,7 +1539,7 @@ class SmartMoneyDBProvider:
                 err = str(e).lower()
                 if "no column named updated_at" in err:
                     try:
-                        conn.execute("ALTER TABLE cb_quotation ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+                        conn.execute("ALTER TABLE cb_quotation ADD COLUMN updated_at DATETIME")
                         before_changes = conn.total_changes
                         conn.executemany(
                             "INSERT OR REPLACE INTO cb_quotation (ts_code, bond_name, price, premium, double_low, expire_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1445,7 +1588,7 @@ class SmartMoneyDBProvider:
                 err = str(e).lower()
                 if "no column named updated_at" in err:
                     try:
-                        conn.execute("ALTER TABLE cb_redeem ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+                        conn.execute("ALTER TABLE cb_redeem ADD COLUMN updated_at DATETIME")
                         before_changes = conn.total_changes
                         conn.executemany(
                             "INSERT OR REPLACE INTO cb_redeem (ts_code, bond_name, redeem_flag, redeem_price, redeem_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
