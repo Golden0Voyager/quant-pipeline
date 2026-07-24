@@ -10,6 +10,8 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 
+import pandas as pd
+
 from core.config import SHARED_DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,8 @@ def _fetch_trading_calendar() -> list[str]:
 
         df = ak.tool_trade_date_hist_sina()
         if df is not None and not df.empty and "trade_date" in df.columns:
-            return sorted(df["trade_date"].dt.strftime("%Y-%m-%d").tolist())
+            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+            return sorted(df["trade_date"].dropna().dt.strftime("%Y-%m-%d").tolist())
     except Exception as e:
         logger.warning(f"⚠️ AkShare 交易日历获取失败: {e}")
     return []
