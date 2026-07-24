@@ -17,6 +17,9 @@ __pycache__/
 htmlcov/
 logs/
 
+# Test leak artifacts (files named after mock objects)
+MagicMock*
+
 # AI agent workflow config
 .omo/
 .mimocode/
