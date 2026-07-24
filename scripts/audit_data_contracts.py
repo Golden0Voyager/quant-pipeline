@@ -241,8 +241,9 @@ def main() -> int:
     db_path = args.db or "~/Code/quant_data/quant_core.db"
 
     try:
-        registry = dict(TASK_REGISTRY)
+        registry = {spec.name: spec for spec in TASK_REGISTRY}
     except Exception:
+        logger.exception("Failed to build registry map; running audit without registry context")
         registry = {}
 
     report = audit_database(db_path, registry=registry)
