@@ -11,8 +11,8 @@ from datetime import date
 from typing import Any
 
 import pandas as pd
-import requests
 
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -21,12 +21,6 @@ except ImportError:
     ak = None
 
 logger = logging.getLogger(__name__)
-
-_EM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://data.eastmoney.com/",
-}
 
 
 def _to_float(val: Any) -> float | None:
@@ -48,26 +42,13 @@ def _to_int(val: Any) -> int | None:
         return None
 
 
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
-        return None
-
-
 # ===========================================================================
 # 东方财富概念板块实时行情（含涨跌幅/成交额/涨跌家数）
 # ===========================================================================
 
 
 def _fetch_em_spot() -> list[dict]:
-    """直接从东方财富 push2 接口获取概念板块实时行情（自动分页）。
-
-    返回 [{concept_code, concept_name, pct_change, turnover, up_count, down_count}, ...]
-    """
+    """直接从东方财富 push2 接口获取概念板块实时行情（自动分页）。"""
     base_url = (
         "https://push2.eastmoney.com/api/qt/clist/get"
         "?pn={page}&pz=100&po=1&np=1"
@@ -76,12 +57,13 @@ def _fetch_em_spot() -> list[dict]:
         "&fs=m:90+t:3"
         "&fields=f3,f4,f12,f14,f104,f105"
     )
+    session = get_default_client().get_session("eastmoney")
     try:
         today = date.today().isoformat()
         records = []
         page = 1
         while True:
-            resp = requests.get(base_url.format(page=page), headers=_EM_HEADERS, timeout=15)
+            resp = session.get(base_url.format(page=page), timeout=15)
             resp.raise_for_status()
             data = resp.json()
             items = data.get("data", {}).get("diff", [])
@@ -133,7 +115,8 @@ def _fetch_concept_members_em() -> list[dict]:
         "&fields=f12,f14"
     )
     try:
-        resp = requests.get(name_url, headers=_EM_HEADERS, timeout=15)
+        session = get_default_client().get_session("eastmoney")
+        resp = session.get(name_url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         items = data.get("data", {}).get("diff", [])
