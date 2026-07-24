@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.data_contract import INSTITUTION_SURVEY_CONTRACT, validate_records
 from core.source_client import get_default_client
 from interface import DatabaseInterface
 
@@ -109,6 +110,12 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ 机构调研记录为空")
         return {"saved": 0, "total": raw_count}
 
-    saved = db.save_institution_survey_batch(records)
+    validated_records, violations = validate_records(records, INSTITUTION_SURVEY_CONTRACT, logger)
+    if violations and not validated_records:
+        logger.error(f"🚫 机构调研数据合约校验失败: {violations}")
+        return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
+    if violations:
+        logger.warning(f"⚠️ 机构调研合约校验过滤 {len(records) - len(validated_records)} 条")
+    saved = db.save_institution_survey_batch(validated_records)
     logger.info(f"✅ 机构调研数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
