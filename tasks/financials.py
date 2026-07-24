@@ -110,11 +110,6 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
             return {"saved": 0, "failed": 0, "total": 0}
 
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
-        existing_codes = db.get_distinct_codes("quarterly_financials")
-        filtered_codes = [c for c in stock_codes if c not in existing_codes]
-        if len(filtered_codes) < len(stock_codes):
-            logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
-        stock_codes = filtered_codes
     total = len(stock_codes)
     saved = 0
     failed = 0
