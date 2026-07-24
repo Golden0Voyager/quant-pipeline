@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.data_contract import STOCK_REPURCHASE_CONTRACT, validate_records
 from core.source_client import get_default_client
 from interface import DatabaseInterface
 
@@ -132,6 +133,12 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ 股票回购记录为空")
         return {"saved": 0, "total": raw_count}
 
-    saved = db.save_stock_repurchase_batch(records)
+    validated_records, violations = validate_records(records, STOCK_REPURCHASE_CONTRACT, logger)
+    if violations and not validated_records:
+        logger.error(f"🚫 股票回购数据合约校验失败: {violations}")
+        return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
+    if violations:
+        logger.warning(f"⚠️ 股票回购合约校验过滤 {len(records) - len(validated_records)} 条")
+    saved = db.save_stock_repurchase_batch(validated_records)
     logger.info(f"✅ 股票回购数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
