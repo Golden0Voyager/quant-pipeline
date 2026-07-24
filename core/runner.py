@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from core.task_result import ErrorKind, TaskResult, TaskStatus, normalize_task_result
@@ -35,9 +37,34 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     """
     安全执行单个任务，异常时记录日志不影响后续任务。
 
-    返回包含 status, error, elapsed 的结构化结果（``TaskResult.to_dict()``）。
+    返回包含 status, error, elapsed 的结构化结果（``TaskResult.to_dict()``），
+    并把结果写入 ``ingestion_runs`` 审计表（如果第一个参数提供 ``record_ingestion_run``）。
     """
     task_start = time.time()
+    run_id = str(uuid.uuid4())
+    db = args[0] if args and hasattr(args[0], "record_ingestion_run") else None
+
+    def _record(result: TaskResult) -> None:
+        if db is None:
+            return
+        try:
+            elapsed = result.metadata.get("elapsed_seconds", 0)
+            finished_at = datetime.now(UTC)
+            started_at = datetime.fromtimestamp(
+                time.time() - elapsed, tz=UTC
+            )
+            result.metadata["run_id"] = run_id
+            result.metadata["started_at"] = started_at.isoformat(timespec="seconds")
+            result.metadata["finished_at"] = finished_at.isoformat(timespec="seconds")
+            db.record_ingestion_run(result.to_dict())
+        except Exception as exc:
+            logger.warning("⚠️ 写入 ingestion_runs 审计表失败: %s", exc)
+
+    # Inject the run_id so that task functions that accept ``_task_run_id``
+    # (e.g. ``def update_concept_member(db, _task_run_id=None)``) can use
+    # the same id for PIT / audit writes instead of generating their own.
+    kwargs.setdefault("_task_run_id", run_id)
+
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
         raw = fn(*args, **kwargs)
@@ -54,6 +81,7 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
                 f"{result.metadata['elapsed_seconds']:.1f}s"
                 + (f": {result.error}" if result.error else "")
             )
+        _record(result)
         return result.to_dict()
     except Exception as e:
         elapsed = time.time() - task_start
@@ -62,6 +90,7 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
             name, ErrorKind.INTERNAL, str(e)[:2000],
         )
         result.metadata["elapsed_seconds"] = round(elapsed, 3)
+        _record(result)
         return result.to_dict()
 
 
