@@ -50,6 +50,20 @@ class DatabaseInterface(Protocol):
         """获取任务最近一次成功运行的日期。"""
         ...
 
+    def record_ingestion_run(self, result: dict[str, Any]) -> None:
+        """把一次任务执行的结果写入 ingestion_runs 审计表。"""
+        ...
+
+    def record_ingestion_rejection(
+        self,
+        run_id: str,
+        row_number: int,
+        reason: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """把被拒绝的单行数据写入 ingestion_rejections 审计表。"""
+        ...
+
     def get_stock_list(self) -> pd.DataFrame:
         """获取全部股票列表，返回 DataFrame（至少包含 'code' 列）。"""
         ...
@@ -390,6 +404,49 @@ class DatabaseInterface(Protocol):
 
     def save_stock_pledge_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存股权质押数据，返回实际保存条数。"""
+        ...
+
+    # ===========================================================================
+    # Point-in-Time 概念/指数成分历史
+    # ===========================================================================
+
+    def save_concept_member_history_batch(
+        self,
+        records: list[dict[str, Any]],
+        run_id: str,
+        valid_from: str,
+    ) -> int:
+        """批量保存概念板块成分股 PIT 历史快照。
+
+        自动关闭之前活跃记录（设 valid_to = valid_from - 1 天），
+        然后插入新记录。
+
+        Args:
+            records: [concept_code, concept_name, ts_code, source] 字典列表
+            run_id: 当前运行 ID (snapshot_run_id)
+            valid_from: 快照日期 (YYYY-MM-DD)
+        Returns:
+            实际写入条数
+        """
+        ...
+
+    def save_index_member_history_batch(
+        self,
+        records: list[dict[str, Any]],
+        run_id: str,
+        valid_from: str,
+    ) -> int:
+        """批量保存指数成分股 PIT 历史快照。
+
+        自动关闭之前活跃记录，然后插入新记录。
+
+        Args:
+            records: [index_code, index_name, ts_code, weight, source] 字典列表
+            run_id: 当前运行 ID (snapshot_run_id)
+            valid_from: 快照日期 (YYYY-MM-DD)
+        Returns:
+            实际写入条数
+        """
         ...
 
 
