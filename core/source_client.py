@@ -12,7 +12,8 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -186,6 +187,7 @@ class SourceClient:
 
         self._circuits: dict[str, _CircuitBreaker] = {}
         self._rate_limiters: dict[str, _RateLimiter] = {}
+        self._sessions: dict[str, Any] = {}
         self._closed = False
 
         for name, policy in self._policies.items():
@@ -291,14 +293,19 @@ class SourceClient:
                 return SourceResponse(success=False, data=None, metadata=meta)
 
             except Exception as exc:
+                # Non-retryable failure (schema drift, removed API, etc.)
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.debug(
-                    "Attempt %d/%d for %s failed: %s",
+                    "Attempt %d/%d for %s failed (non-retryable): %s",
                     attempt, policy.max_attempts, source_name, last_error,
                 )
-                if attempt < policy.max_attempts:
-                    _backoff_sleep(attempt, policy)
-                continue
+                meta = FetchMetadata(
+                    source_name=source_name,
+                    attempt_count=attempt,
+                    http_status_code=http_status,
+                    error=last_error,
+                )
+                return SourceResponse(success=False, data=None, metadata=meta)
 
         # All attempts exhausted
         circuit.record_failure()
@@ -345,17 +352,27 @@ class SourceClient:
         if self._closed:
             return
         self._closed = True
+        for session in self._sessions.values():
+            with suppress(Exception):
+                session.close()
+        self._sessions.clear()
         for circuit in self._circuits.values():
             circuit.reset()
 
     # ── session management for curl_cffi ───────────────────────────────
 
     def get_session(self, source_name: str) -> Any:
-        """Return a requests.Session-like object for *source_name*.
+        """Return a cached requests.Session-like object for *source_name*.
 
-        Returns a ``curl_cffi.requests.Session`` for eastmoney (with browser
-        impersonation), otherwise a plain ``requests.Session``.
+        Sessions are created once per source name and reused for the lifetime
+        of the client.  A ``curl_cffi.requests.Session`` is created for
+        eastmoney (with browser impersonation), otherwise a plain
+        ``requests.Session``.
         """
+        cached = self._sessions.get(source_name)
+        if cached is not None:
+            return cached
+
         policy = self._policies.get(source_name)
         if policy is None:
             raise ValueError(f"unknown source: {source_name}")
@@ -365,7 +382,6 @@ class SourceClient:
 
             session = curl_requests.Session()
             session.impersonate = "chrome110"
-            return session
         except ImportError:
             import requests as std_requests
 
@@ -373,7 +389,8 @@ class SourceClient:
             session.headers.update(
                 {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
             )
-            return session
+        self._sessions[source_name] = session
+        return session
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
