@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.data_contract import STOCK_PLEDGE_CONTRACT, validate_records
 from core.source_client import get_default_client
 from core.utils import is_real_db_path
 from interface import DatabaseInterface
@@ -135,6 +136,12 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ 股权质押记录为空")
         return {"saved": 0, "total": raw_count}
 
-    saved = db.save_stock_pledge_batch(records)
+    validated_records, violations = validate_records(records, STOCK_PLEDGE_CONTRACT, logger)
+    if violations and not validated_records:
+        logger.error(f"🚫 股权质押数据合约校验失败: {violations}")
+        return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
+    if violations:
+        logger.warning(f"⚠️ 股权质押合约校验过滤 {len(records) - len(validated_records)} 条")
+    saved = db.save_stock_pledge_batch(validated_records)
     logger.info(f"✅ 股权质押数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
