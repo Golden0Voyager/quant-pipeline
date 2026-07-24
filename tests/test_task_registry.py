@@ -1,0 +1,149 @@
+"""Tests for the single task registry."""
+from __future__ import annotations
+
+import pytest
+
+from core.task_registry import (
+    TASK_REGISTRY,
+    Cadence,
+    EmptyPolicy,
+    lookup_task,
+    table_date_columns,
+    task_names,
+)
+
+
+class TestRegistryInvariants:
+    """Structural invariants for TASK_REGISTRY."""
+
+    def test_every_task_has_unique_name(self):
+        names = [s.name for s in TASK_REGISTRY]
+        assert len(names) == len(set(names)), "duplicate task names found"
+
+    def test_every_task_has_tables_or_utility(self):
+        for spec in TASK_REGISTRY:
+            # Utility tasks (retry, health_check) can have empty tables
+            if spec.name in ("retry", "health_check"):
+                assert spec.tables == ()
+            else:
+                assert len(spec.tables) >= 1, f"{spec.name} has no tables"
+
+    def test_every_task_declares_cadence(self):
+        for spec in TASK_REGISTRY:
+            assert isinstance(spec.cadence, Cadence), f"{spec.name} missing cadence"
+
+    def test_every_task_declares_empty_policy(self):
+        for spec in TASK_REGISTRY:
+            assert isinstance(spec.empty_policy, EmptyPolicy), f"{spec.name} missing empty_policy"
+
+    def test_every_task_has_primary_source(self):
+        for spec in TASK_REGISTRY:
+            assert spec.primary_source, f"{spec.name} missing primary_source"
+
+    def test_every_task_has_display_label(self):
+        for spec in TASK_REGISTRY:
+            assert spec.display_label, f"{spec.name} missing display_label"
+
+    def test_health_check_registered(self):
+        spec = lookup_task("health_check")
+        assert spec is not None
+        assert spec.cadence is Cadence.ON_DEMAND
+
+    def test_retry_registered(self):
+        spec = lookup_task("retry")
+        assert spec is not None
+
+
+class TestLookupTask:
+    """lookup_task returns correct specs."""
+
+    def test_lookup_exists(self):
+        spec = lookup_task("update_bars")
+        assert spec is not None
+        assert "daily_bars" in spec.tables
+
+    def test_lookup_missing(self):
+        assert lookup_task("nonexistent") is None
+
+    def test_lookup_empty_string(self):
+        assert lookup_task("") is None
+
+
+class TestTaskNames:
+    """task_names derived view."""
+
+    def test_returns_sorted(self):
+        names = task_names()
+        assert names == sorted(names)
+        assert len(names) == len(TASK_REGISTRY)
+
+    def test_includes_all(self):
+        names = set(task_names())
+        for spec in TASK_REGISTRY:
+            assert spec.name in names
+
+
+class TestTableDateColumns:
+    """table_date_columns derived view."""
+
+    def test_contains_known_tables(self):
+        columns = table_date_columns()
+        assert "daily_bars" in columns
+        assert columns["daily_bars"] == "trade_date"
+        assert "indicators" in columns
+        assert columns["indicators"] == "trade_date"
+
+    def test_all_date_columns_are_strings(self):
+        for table, col in table_date_columns().items():
+            assert isinstance(table, str)
+            assert isinstance(col, str)
+
+    def test_utility_tasks_not_in_date_columns(self):
+        columns = table_date_columns()
+        assert "retry" not in columns
+        assert "health_check" not in columns
+
+
+class TestCadenceEnum:
+    """Cadence completeness."""
+
+    def test_all_cadences_used(self):
+        used = {spec.cadence for spec in TASK_REGISTRY}
+        assert Cadence.TRADING_DAY in used
+        assert Cadence.DAILY in used
+        assert Cadence.MONTHLY in used
+        assert Cadence.QUARTERLY in used
+        assert Cadence.ON_DEMAND in used
+
+    def test_trading_day_is_most_common(self):
+        trading = [s for s in TASK_REGISTRY if s.cadence is Cadence.TRADING_DAY]
+        assert len(trading) > len(TASK_REGISTRY) // 2
+
+
+class TestEmptyPolicy:
+    """Empty-policy coverage."""
+
+    def test_all_policies_used(self):
+        used = {spec.empty_policy for spec in TASK_REGISTRY}
+        assert EmptyPolicy.ALLOW in used
+        assert EmptyPolicy.FAIL in used
+
+    def test_bars_allow_on_non_trading_day(self):
+        spec = lookup_task("update_bars")
+        assert spec is not None
+        assert spec.empty_policy is EmptyPolicy.ALLOW_ON_NON_TRADING_DAY
+
+
+class TestTaskSpecDataclass:
+    """TaskSpec construction and frozenness."""
+
+    def test_frozen(self):
+        spec = lookup_task("update_bars")
+        assert spec is not None
+        with pytest.raises(AttributeError):
+            spec.name = "changed"  # type: ignore[misc]
+
+    def test_str_representation(self):
+        spec = lookup_task("update_fundamentals")
+        assert spec is not None
+        assert "update_fundamentals" in str(spec)

@@ -134,16 +134,6 @@ class TestStockPledge:
         assert stock_pledge._to_float("12.5%") == 12.5
         assert stock_pledge._to_float(42.0) == 42.0
 
-    def test_try_get_ak_df_ak_none(self):
-        with patch.object(stock_pledge, "ak", None):
-            assert stock_pledge._try_get_ak_df(lambda: None) is None
-
-    def test_try_get_ak_df_exception(self):
-        func = MagicMock(side_effect=RuntimeError("fail"), __name__="test_func")
-        with patch.object(stock_pledge, "ak", MagicMock()):
-            assert stock_pledge._try_get_ak_df(func) is None
-        assert func.call_count == 1
-
     def test_latest_date_ignores_mock_db_path(self):
         assert stock_pledge._get_latest_stock_pledge_date(MagicMock()) is None
 
@@ -238,10 +228,6 @@ class TestStockRepurchase:
         assert stock_repurchase._to_int(42.7) == 42
         assert stock_repurchase._to_int("100") == 100
 
-    def test_try_get_ak_df_ak_none(self):
-        with patch.object(stock_repurchase, "ak", None):
-            assert stock_repurchase._try_get_ak_df(lambda: None) is None
-
 
 # ===========================================================================
 # 3. institution_survey
@@ -309,10 +295,6 @@ class TestInstitutionSurvey:
         assert institution_survey._to_int(float("nan")) is None
         assert institution_survey._to_int("abc") is None
         assert institution_survey._to_int(42.7) == 42
-
-    def test_try_get_ak_df_ak_none(self):
-        with patch.object(institution_survey, "ak", None):
-            assert institution_survey._try_get_ak_df(lambda: None) is None
 
 
 # ===========================================================================
@@ -458,15 +440,6 @@ class TestOptionSentiment:
         assert option_sentiment._to_int(float("nan")) is None
         assert option_sentiment._to_int("abc") is None
         assert option_sentiment._to_int(42.7) == 42
-
-    def test_try_get_ak_df_ak_none(self):
-        with patch.object(option_sentiment, "ak", None):
-            assert option_sentiment._try_get_ak_df(lambda: None) is None
-
-    def test_try_get_ak_df_exception(self):
-        func = MagicMock(side_effect=RuntimeError("fail"), __name__="test_func")
-        with patch.object(option_sentiment, "ak", MagicMock()):
-            assert option_sentiment._try_get_ak_df(func) is None
 
 
 def test_hkscc_result_collection_does_not_sleep_per_symbol():

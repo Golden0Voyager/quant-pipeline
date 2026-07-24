@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed, w
 from datetime import datetime
 
 from core.lock import skip_if_task_locked
+from core.source_client import get_default_client
 from core.utils import should_skip_beijing
 from interface import DatabaseInterface, DataLoaderInterface
 
@@ -110,11 +111,6 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
             return {"saved": 0, "failed": 0, "total": 0}
 
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
-        existing_codes = db.get_distinct_codes("quarterly_financials")
-        filtered_codes = [c for c in stock_codes if c not in existing_codes]
-        if len(filtered_codes) < len(stock_codes):
-            logger.info(f"  跳过 {len(stock_codes) - len(filtered_codes)} 只已有季度财务数据的股票")
-        stock_codes = filtered_codes
     total = len(stock_codes)
     saved = 0
     failed = 0
@@ -214,8 +210,6 @@ def update_industry(db: DatabaseInterface) -> dict:
 
     import sqlite3
 
-    import requests as _req
-
     # 1. 读取需要更新的股票
     conn = sqlite3.connect(str(db.db_path))
     cursor = conn.cursor()
@@ -247,9 +241,7 @@ def update_industry(db: DatabaseInterface) -> dict:
             for attempt in range(3):
                 session = None
                 try:
-                    session = _req.Session()
-                    session.proxies = {"http": None, "https": None}
-                    session.trust_env = False
+                    session = get_default_client().get_session("eastmoney")
                     resp = session.get(
                         f10_url,
                         headers={"User-Agent": "Mozilla/5.0"},
@@ -292,9 +284,7 @@ def update_industry(db: DatabaseInterface) -> dict:
 
         try:
             sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
-            session = _req.Session()
-            session.proxies = {"http": None, "https": None}
-            session.trust_env = False
+            session = get_default_client().get_session("sina")
             resp = session.get(
                 sin_url,
                 headers={"User-Agent": "Mozilla/5.0"},

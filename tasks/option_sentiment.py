@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.data_contract import OPTION_SENTIMENT_CONTRACT, validate_records
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -38,16 +40,6 @@ def _to_float(val: Any) -> float | None:
         return None
 
 
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
-        return None
-
-
 # ===========================================================================
 # QVIX 波动率指数
 # ===========================================================================
@@ -55,8 +47,9 @@ def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
 
 def _fetch_qvix() -> list[dict]:
     """获取上证50ETF QVIX 波动率指数。"""
-    df = _try_get_ak_df(ak.index_option_50etf_qvix)
-    if df is None or df.empty:
+    resp = get_default_client().call("eastmoney", lambda: ak.index_option_50etf_qvix())
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         return []
     records = []
     for _, row in df.iterrows():
@@ -95,8 +88,9 @@ def _fetch_50etf_daily() -> list[dict]:
         return []
 
     trade_date = get_expected_latest_trading_day()
-    df = _try_get_ak_df(ak.option_daily_stats_sse, date=trade_date.replace("-", ""))
-    if df is None or df.empty:
+    resp = get_default_client().call("eastmoney", lambda: ak.option_daily_stats_sse(date=trade_date.replace("-", "")))
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         return []
 
     # 兼容新旧列名
@@ -175,9 +169,17 @@ def update_option_sentiment(db: DatabaseInterface) -> dict:
 
     if merge:
         records = list(merge.values())
-        saved = db.save_option_sentiment_batch(records)
-        logger.info(f"✅ 期权情绪数据保存完成: {saved} 条 / {len(records)} 个交易日")
-        results["saved"] = saved
+        validated_records, violations = validate_records(records, OPTION_SENTIMENT_CONTRACT, logger)
+        if violations and not validated_records:
+            logger.error(f"🚫 期权情绪数据合约校验失败: {violations}")
+            results["saved"] = 0
+            results["error"] = f"data contract violations: {violations}"
+        else:
+            if violations:
+                logger.warning(f"⚠️ 期权情绪合约校验过滤 {len(records) - len(validated_records)} 条")
+            saved = db.save_option_sentiment_batch(validated_records)
+            logger.info(f"✅ 期权情绪数据保存完成: {saved} 条 / {len(records)} 个交易日")
+            results["saved"] = saved
     else:
         logger.warning("⚠️ 期权情绪数据无数据")
         results["saved"] = 0

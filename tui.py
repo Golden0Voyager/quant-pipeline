@@ -1062,8 +1062,35 @@ class SingleTaskWidget(Static):
     SINGLE_TASKS: list[tuple[str, str]] = []
 
     @classmethod
+    def _validate_against_registry(cls) -> None:
+        """Assert every referenced task name exists in TASK_REGISTRY.
+
+        Keeps TUI display labels flexible while preventing drift from
+        the single source of truth for task identity.
+        """
+        try:
+            from core.task_registry import lookup_task
+
+            all_task_names: set[str] = set()
+            for _, tasks in cls._SINGLE_TASK_GROUPS:
+                for _, name in tasks:
+                    all_task_names.add(name)
+            for _, name in cls._SINGLE_TASK_UTILS:
+                all_task_names.add(name)
+
+            missing = [n for n in sorted(all_task_names) if lookup_task(n) is None]
+            if missing:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "TUI references unregistered tasks: %s", missing
+                )
+        except ImportError:
+            pass  # registry not available (e.g. test environment)
+
+    @classmethod
     def _build_single_tasks(cls) -> list[tuple[str, str]]:
         """把分组定义展开为带分隔符的下拉选项列表。"""
+        cls._validate_against_registry()
         options: list[tuple[str, str]] = [("全量更新 (Full Update)", "all")]
         for group_name, tasks in cls._SINGLE_TASK_GROUPS:
             options.append((f"[dim]── {group_name} ──[/dim]", f"__sep__{group_name}"))
@@ -1499,6 +1526,7 @@ class DataCompletenessWidget(VerticalScroll):
 
         # 先计算每个表的状态与排序键，再按新鲜度排序（滞后/无数据沉底）
         items: list[tuple[int, int, str, str, int, str | None, str]] = []
+        health_counts: dict[str, int] = {"healthy": 0, "degraded": 0, "critical": 0}
         for idx, (tbl, label) in enumerate(self.TABLE_LABELS.items()):
             n = counts.get(tbl, 0)
             latest = latest_dates.get(tbl)
@@ -1508,6 +1536,20 @@ class DataCompletenessWidget(VerticalScroll):
 
             order = self._STATUS_ORDER.get(status, 3)
             items.append((order, idx, tbl, label, n, latest, status))
+
+            if status in ("最新", "T+1", "按月更新", "按季更新"):
+                health_counts["healthy"] += 1
+            elif status == "略滞后":
+                health_counts["degraded"] += 1
+            elif status in ("滞后", "无数据"):
+                health_counts["critical"] += 1
+
+        health_str = (
+            f"[bold #10b981]●[/bold #10b981] {health_counts['healthy']}  "
+            f"[bold #f59e0b]▲[/bold #f59e0b] {health_counts['degraded']}  "
+            f"[bold #ef4444]▼[/bold #ef4444] {health_counts['critical']}"
+        )
+        lines.append(f"  健康度: {health_str}")
 
         items.sort(key=lambda x: (x[0], x[1]))
 

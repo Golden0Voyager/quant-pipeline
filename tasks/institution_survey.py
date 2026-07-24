@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.data_contract import INSTITUTION_SURVEY_CONTRACT, validate_records
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -30,16 +32,6 @@ def _to_int(val: Any) -> int | None:
         v = int(float(val))
         return None if pd.isna(val) else v
     except (ValueError, TypeError):
-        return None
-
-
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
         return None
 
 
@@ -82,8 +74,9 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
 
     latest_date = get_expected_latest_trading_day()
     start_date = (datetime.strptime(latest_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y%m%d")
-    df = _try_get_ak_df(ak.stock_jgdy_tj_em, date=start_date)
-    if df is None or df.empty:
+    resp = get_default_client().call("eastmoney", lambda: ak.stock_jgdy_tj_em(date=start_date))
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
         logger.warning("⚠️ 机构调研数据为空")
         return {"saved": 0}
 
@@ -117,6 +110,12 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ 机构调研记录为空")
         return {"saved": 0, "total": raw_count}
 
-    saved = db.save_institution_survey_batch(records)
+    validated_records, violations = validate_records(records, INSTITUTION_SURVEY_CONTRACT, logger)
+    if violations and not validated_records:
+        logger.error(f"🚫 机构调研数据合约校验失败: {violations}")
+        return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
+    if violations:
+        logger.warning(f"⚠️ 机构调研合约校验过滤 {len(records) - len(validated_records)} 条")
+    saved = db.save_institution_survey_batch(validated_records)
     logger.info(f"✅ 机构调研数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}

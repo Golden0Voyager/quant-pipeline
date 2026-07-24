@@ -24,6 +24,7 @@ import tasks.index_chain as index_chain
 import tasks.market_valuation as market_valuation
 import tasks.money_market as money_market
 import tasks.sector_derivatives as sector_derivatives
+from core.source_client import FetchMetadata, SourceResponse
 
 # ===========================================================================
 # money_market
@@ -860,14 +861,6 @@ def test_to_float_edge_cases():
     assert market_valuation._to_float(42.0) == 42.0
 
 
-def test_try_get_ak_df_raises_returns_none():
-    """_try_get_ak_df: fetcher 抛异常 → None。"""
-    func = MagicMock(side_effect=RuntimeError("network err"), __name__="stock_a_ttm_lyr")
-    with patch.object(market_valuation, "ak", MagicMock()):
-        result = market_valuation._try_get_ak_df(func)
-    assert result is None
-
-
 def test_fetch_pe_empty_df():
     """_fetch_pe: ak 返回空 → []."""
     ak = MagicMock()
@@ -908,10 +901,7 @@ def test_update_market_valuation_all_empty():
 
 
 def test_update_market_valuation_fetcher_exception():
-    """fetcher 抛异常时主函数不崩。
-
-    _try_get_ak_df 需要 func.__name__ 做日志，需为 mock 设置该属性。
-    """
+    """fetcher 抛异常时主函数不崩。"""
     ak = MagicMock()
     ak.stock_a_ttm_lyr = MagicMock(side_effect=RuntimeError("PE error"), __name__="stock_a_ttm_lyr")
     ak.stock_a_all_pb.return_value = pd.DataFrame()
@@ -919,8 +909,7 @@ def test_update_market_valuation_fetcher_exception():
     db = MagicMock()
     with patch.object(market_valuation, "ak", ak):
         result = market_valuation.update_market_valuation(db)
-    # 异常在 _try_get_ak_df 内部被捕获，返回 None
-    # _fetch_pe 收到 None 后返回 []，results[name] = 0
+    # SourceClient catches exception, _fetch_pe returns []
     assert result["全市场PE"] == 0
     assert result["saved"] == 0
 
@@ -951,9 +940,12 @@ def test_update_concept_board_runs():
     """验证 update_concept_board 直调 eastmoney 接口并保存。"""
     db = MagicMock()
     db.save_concept_board_batch.return_value = 2
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.return_value = _mock_concept_spot_response()
-        mock_get.return_value.raise_for_status = lambda: None
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True,
+            data=[{"trade_date": "2026-01-01", "concept_code": "BK1001", "concept_name": "AI概念"}],
+            metadata=FetchMetadata(source_name="eastmoney"),
+        )
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 2
     assert db.save_concept_board_batch.called
@@ -962,9 +954,10 @@ def test_update_concept_board_runs():
 def test_update_concept_board_empty():
     """验证 eastmoney 接口返回空时优雅降级。"""
     db = MagicMock()
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.return_value = _mock_empty_spot_response()
-        mock_get.return_value.raise_for_status = lambda: None
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True, data=[], metadata=FetchMetadata(source_name="eastmoney"),
+        )
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 0
     assert not db.save_concept_board_batch.called
@@ -987,7 +980,7 @@ def _mock_concept_member_push2_response() -> MagicMock:
 
 
 def test_update_concept_member_runs():
-    """验证 update_concept_member 获取成分股映射并保存。"""
+    """验证 update_concept_member 获取成分股映射并保存快照 + PIT。"""
     ak = MagicMock()
     ak.stock_board_concept_cons_em.return_value = pd.DataFrame(
         {
@@ -996,26 +989,36 @@ def test_update_concept_member_runs():
     )
     db = MagicMock()
     db.save_concept_member_batch.return_value = 4
+    db.save_concept_member_history_batch.return_value = 4
 
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value = _mock_concept_member_push2_response()
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True,
+            data=[
+                {"concept_code": "BK1001", "concept_name": "AI概念"},
+                {"concept_code": "BK1002", "concept_name": "芯片概念"},
+            ],
+            metadata=FetchMetadata(source_name="eastmoney"),
+        )
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 4
+    assert result["pit_saved"] == 4
     assert db.save_concept_member_batch.called
+    assert db.save_concept_member_history_batch.called
     assert ak.stock_board_concept_cons_em.call_count == 2
 
 
 def test_update_concept_member_empty_push2():
     """验证 push2 概念列表为空时优雅降级。"""
     ak = MagicMock()
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = {"data": {"total": 0, "diff": []}}
-    mock_resp.raise_for_status = lambda: None
     db = MagicMock()
 
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value = mock_resp
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_session = MagicMock()
+        mock_session.get.return_value.json.return_value = {"data": {"total": 0, "diff": []}}
+        mock_session.get.return_value.raise_for_status = lambda: None
+        mock_client.return_value.get_session.return_value = mock_session
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 0
@@ -1430,7 +1433,7 @@ def test_financials_quarterly_with_existing_filter():
     loader = MagicMock()
     with patch.object(financials, "ak", ak):
         result = financials.update_quarterly_financials(db, loader)
-    assert result["total"] == 2  # 000001.SZ 被过滤
+    assert result["total"] == 3  # code-level existence filtering removed, all 3 processed
 
 
 def test_financials_industry_all_classified(tmp_path: Path):
@@ -1471,24 +1474,13 @@ def test_concept_to_int_invalid():
     assert concept_board._to_int("bad") is None
 
 
-def test_concept_try_get_ak_df_ak_none():
-    with patch.object(concept_board, "ak", None):
-        assert concept_board._try_get_ak_df(lambda x: x) is None
-
-
-def test_concept_try_get_ak_df_func_raises():
-    def _raise():
-        raise ValueError("test")
-
-    with patch.object(concept_board, "ak", MagicMock()):
-        assert concept_board._try_get_ak_df(_raise) is None
-
-
 def test_update_concept_board_request_fails():
     """验证 push2 请求异常时优雅降级。"""
     db = MagicMock()
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.side_effect = Exception("network error")
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=False, data=None, metadata=FetchMetadata(source_name="eastmoney", error="network error"),
+        )
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 0
 
@@ -1497,9 +1489,12 @@ def test_update_concept_board_save_raises():
     """验证保存接口异常时优雅降级。"""
     db = MagicMock()
     db.save_concept_board_batch.side_effect = Exception("save error")
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.return_value = _mock_concept_spot_response()
-        mock_get.return_value.raise_for_status = lambda: None
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True,
+            data=[{"trade_date": "2026-01-01", "concept_code": "BK1001", "concept_name": "AI概念"}],
+            metadata=FetchMetadata(source_name="eastmoney"),
+        )
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 0
 
@@ -1511,8 +1506,10 @@ def test_update_concept_member_save_raises():
     db = MagicMock()
     db.save_concept_member_batch.side_effect = Exception("save error")
 
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value = _mock_concept_member_push2_response()
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_session = MagicMock()
+        mock_session.get.return_value = _mock_concept_member_push2_response()
+        mock_client.return_value.get_session.return_value = mock_session
         result = concept_board.update_concept_member(db)
     assert result["member_saved"] == 0
 
@@ -1528,8 +1525,17 @@ def test_fetch_em_spot_empty_code_skipped():
     """验证概念代码为空时跳过该条。"""
     db = MagicMock()
     db.save_concept_board_batch.return_value = 1
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.return_value = {
+
+    def _call_side_effect(source_name, operation, *args, **kwargs):
+        try:
+            data = operation(*args, **kwargs)
+            return SourceResponse(success=True, data=data, metadata=FetchMetadata(source_name=source_name))
+        except Exception as e:
+            return SourceResponse(success=False, data=None, metadata=FetchMetadata(source_name=source_name, error=str(e)))
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_session = MagicMock()
+        mock_session.get.return_value.json.return_value = {
             "data": {
                 "total": 2,
                 "diff": [
@@ -1538,7 +1544,9 @@ def test_fetch_em_spot_empty_code_skipped():
                 ],
             }
         }
-        mock_get.return_value.raise_for_status = lambda: None
+        mock_session.get.return_value.raise_for_status = lambda: None
+        mock_client.return_value.get_session.return_value = mock_session
+        mock_client.return_value.call.side_effect = _call_side_effect
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 1
 
@@ -1548,8 +1556,10 @@ def test_fetch_concept_members_ak_raises():
     ak = MagicMock()
     ak.stock_board_concept_cons_em.side_effect = Exception("akshare error")
 
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value = _mock_concept_member_push2_response()
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_session = MagicMock()
+        mock_session.get.return_value = _mock_concept_member_push2_response()
+        mock_client.return_value.get_session.return_value = mock_session
         members = concept_board._fetch_concept_members_em()
 
     assert len(members) == 0
@@ -1562,8 +1572,10 @@ def test_fetch_concept_members_empty_df():
     db = MagicMock()
     db.save_concept_member_batch.return_value = 0
 
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value = _mock_concept_member_push2_response()
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_session = MagicMock()
+        mock_session.get.return_value = _mock_concept_member_push2_response()
+        mock_client.return_value.get_session.return_value = mock_session
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 0
@@ -1572,8 +1584,8 @@ def test_fetch_concept_members_empty_df():
 def test_fetch_concept_members_push2_fails():
     """验证 push2 概念列表请求异常时优雅降级。"""
     ak = MagicMock()
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.side_effect = Exception("push2 error")
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_client.return_value.get_session.side_effect = Exception("push2 error")
         members = concept_board._fetch_concept_members_em()
     assert len(members) == 0
 
@@ -1581,17 +1593,15 @@ def test_fetch_concept_members_push2_fails():
 def test_fetch_concept_members_empty_code_skip():
     """验证概念板块代码为空时跳过。"""
     ak = MagicMock()
-    with patch("tasks.concept_board.requests.get") as mock_get, patch.object(concept_board, "ak", ak):
-        mock_get.return_value.json.return_value = {
-            "data": {
-                "total": 2,
-                "diff": [
-                    {"f12": "", "f14": ""},
-                    {"f12": "BK3001", "f14": "有效概念"},
-                ],
-            }
-        }
-        mock_get.return_value.raise_for_status = lambda: None
+    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True,
+            data=[
+                {"concept_code": "", "concept_name": ""},
+                {"concept_code": "BK3001", "concept_name": "有效概念"},
+            ],
+            metadata=FetchMetadata(source_name="eastmoney"),
+        )
         ak.stock_board_concept_cons_em.return_value = pd.DataFrame({"代码": ["000001"]})
         members = concept_board._fetch_concept_members_em()
     assert len(members) == 1
@@ -1601,8 +1611,17 @@ def test_fetch_em_spot_none_fields():
     """验证行情数据中数值字段为 None 时仍然创建记录。"""
     db = MagicMock()
     db.save_concept_board_batch.return_value = 1
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.return_value = {
+
+    def _call_side_effect(source_name, operation, *args, **kwargs):
+        try:
+            data = operation(*args, **kwargs)
+            return SourceResponse(success=True, data=data, metadata=FetchMetadata(source_name=source_name))
+        except Exception as e:
+            return SourceResponse(success=False, data=None, metadata=FetchMetadata(source_name=source_name, error=str(e)))
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_session = MagicMock()
+        mock_session.get.return_value.json.return_value = {
             "data": {
                 "total": 1,
                 "diff": [
@@ -1610,7 +1629,9 @@ def test_fetch_em_spot_none_fields():
                 ],
             }
         }
-        mock_get.return_value.raise_for_status = lambda: None
+        mock_session.get.return_value.raise_for_status = lambda: None
+        mock_client.return_value.get_session.return_value = mock_session
+        mock_client.return_value.call.side_effect = _call_side_effect
         result = concept_board.update_concept_board(db)
     assert result["board_saved"] == 1
 
@@ -1637,12 +1658,19 @@ def test_fetch_em_spot_pagination():
         {"f3": 2.0, "f4": 20.0, "f12": "BK2000", "f14": "末页概念", "f104": 3, "f105": 1},
     ]
 
-    with patch("tasks.concept_board.requests.get") as mock_get:
-        mock_get.return_value.json.side_effect = [
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_session = MagicMock()
+        mock_session.get.return_value.json.side_effect = [
             {"data": {"total": 101, "diff": page_items}},
             {"data": {"total": 101, "diff": next_items}},
         ]
-        mock_get.return_value.raise_for_status = lambda: None
+        mock_session.get.return_value.raise_for_status = lambda: None
+        mock_client.return_value.get_session.return_value = mock_session
+        # Make call() invoke the callback so _fetch_em_spot's pagination runs
+        def _call_side_effect(source, operation, *args, **kwargs):
+            data = operation(*args, **kwargs)
+            return SourceResponse(success=True, data=data, metadata=FetchMetadata(source_name=source))
+        mock_client.return_value.call.side_effect = _call_side_effect
         result = concept_board.update_concept_board(db)
-    assert mock_get.call_count == 2
+    assert mock_session.get.call_count == 2
     assert result["board_saved"] == 150

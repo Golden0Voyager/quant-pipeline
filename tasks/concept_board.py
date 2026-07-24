@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date
 from typing import Any
 
 import pandas as pd
-import requests
 
+from core.data_contract import CONCEPT_BOARD_CONTRACT, validate_records
+from core.source_client import get_default_client
 from interface import DatabaseInterface
 
 try:
@@ -21,12 +23,6 @@ except ImportError:
     ak = None
 
 logger = logging.getLogger(__name__)
-
-_EM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://data.eastmoney.com/",
-}
 
 
 def _to_float(val: Any) -> float | None:
@@ -48,16 +44,6 @@ def _to_int(val: Any) -> int | None:
         return None
 
 
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
-        return None
-
-
 # ===========================================================================
 # 东方财富概念板块实时行情（含涨跌幅/成交额/涨跌家数）
 # ===========================================================================
@@ -66,7 +52,8 @@ def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
 def _fetch_em_spot() -> list[dict]:
     """直接从东方财富 push2 接口获取概念板块实时行情（自动分页）。
 
-    返回 [{concept_code, concept_name, pct_change, turnover, up_count, down_count}, ...]
+    Raises on HTTP/network errors so that ``SourceClient.call()`` can
+    handle retry and circuit-breaker logic.
     """
     base_url = (
         "https://push2.eastmoney.com/api/qt/clist/get"
@@ -76,44 +63,65 @@ def _fetch_em_spot() -> list[dict]:
         "&fs=m:90+t:3"
         "&fields=f3,f4,f12,f14,f104,f105"
     )
-    try:
-        today = date.today().isoformat()
-        records = []
-        page = 1
-        while True:
-            resp = requests.get(base_url.format(page=page), headers=_EM_HEADERS, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("data", {}).get("diff", [])
-            if not items:
-                break
-            for item in items:
-                code = str(item.get("f12", "")).strip()
-                name = str(item.get("f14", "")).strip()
-                if not code or not name:
-                    continue
-                records.append({
-                    "trade_date": today,
-                    "concept_code": code,
-                    "concept_name": name,
-                    "pct_change": _to_float(item.get("f3")),
-                    "turnover": _to_float(item.get("f4")),
-                    "up_count": _to_int(item.get("f104")),
-                    "down_count": _to_int(item.get("f105")),
-                    "data_source": "em",
-                })
-            if len(items) < 100:
-                break
-            page += 1
-        return records
-    except Exception as e:
-        logger.warning(f"⚠️ 东方财富概念板块行情获取失败: {e}")
-        return []
+    session = get_default_client().get_session("eastmoney")
+    today = date.today().isoformat()
+    records = []
+    page = 1
+    while True:
+        resp = session.get(base_url.format(page=page), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("data", {}).get("diff", [])
+        if not items:
+            break
+        for item in items:
+            code = str(item.get("f12", "")).strip()
+            name = str(item.get("f14", "")).strip()
+            if not code or not name:
+                continue
+            records.append({
+                "trade_date": today,
+                "concept_code": code,
+                "concept_name": name,
+                "pct_change": _to_float(item.get("f3")),
+                "turnover": _to_float(item.get("f4")),
+                "up_count": _to_int(item.get("f104")),
+                "down_count": _to_int(item.get("f105")),
+                "data_source": "em",
+            })
+        if len(items) < 100:
+            break
+        page += 1
+    return records
 
 
 # ===========================================================================
 # 概念板块成分股映射（使用东方财富个股接口）
 # ===========================================================================
+
+
+def _fetch_concept_list_em() -> list[dict]:
+    """Fetch concept board name list from East Money push2 API."""
+    name_url = (
+        "https://push2.eastmoney.com/api/qt/clist/get"
+        "?pn=1&pz=500&po=1&np=1"
+        "&ut=bd1d9ddb04089700cf9c27f6f7426281"
+        "&fltt=2&invt=2&fid=f3"
+        "&fs=m:90+t:3"
+        "&fields=f12,f14"
+    )
+    session = get_default_client().get_session("eastmoney")
+    resp = session.get(name_url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("data", {}).get("diff", [])
+    out = []
+    for item in items:
+        code = str(item.get("f12", "")).strip()
+        name = str(item.get("f14", "")).strip()
+        if code and name:
+            out.append({"concept_code": code, "concept_name": name})
+    return out
 
 
 def _fetch_concept_members_em() -> list[dict]:
@@ -123,28 +131,21 @@ def _fetch_concept_members_em() -> list[dict]:
     """
     if ak is None:
         return []
-    # Step 1: get concept list from eastmoney name API (bypass session via requests)
-    name_url = (
-        "https://push2.eastmoney.com/api/qt/clist/get"
-        "?pn=1&pz=500&po=1&np=1"
-        "&ut=bd1d9ddb04089700cf9c27f6f7426281"
-        "&fltt=2&invt=2&fid=f3"
-        "&fs=m:90+t:3"
-        "&fields=f12,f14"
-    )
+
     try:
-        resp = requests.get(name_url, headers=_EM_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("data", {}).get("diff", [])
+        resp = get_default_client().call("eastmoney", _fetch_concept_list_em)
+        if not resp.success:
+            logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {resp.metadata.error}")
+            return []
+        items = resp.data
     except Exception as e:
         logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {e}")
         items = []
 
     members = []
     for item in items:
-        code = str(item.get("f12", "")).strip()
-        name = str(item.get("f14", "")).strip()
+        code = item.get("concept_code", "")
+        name = item.get("concept_name", "")
         if not code or not name:
             continue
         try:
@@ -180,30 +181,55 @@ def update_concept_board(db: DatabaseInterface) -> dict:
     logger.info("🏷️ 任务: 更新概念板块行情")
     logger.info("=" * 60)
 
-    # 不依赖 akshare — 直调 eastmoney push2 接口
     results: dict[str, Any] = {}
 
-    try:
-        spot = _fetch_em_spot()
-        if spot:
-            saved_board = db.save_concept_board_batch(spot)
-            logger.info(f"✅ 概念板块行情保存完成: {saved_board} 条")
-        else:
+    resp = get_default_client().call("eastmoney", _fetch_em_spot)
+    if not resp.success:
+        logger.warning(f"⚠️ 概念板块行情获取失败: {resp.metadata.error}")
+        saved_board = 0
+    else:
+        spot = resp.data
+        if not spot:
             saved_board = 0
             logger.warning("⚠️ 概念板块行情无数据")
-    except Exception as e:
-        saved_board = 0
-        logger.warning(f"⚠️ 概念板块行情获取失败: {e}")
+        else:
+            try:
+                # 补充 trade_date 字段（实时行情接口不返回日期）
+                today_str = date.today().isoformat()
+                for r in spot:
+                    r.setdefault("trade_date", today_str)
+                validated_spot, violations = validate_records(spot, CONCEPT_BOARD_CONTRACT, logger)
+                if violations and not validated_spot:
+                    saved_board = 0
+                    logger.error(f"🚫 概念板块行情数据合约校验失败: {violations}")
+                else:
+                    if violations:
+                        logger.warning(f"⚠️ 概念板块行情合约校验过滤 {len(spot) - len(validated_spot)} 条")
+                    saved_board = db.save_concept_board_batch(validated_spot)
+                    logger.info(f"✅ 概念板块行情保存完成: {saved_board} 条")
+            except Exception as e:
+                saved_board = 0
+                logger.warning(f"⚠️ 概念板块行情保存失败: {e}")
     results["board_saved"] = saved_board
     results["saved"] = saved_board
 
     return dict(results)
 
 
-def update_concept_member(db: DatabaseInterface) -> dict:
-    """获取概念板块成分股映射并保存（较慢，建议按需运行而非每日）。"""
+def update_concept_member(
+    db: DatabaseInterface,
+    _task_run_id: str | None = None,
+) -> dict:
+    """获取概念板块成分股映射并保存（较慢，建议按需运行而非每日）。
+
+    同时写入 ``concept_member``（快照表）和 ``concept_member_history``（PIT 历史表）。
+
+    Args:
+        db: 数据库接口
+        _task_run_id: 由 ``safe_task`` 注入的运行 ID。为 None 时自动生成。
+    """
     logger.info("\n" + "=" * 60)
-    logger.info("🏷️ 任务: 更新概念板块成分股映射")
+    logger.info("🏷️ 任务: 更新概念板块成分股映射 (含 PIT)")
     logger.info("=" * 60)
 
     if ak is None:
@@ -211,20 +237,31 @@ def update_concept_member(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     results: dict[str, Any] = {}
+    run_id = _task_run_id or str(uuid.uuid4())
+    valid_from = date.today().isoformat()
 
     try:
         members = _fetch_concept_members_em()
         if members:
+            # legacy snapshot table
             saved_member = db.save_concept_member_batch(members)
+            # PIT history table
+            pit_saved = db.save_concept_member_history_batch(members, run_id, valid_from)
             unique_codes = {m["concept_code"] for m in members}
-            logger.info(f"✅ 概念板块成分股保存完成: {saved_member} 条 / {len(unique_codes)} 个板块")
+            logger.info(
+                f"✅ 概念板块成分股: 快照 {saved_member} 条 / "
+                f"PIT {pit_saved} 条 / {len(unique_codes)} 个板块"
+            )
         else:
             saved_member = 0
+            pit_saved = 0
             logger.warning("⚠️ 概念板块成分股无数据")
     except Exception as e:
         saved_member = 0
+        pit_saved = 0
         logger.warning(f"⚠️ 概念板块成分股获取失败: {e}")
     results["member_saved"] = saved_member
-    results["saved"] = saved_member
+    results["pit_saved"] = pit_saved
+    results["saved"] = saved_member + pit_saved
 
     return dict(results)

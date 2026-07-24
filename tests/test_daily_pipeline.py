@@ -507,10 +507,10 @@ class TestUpdateFundamentals:
         db.save_fundamentals_batch.return_value = 2
         with (
             patch("daily_pipeline.logger"),
-            patch("requests.Session") as mock_session_cls,
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("daily_pipeline.datetime") as mock_dt,
         ):
-            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
@@ -526,10 +526,10 @@ class TestUpdateFundamentals:
         mock_resp.json.return_value = {"success": True, "result": {"data": [], "count": 0}}
         with (
             patch("daily_pipeline.logger"),
-            patch("requests.Session") as mock_session_cls,
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("daily_pipeline.datetime") as mock_dt,
         ):
-            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
@@ -541,13 +541,12 @@ class TestUpdateFundamentals:
         db = MagicMock()
         db.count_fundamentals_for_date.return_value = 0
         loader = MagicMock()
-        mock_session = MagicMock()
-        mock_session.get.side_effect = ConnectionError("HTTP error")
         with (
             patch("daily_pipeline.logger"),
-            patch("requests.Session", return_value=mock_session),
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("daily_pipeline.datetime") as mock_dt,
         ):
+            mock_gc.return_value.get_session.return_value.get.side_effect = ConnectionError("HTTP error")
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
@@ -577,10 +576,10 @@ class TestUpdateFundamentals:
         }
         with (
             patch("daily_pipeline.logger"),
-            patch("requests.Session") as mock_session_cls,
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("daily_pipeline.datetime") as mock_dt,
         ):
-            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = daily_pipeline.update_fundamentals(db, loader)
@@ -842,13 +841,13 @@ class TestMain:
     def test_health_check(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "health_check"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.health_check") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": MagicMock()}) as fn_dict:
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once()
+            fn_dict["health_check"].assert_called_once()
 
     def test_main_does_not_create_magicmock_file(self, weekday_mock, tmp_path):
         """main() 不应在 ProviderFactory.get_db() 为 MagicMock 时生成垃圾 SQLite 文件。"""
@@ -870,15 +869,16 @@ class TestMain:
             assert not new_magicmock
 
     def test_update_bars_with_limit(self, weekday_mock):
+        mock_fn = MagicMock()
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--limit", "5"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_bars") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}):
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None, force=False)
+            mock_fn.assert_called_once_with(db, loader, limit=5, resume=False, symbols=None, force=False)
 
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
@@ -892,15 +892,16 @@ class TestMain:
             fn.assert_called_once_with(db, loader, engine, resume=True, force=True)
 
     def test_task_retry(self, weekday_mock):
+        mock_fn = MagicMock()
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "retry"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.retry_failed") as fn:
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"retry": mock_fn}):
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-            fn.assert_called_once_with(db, loader)
+            mock_fn.assert_called_once_with(db, loader)
 
 
 # ===========================================================================
@@ -1407,20 +1408,19 @@ def test_run_all_detects_crashed_task():
     loader = MagicMock()
     engine = MagicMock()
 
-    # _safe_task 内部捕获异常返回 {"status": "crashed", "error": "..."}，
-    # 模拟它返回崩溃结果而非抛异常
+    # crashed=True on failed status
     with patch("daily_pipeline._safe_task",
-               return_value={"status": "crashed", "error": "simulated crash"}), \
+               return_value={"status": "failed", "error": "simulated crash"}), \
          patch("daily_pipeline._should_update", return_value=True), \
          patch("daily_pipeline.logger"), \
          patch("time.sleep"):
         results = run_all(db, loader, engine)
 
-    assert results.get("crashed") is True, "run_all should set crashed=True"
+    assert results.get("crashed") is True, "run_all should set crashed=True for failed"
 
-    # Also test: task returning {"saved": 0, "error": "..."} should set crashed=True
+    # crashed=True on status field via degraded/failed/aborted
     with patch("daily_pipeline._safe_task",
-               return_value={"saved": 0, "error": "API unavailable"}), \
+               return_value={"status": "failed", "error": "API unavailable"}), \
          patch("daily_pipeline._should_update", return_value=True), \
          patch("daily_pipeline.logger"), \
          patch("time.sleep"):
@@ -1428,8 +1428,9 @@ def test_run_all_detects_crashed_task():
     assert results2.get("crashed") is True, \
         "run_all should set crashed=True when task returns error field"
 
+    # crashed=True on degraded status
     with patch("daily_pipeline._safe_task",
-               return_value={"status": "completed_with_errors", "failed": 1}), \
+               return_value={"status": "degraded", "error": "completed with errors"}), \
          patch("daily_pipeline._should_update", return_value=True), \
          patch("daily_pipeline.logger"), \
          patch("time.sleep"):
@@ -1442,9 +1443,9 @@ def test_safe_task_marks_error_result_completed_with_errors():
     from core.runner import safe_task
 
     with patch("core.runner.logger"):
-        result = safe_task("broken_task", lambda: {"saved": 0, "total": 0, "error": "Broken pipe"})
+        result = safe_task("broken_task", lambda **kw: {"saved": 0, "total": 0, "error": "Broken pipe"})
 
-    assert result["status"] == "completed_with_errors"
+    assert result["status"] == "failed"
     assert result["error"] == "Broken pipe"
 
 
@@ -1452,9 +1453,9 @@ def test_safe_task_marks_failed_result_completed_with_errors():
     from core.runner import safe_task
 
     with patch("core.runner.logger"):
-        result = safe_task("partial_task", lambda: {"success": 0, "failed": 2, "total": 10})
+        result = safe_task("partial_task", lambda **kw: {"success": 0, "failed": 2, "total": 10})
 
-    assert result["status"] == "completed_with_errors"
+    assert result["status"] == "degraded"
 
 
 def test_main_exits_one_when_run_all_returns_crashed():
@@ -1932,7 +1933,8 @@ class TestGlobalMacroCli:
     def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", task_name]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch(f"daily_pipeline.{func_name}") as fn:
+             patch(f"daily_pipeline.{func_name}") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {task_name: fn}):
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2483,7 +2485,8 @@ class TestMainMoreTasks:
     def test_task_update_stock_list(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_stock_list"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_stock_list") as fn:
+             patch("daily_pipeline.update_stock_list") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_stock_list": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2494,7 +2497,8 @@ class TestMainMoreTasks:
     def test_task_update_indicators(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_indicators"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_indicators") as fn:
+             patch("daily_pipeline.update_indicators") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_indicators": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2505,7 +2509,8 @@ class TestMainMoreTasks:
     def test_task_update_fundamentals(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_fundamentals"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_fundamentals") as fn:
+             patch("daily_pipeline.update_fundamentals") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_fundamentals": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2516,7 +2521,8 @@ class TestMainMoreTasks:
     def test_task_update_fund_flow(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_fund_flow"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_fund_flow") as fn:
+             patch("daily_pipeline.update_fund_flow") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_fund_flow": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2527,7 +2533,8 @@ class TestMainMoreTasks:
     def test_task_update_market_snapshot(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_market_snapshot"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_market_snapshot") as fn:
+             patch("daily_pipeline.update_market_snapshot") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_market_snapshot": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2538,7 +2545,8 @@ class TestMainMoreTasks:
     def test_task_update_margin_trading(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_margin_trading"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_margin_trading") as fn:
+             patch("daily_pipeline.update_margin_trading") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_margin_trading": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2549,7 +2557,8 @@ class TestMainMoreTasks:
     def test_task_update_dragon_tiger(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_dragon_tiger"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_dragon_tiger") as fn:
+             patch("daily_pipeline.update_dragon_tiger") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_dragon_tiger": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2560,7 +2569,8 @@ class TestMainMoreTasks:
     def test_task_update_block_trade(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_block_trade"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_block_trade") as fn:
+             patch("daily_pipeline.update_block_trade") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_block_trade": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2571,7 +2581,8 @@ class TestMainMoreTasks:
     def test_task_update_sector_fund_flow(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_sector_fund_flow"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_sector_fund_flow") as fn:
+             patch("daily_pipeline.update_sector_fund_flow") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_sector_fund_flow": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2582,7 +2593,8 @@ class TestMainMoreTasks:
     def test_task_update_historical_valuation(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_historical_valuation"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_historical_valuation") as fn:
+             patch("daily_pipeline.update_historical_valuation") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_historical_valuation": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2593,7 +2605,8 @@ class TestMainMoreTasks:
     def test_task_update_sector_industry(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_sector_industry"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_sector_industry") as fn:
+             patch("daily_pipeline.update_sector_industry") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_sector_industry": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2604,7 +2617,8 @@ class TestMainMoreTasks:
     def test_task_update_shareholder_count(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_shareholder_count"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_shareholder_count") as fn:
+             patch("daily_pipeline.update_shareholder_count") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_shareholder_count": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2615,7 +2629,8 @@ class TestMainMoreTasks:
     def test_task_update_quarterly_financials(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_quarterly_financials"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_quarterly_financials") as fn:
+             patch("daily_pipeline.update_quarterly_financials") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_quarterly_financials": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2626,7 +2641,8 @@ class TestMainMoreTasks:
     def test_task_update_industry(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_industry"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.update_industry") as fn:
+             patch("daily_pipeline.update_industry") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_industry": fn}):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -2642,7 +2658,8 @@ class TestMainMoreTasks:
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
-            daily_pipeline.main()  # should print error, not crash
+            with pytest.raises(SystemExit):
+                daily_pipeline.main()
 
     def test_keyboard_interrupt(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \

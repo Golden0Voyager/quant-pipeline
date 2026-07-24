@@ -7,18 +7,13 @@
 from __future__ import annotations
 
 import logging
-import random
 import sqlite3
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
-from core.config import (
-    RETRY_DELAY_VAL as RETRY_DELAY,
-)
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -231,64 +226,54 @@ def _get_etf_update_range(db: DatabaseInterface) -> tuple[str, str, str | None]:
 
 
 def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> list[dict]:
-    """获取单只 ETF 日线，带重试与指数退避。"""
+    """获取单只 ETF 日线，通过 SourceClient.call() 获得重试+熔断保护。"""
     if ak is None:
         return []
-    # ETF 接口偶发 15s 读超时，为避免 TUI 2 分钟超时窗口内未完成，
-    # 本地限制重试次数，宁可丢单只 ETF 数据也不拖垮整个任务。
-    etf_max_retry = 1
-    for attempt in range(etf_max_retry):
-        try:
-            df = ak.fund_etf_hist_em(
-                symbol=code,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust="qfq",
-            )
-            if df is None or df.empty:
-                logger.warning(f"⚠️ ETF {name}({code}) 无数据")
-                return []
-            col_map = {
-                "日期": "trade_date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-                "成交额": "amount",
+    from core.source_client import get_default_client
+
+    resp = get_default_client().call(
+        "eastmoney",
+        lambda: ak.fund_etf_hist_em(
+            symbol=code,
+            period="daily",
+            start_date=start_date,
+            end_date=end_date,
+            adjust="qfq",
+        ),
+    )
+    df = resp.data if resp.success else None
+    if df is None or (hasattr(df, "empty") and df.empty):
+        logger.warning(f"⚠️ ETF {name}({code}) 获取失败（{resp.metadata.error}）")
+        return []
+    col_map = {
+        "日期": "trade_date",
+        "开盘": "open",
+        "最高": "high",
+        "最低": "low",
+        "收盘": "close",
+        "成交量": "volume",
+        "成交额": "amount",
+    }
+    rename = {k: v for k, v in col_map.items() if k in df.columns}
+    df = df.rename(columns=rename)
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "trade_date": str(row.get("trade_date", ""))[:10],
+                "ts_code": code,
+                "name": name,
+                "open": _to_float(row.get("open")),
+                "high": _to_float(row.get("high")),
+                "low": _to_float(row.get("low")),
+                "close": _to_float(row.get("close")),
+                "volume": _to_float(row.get("volume")),
+                "amount": _to_float(row.get("amount")),
+                "data_source": "akshare",
             }
-            rename = {k: v for k, v in col_map.items() if k in df.columns}
-            df = df.rename(columns=rename)
-            records: list[dict] = []
-            for _, row in df.iterrows():
-                records.append(
-                    {
-                        "trade_date": str(row.get("trade_date", ""))[:10],
-                        "ts_code": code,
-                        "name": name,
-                        "open": _to_float(row.get("open")),
-                        "high": _to_float(row.get("high")),
-                        "low": _to_float(row.get("low")),
-                        "close": _to_float(row.get("close")),
-                        "volume": _to_float(row.get("volume")),
-                        "amount": _to_float(row.get("amount")),
-                        "data_source": "akshare",
-                    }
-                )
-            logger.info(f"  ✅ {name}({code}): {len(df)} 条")
-            return records
-        except Exception as e:
-            if attempt < etf_max_retry - 1:
-                sleep_time = RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(
-                    f"⚠️ ETF {name}({code}) 第 {attempt + 1} 次失败，"
-                    f"{sleep_time:.1f}s 后重试: {e}"
-                )
-                time.sleep(sleep_time)
-            else:
-                logger.warning(f"⚠️ ETF {name}({code}) 获取失败（已重试 {etf_max_retry} 次）: {e}")
-    return []
+        )
+    logger.info(f"  ✅ {name}({code}): {len(df)} 条")
+    return records
 
 
 def _fetch_etf_daily(
@@ -339,8 +324,8 @@ def update_etf_daily(db: DatabaseInterface) -> dict:
 
         records = _fetch_etf_daily(start_date, end_date)
         if not records:
-            logger.warning("⚠️ ETF 日线无数据")
-            return {"saved": 0, "total": 0}
+            logger.warning("⚠️ ETF 日线无数据（所有标的均获取失败，很可能是东财接口网络问题）")
+            return {"saved": 0, "total": 0, "status": "degraded", "error_kind": "network", "error": "all ETFs failed — network issue (RemoteDisconnected)"}
         warn_if_all_empty(records, ["close", "volume"], "etf_daily")
         saved = db.save_etf_daily_batch(records)
         logger.info(f"✅ ETF 日线保存完成: {saved} 条")

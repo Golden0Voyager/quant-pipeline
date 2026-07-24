@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.data_contract import STOCK_PLEDGE_CONTRACT, validate_records
+from core.source_client import get_default_client
 from core.utils import is_real_db_path
 from interface import DatabaseInterface
 
@@ -33,16 +35,6 @@ def _to_float(val: Any) -> float | None:
         v = float(val)
         return None if pd.isna(v) else v
     except (ValueError, TypeError):
-        return None
-
-
-def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
-    if ak is None:
-        return None
-    try:
-        return func(**kwargs)
-    except Exception as e:
-        logger.warning(f"⚠️ {func.__name__} 获取失败: {e}")
         return None
 
 
@@ -103,10 +95,12 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
     if latest_db_date and latest_db_date not in target_dates:
         target_dates.append(latest_db_date)
 
+    client = get_default_client()
     df = None
     for date in target_dates:
-        df = _try_get_ak_df(ak.stock_gpzy_pledge_ratio_em, date=date.replace("-", ""))
-        if df is not None and not df.empty:
+        resp = client.call("eastmoney", lambda d=date: ak.stock_gpzy_pledge_ratio_em(date=d.replace("-", "")))
+        df = resp.data if resp.success else None
+        if df is not None and hasattr(df, "empty") and not df.empty:
             logger.info(f"  股权质押使用日期 {date}")
             break
 
@@ -142,6 +136,12 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
         logger.warning("⚠️ 股权质押记录为空")
         return {"saved": 0, "total": raw_count}
 
-    saved = db.save_stock_pledge_batch(records)
+    validated_records, violations = validate_records(records, STOCK_PLEDGE_CONTRACT, logger)
+    if violations and not validated_records:
+        logger.error(f"🚫 股权质押数据合约校验失败: {violations}")
+        return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
+    if violations:
+        logger.warning(f"⚠️ 股权质押合约校验过滤 {len(records) - len(validated_records)} 条")
+    saved = db.save_stock_pledge_batch(validated_records)
     logger.info(f"✅ 股权质押数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}

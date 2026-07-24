@@ -108,9 +108,9 @@ class TestStrategyA:
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = f10_resp
 
             result = financials.update_industry(db)
@@ -141,9 +141,9 @@ class TestStrategyA:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [f10_err] * 3 + [sina_ok]
 
             result = financials.update_industry(db)
@@ -173,9 +173,9 @@ class TestStrategyA:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [f10_bad] * 3 + [sina_ok]
 
             result = financials.update_industry(db)
@@ -196,9 +196,9 @@ class TestStrategyA:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [RuntimeError("timeout")] * 3 + [sina_ok]
 
             result = financials.update_industry(db)
@@ -232,9 +232,9 @@ class TestStrategyBFallback:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", ak), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [f10_err] * 3
 
             result = financials.update_industry(db)
@@ -256,9 +256,9 @@ class TestStrategyBFallback:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", ak), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [f10_err] * 3
 
             result = financials.update_industry(db)
@@ -295,9 +295,9 @@ class TestStrategyCFallback:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = sina_ok
 
             result = financials.update_industry(db)
@@ -320,9 +320,9 @@ class TestStrategyCFallback:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = sina_fail
 
             result = financials.update_industry(db)
@@ -367,9 +367,9 @@ class TestF10Blocked:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = _side_effect
 
             result = financials.update_industry(db)
@@ -415,9 +415,9 @@ class TestAllStrategiesFail:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = [f10_err] * 3 + [sina_err]
 
             result = financials.update_industry(db)
@@ -451,9 +451,9 @@ class TestBatchProcessing:
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = f10_ok
 
             result = financials.update_industry(db)
@@ -508,9 +508,9 @@ class TestBatchProcessing:
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
              patch.object(financials, "ak", None), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.side_effect = _side_effect
 
             result = financials.update_industry(db)
@@ -573,9 +573,9 @@ class TestExchangePrefix:
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = f10_ok
             result = financials.update_industry(db)
 
@@ -595,9 +595,9 @@ class TestExchangePrefix:
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = f10_ok
             result = financials.update_industry(db)
 
@@ -616,9 +616,9 @@ class TestExchangePrefix:
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
-             patch("requests.Session") as mock_session_cls:
+             patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
+            mock_gc.return_value.get_session.return_value = mock_session
             mock_session.get.return_value = f10_ok
             result = financials.update_industry(db)
 
