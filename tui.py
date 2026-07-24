@@ -1526,6 +1526,7 @@ class DataCompletenessWidget(VerticalScroll):
 
         # 先计算每个表的状态与排序键，再按新鲜度排序（滞后/无数据沉底）
         items: list[tuple[int, int, str, str, int, str | None, str]] = []
+        health_counts: dict[str, int] = {"healthy": 0, "degraded": 0, "critical": 0}
         for idx, (tbl, label) in enumerate(self.TABLE_LABELS.items()):
             n = counts.get(tbl, 0)
             latest = latest_dates.get(tbl)
@@ -1535,6 +1536,20 @@ class DataCompletenessWidget(VerticalScroll):
 
             order = self._STATUS_ORDER.get(status, 3)
             items.append((order, idx, tbl, label, n, latest, status))
+
+            if status in ("最新", "T+1", "按月更新", "按季更新"):
+                health_counts["healthy"] += 1
+            elif status == "略滞后":
+                health_counts["degraded"] += 1
+            elif status in ("滞后", "无数据"):
+                health_counts["critical"] += 1
+
+        health_str = (
+            f"[bold #10b981]●[/bold #10b981] {health_counts['healthy']}  "
+            f"[bold #f59e0b]▲[/bold #f59e0b] {health_counts['degraded']}  "
+            f"[bold #ef4444]▼[/bold #ef4444] {health_counts['critical']}"
+        )
+        lines.append(f"  健康度: {health_str}")
 
         items.sort(key=lambda x: (x[0], x[1]))
 
