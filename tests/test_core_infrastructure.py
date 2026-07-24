@@ -44,7 +44,7 @@ class TestSafeTask:
 
     def test_success_returns_normalized_dict(self):
         """``{"saved": 5}`` → normalized with status='success'."""
-        result = safe_task("test", lambda: {"saved": 5})
+        result = safe_task("test", lambda **kw: {"saved": 5})
         assert result["status"] == "success"
         assert result["saved"] == 5
         assert "elapsed_seconds" in result["metadata"]
@@ -52,7 +52,7 @@ class TestSafeTask:
     def test_exception_returns_failed_internal(self):
         """fn 抛异常 → FAILED/INTERNAL + to_dict. """
 
-        def crash():
+        def crash(**kw):
             msg = "something broke"
             raise ValueError(msg)
 
@@ -63,43 +63,43 @@ class TestSafeTask:
 
     def test_error_in_result_becomes_failed(self):
         """``{"error": "..."}`` → FAILED. """
-        result = safe_task("err", lambda: {"error": "partial failure"})
+        result = safe_task("err", lambda **kw: {"error": "partial failure"})
         assert result["status"] == "failed"
 
     def test_failed_count_becomes_degraded(self):
         """``{"failed": 3}`` → DEGRADED. """
-        result = safe_task("fail", lambda: {"failed": 3, "total": 10})
+        result = safe_task("fail", lambda **kw: {"failed": 3, "total": 10})
         assert result["status"] == "degraded"
 
     def test_aborted_key_becomes_failed(self):
         """``{"aborted": True}`` → FAILED (falls through heuristics). """
-        result = safe_task("abort", lambda: {"aborted": True})
+        result = safe_task("abort", lambda **kw: {"aborted": True})
         assert result["status"] == "failed"
 
     def test_failed_symbols_becomes_failed(self):
         """``{"failed_symbols": [...]}`` → FAILED (not a recognized key). """
         result = safe_task(
-            "sym", lambda: {"failed_symbols": ["000001"], "total": 5}
+            "sym", lambda **kw: {"failed_symbols": ["000001"], "total": 5}
         )
         assert result["status"] == "failed"
 
     def test_success_results_always_include_status(self):
         """All normalized results include ``status``. """
-        result = safe_task("ok", lambda: {"saved": 10})
+        result = safe_task("ok", lambda **kw: {"saved": 10})
         assert result["status"] == "success"
 
     # ── New regression tests (Task 2 plan) ──────────────────────────
 
     def test_unqualified_zero_saved_becomes_failed(self):
         """``{"saved": 0}`` → FAILED (not success). """
-        result = safe_task("zero", lambda: {"saved": 0})
+        result = safe_task("zero", lambda **kw: {"saved": 0})
         assert result["status"] == "failed"
 
     def test_zero_saved_with_no_data_status(self):
         """``{"saved": 0, "status": "no_data"}`` → NO_DATA, not failure. """
         result = safe_task(
             "holiday",
-            lambda: {"saved": 0, "status": "no_data", "reason": "market holiday"},
+            lambda **kw: {"saved": 0, "status": "no_data", "reason": "market holiday"},
         )
         assert result["status"] == "no_data"
 
@@ -107,14 +107,14 @@ class TestSafeTask:
         """Partial success with non-zero rejected → DEGRADED. """
         result = safe_task(
             "partial",
-            lambda: {"saved": 8, "rejected": 2, "status": "degraded",
-                     "error_kind": "data_quality", "error": "2 records invalid"},
+            lambda **kw: {"saved": 8, "rejected": 2, "status": "degraded",
+                          "error_kind": "data_quality", "error": "2 records invalid"},
         )
         assert result["status"] == "degraded"
 
     def test_metadata_includes_elapsed_seconds(self):
         """``metadata["elapsed_seconds"]`` is a positive float. """
-        result = safe_task("timed", lambda: {"saved": 1})
+        result = safe_task("timed", lambda **kw: {"saved": 1})
         assert isinstance(result["metadata"]["elapsed_seconds"], float)
         assert result["metadata"]["elapsed_seconds"] >= 0
 
