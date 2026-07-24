@@ -138,6 +138,8 @@ class MigrationEngine:
         """
         import sqlite3
 
+        all_migrations = self._load()
+
         conn = sqlite3.connect(str(self._db_path), timeout=30.0)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -148,7 +150,7 @@ class MigrationEngine:
             applied = self._applied_versions(conn)
             results: list[dict[str, Any]] = []
 
-            for mig in self._load():
+            for mig in all_migrations:
                 if mig.version in applied:
                     continue
                 if target_version is not None and mig.version > target_version:
@@ -173,6 +175,12 @@ class MigrationEngine:
                     )
 
             conn.commit()
+
+            # Verify checksums after applying pending migrations so that
+            # reconciliation migrations (e.g. 004, 005) can update recorded
+            # checksums for edited base migrations before we enforce integrity.
+            self._verify_applied_checksums(all_migrations)
+
             return results
         finally:
             conn.close()
@@ -199,6 +207,33 @@ class MigrationEngine:
             "SELECT version FROM schema_migrations WHERE success = 1"
         ).fetchall()
         return {r[0] for r in rows}
+
+    def _verify_applied_checksums(
+        self,
+        migrations: list[MigrationScript],
+    ) -> None:
+        """Verify that already-applied migrations have not drifted.
+
+        A checksum mismatch means the migration file was edited after it was
+        applied, which breaks reproducibility and rollback guarantees.
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
+        try:
+            self._ensure_tracking_table(conn)
+            rows = conn.execute(
+                "SELECT version, checksum FROM schema_migrations WHERE success = 1"
+            ).fetchall()
+            recorded = dict(rows)
+            for mig in migrations:
+                if mig.version in recorded and recorded[mig.version] != mig.checksum:
+                    raise MigrationError(
+                        f"checksum mismatch for migration {mig.version} "
+                        f"({mig.description}): file has changed since it was applied"
+                    )
+        finally:
+            conn.close()
 
     def _load(self) -> list[MigrationScript]:
         if not self._migrations_dir.is_dir():
@@ -268,6 +303,8 @@ class MigrationEngine:
         start = time.time()
 
         try:
+            conn.execute("PRAGMA foreign_keys = ON")
+
             if migration.sql is not None:
                 conn.executescript(migration.sql)
             elif migration.apply_func is not None:
@@ -276,6 +313,14 @@ class MigrationEngine:
                 raise MigrationError(
                     f"migration {migration.version} has neither sql nor apply_func"
                 )
+
+            # Post-migration integrity checks
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                raise MigrationError(f"foreign key violations: {fk_violations}")
+            quick = conn.execute("PRAGMA quick_check").fetchone()[0]
+            if quick != "ok":
+                raise MigrationError(f"PRAGMA quick_check failed: {quick}")
 
             duration_ms = int((time.time() - start) * 1000)
             conn.execute(
