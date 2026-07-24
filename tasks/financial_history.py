@@ -8,9 +8,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -55,9 +56,7 @@ def _minimum_market_coverage(period: str, as_of_date: date) -> float:
     """
     y, m = int(period[:4]), int(period[4:6])
     qe = 31 if m in (3, 12) else 30
-    if m == 6:
-        qe = 30
-    elif m == 9:
+    if m == 6 or m == 9:
         qe = 30
     period_end = date(y, m, qe)
     days_since = (as_of_date - period_end).days
@@ -205,10 +204,8 @@ def _merge_financial_period(period: str) -> list[dict]:
         ]:
             val = row.get(col) or row.get(col.replace("_lrb", "").replace("_zcfz", "").replace("_xjll", ""))
             if val is not None and val != "":
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     record[key] = float(val)
-                except (ValueError, TypeError):
-                    pass
 
         # 从 yjbb 获取 ROE/毛利率等
         for col, key in [
@@ -221,10 +218,8 @@ def _merge_financial_period(period: str) -> list[dict]:
         ]:
             val = row.get(col)
             if val is not None and val != "":
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     record[key] = float(val)
-                except (ValueError, TypeError):
-                    pass
 
         records.append(record)
 
