@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 import uuid
@@ -31,6 +32,25 @@ def task_timer(name: str):
     """
     start = time.time()
     yield {"name": name, "start": start, "elapsed": lambda: time.time() - start}
+
+
+def _accepts_task_run_id(fn: Callable[..., Any]) -> bool:
+    """Return whether *fn* safely accepts ``_task_run_id`` as a keyword."""
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+    run_id_parameter = parameters.get("_task_run_id")
+    if (
+        run_id_parameter is not None
+        and run_id_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+    ):
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -60,10 +80,10 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
         except Exception as exc:
             logger.warning("⚠️ 写入 ingestion_runs 审计表失败: %s", exc)
 
-    # Inject the run_id so that task functions that accept ``_task_run_id``
-    # (e.g. ``def update_concept_member(db, _task_run_id=None)``) can use
-    # the same id for PIT / audit writes instead of generating their own.
-    kwargs.setdefault("_task_run_id", run_id)
+    # Fixed-signature legacy tasks intentionally run without this internal
+    # keyword; compatible callbacks share the ID for PIT / audit writes.
+    if _accepts_task_run_id(fn):
+        kwargs.setdefault("_task_run_id", run_id)
 
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
