@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.data_contract import MARKET_VALUATION_CONTRACT, validate_records
 from core.source_client import get_default_client
 from interface import DatabaseInterface
 
@@ -174,7 +175,15 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
 
     if daily_merge:
         daily_records = list(daily_merge.values())
-        saved = db.save_market_valuation_batch(daily_records)
+        validated_records, violations = validate_records(daily_records, MARKET_VALUATION_CONTRACT, logger)
+        if violations and not validated_records:
+            logger.error(f"🚫 大盘估值数据合约校验失败: {violations}")
+            results["saved"] = 0
+            results["error"] = f"data contract violations: {violations}"
+            return dict(results)
+        if validated_records and len(validated_records) < len(daily_records):
+            logger.warning(f"⚠️ 大盘估值数据合约校验过滤 {len(daily_records) - len(validated_records)} 条问题记录")
+        saved = db.save_market_valuation_batch(validated_records or daily_records)
         logger.info(f"✅ 大盘估值保存完成: {saved} 条 / {len(daily_records)} 个交易日")
     else:
         saved = 0
