@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.data_contract import OPTION_SENTIMENT_CONTRACT, validate_records
 from core.source_client import get_default_client
 from interface import DatabaseInterface
 
@@ -168,9 +169,17 @@ def update_option_sentiment(db: DatabaseInterface) -> dict:
 
     if merge:
         records = list(merge.values())
-        saved = db.save_option_sentiment_batch(records)
-        logger.info(f"✅ 期权情绪数据保存完成: {saved} 条 / {len(records)} 个交易日")
-        results["saved"] = saved
+        validated_records, violations = validate_records(records, OPTION_SENTIMENT_CONTRACT, logger)
+        if violations and not validated_records:
+            logger.error(f"🚫 期权情绪数据合约校验失败: {violations}")
+            results["saved"] = 0
+            results["error"] = f"data contract violations: {violations}"
+        else:
+            if violations:
+                logger.warning(f"⚠️ 期权情绪合约校验过滤 {len(records) - len(validated_records)} 条")
+            saved = db.save_option_sentiment_batch(validated_records)
+            logger.info(f"✅ 期权情绪数据保存完成: {saved} 条 / {len(records)} 个交易日")
+            results["saved"] = saved
     else:
         logger.warning("⚠️ 期权情绪数据无数据")
         results["saved"] = 0
