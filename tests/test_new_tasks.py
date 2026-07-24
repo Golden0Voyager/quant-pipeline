@@ -538,6 +538,24 @@ def _mock_ak_finance_flow() -> MagicMock:
     return ak
 
 
+def test_etf_update_range_ignores_non_real_db_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    db = MagicMock()
+
+    with patch.object(
+        finance_flow,
+        "get_expected_latest_trading_day",
+        return_value="2026-07-19",
+    ):
+        start_date, end_date, latest_date = finance_flow._get_etf_update_range(db)
+
+    assert (start_date, end_date, latest_date) == ("20260619", "20260719", None)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_update_finance_flow_runs_all():
     ak = _mock_ak_finance_flow()
     db = MagicMock()
