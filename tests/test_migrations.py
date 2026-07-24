@@ -350,7 +350,7 @@ class TestRunMigrations:
 
 
 class TestMigration001:
-    """Ingestion audit table."""
+    """Original ingestion audit table (task_run_log)."""
 
     def test_creates_task_run_log(self, tmp_db):
         migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
@@ -371,11 +371,7 @@ class TestMigration001:
                 ).fetchall()
             }
             assert "task_run_log" in tables
-            # Verify columns
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(task_run_log)").fetchall()}
-            for expected in ("task_name", "run_date", "status", "saved",
-                             "error_kind", "error_msg", "elapsed_ms"):
-                assert expected in cols, f"missing column {expected}"
+            assert "ingestion_runs" not in tables
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -481,14 +477,14 @@ class TestMigration002:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Validation — migration 003 (SQL)
+# Validation — migration 003 (original SQL — legacy PIT tables)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestMigration003:
-    """Point-in-time tables."""
+    """Original point-in-time tables (legacy schema)."""
 
-    def test_creates_pt_tables(self, tmp_db):
+    def test_creates_legacy_tables(self, tmp_db):
         migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
         if not migrations_dir.is_dir():
             pytest.skip("migrations/ directory not found")
@@ -507,4 +503,45 @@ class TestMigration003:
                 ).fetchall()
             }
             for expected in ("financial_history_pt", "concept_member_pt", "index_member_pt"):
+                assert expected in tables, f"missing legacy table {expected}"
+            for novel in ("quarterly_financials_history", "concept_member_history"):
+                assert novel not in tables, f"new table {novel} should not exist yet"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 006+007 (reconciliation → new PIT tables)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestMigration007:
+    """Reconciled interval-based PIT tables (after 006+007)."""
+
+    def test_reconciles_to_new_tables(self, tmp_db):
+        migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+        if not migrations_dir.is_dir():
+            pytest.skip("migrations/ directory not found")
+
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(migrations_dir),
+        )
+        engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for expected in (
+                "ingestion_runs",
+                "ingestion_rejections",
+                "quarterly_financials_history",
+                "quarterly_financials",
+                "concept_member_history",
+                "index_member_history",
+            ):
                 assert expected in tables, f"missing table {expected}"
+            for legacy in ("task_run_log", "financial_history_pt", "concept_member_pt", "index_member_pt"):
+                assert legacy not in tables, f"legacy table {legacy} should have been dropped"
