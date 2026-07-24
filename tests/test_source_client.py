@@ -9,9 +9,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from core.source_client import (
     CircuitState,
@@ -20,7 +18,6 @@ from core.source_client import (
     SourcePolicy,
     SourceResponse,
 )
-
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
