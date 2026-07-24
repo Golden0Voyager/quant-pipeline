@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+from functools import wraps
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
 from core.runner import _task_result_has_errors, safe_task, task_timer
 
@@ -117,6 +119,85 @@ class TestSafeTask:
         result = safe_task("timed", lambda **kw: {"saved": 1})
         assert isinstance(result["metadata"]["elapsed_seconds"], float)
         assert result["metadata"]["elapsed_seconds"] >= 0
+
+    def test_fixed_signature_callback_does_not_receive_internal_run_id(self):
+        """A callback with a fixed signature must remain callable."""
+
+        def fixed() -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("fixed", fixed)
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_explicit_run_id_parameter_receives_generated_uuid(self):
+        """A callback that declares _task_run_id receives the scheduler UUID."""
+        captured: dict[str, str | None] = {}
+
+        def supported(_task_run_id: str | None = None) -> dict[str, int]:
+            captured["run_id"] = _task_run_id
+            return {"saved": 1}
+
+        result = safe_task("supported", supported)
+
+        assert result["status"] == "success"
+        assert UUID(captured["run_id"] or "").version == 4
+
+    def test_var_keyword_callback_receives_generated_run_id(self):
+        """A generic **kwargs callback keeps the existing injection behavior."""
+        captured: dict[str, object] = {}
+
+        def generic(**kwargs: object) -> dict[str, int]:
+            captured.update(kwargs)
+            return {"saved": 1}
+
+        result = safe_task("generic", generic)
+
+        assert result["status"] == "success"
+        assert UUID(str(captured["_task_run_id"])).version == 4
+
+    def test_wrapped_fixed_signature_callback_does_not_receive_run_id(self):
+        """Signature inspection follows functools.wraps to the original task."""
+
+        def fixed() -> dict[str, int]:
+            return {"saved": 1}
+
+        @wraps(fixed)
+        def wrapped(*args: object, **kwargs: object) -> dict[str, int]:
+            return fixed(*args, **kwargs)
+
+        result = safe_task("wrapped", wrapped)
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_caller_provided_run_id_is_preserved(self):
+        """safe_task must not overwrite a supported caller-provided run ID."""
+        captured: dict[str, str | None] = {}
+
+        def supported(_task_run_id: str | None = None) -> dict[str, int]:
+            captured["run_id"] = _task_run_id
+            return {"saved": 1}
+
+        result = safe_task("provided", supported, _task_run_id="provided-run-id")
+
+        assert result["status"] == "success"
+        assert captured["run_id"] == "provided-run-id"
+
+    def test_uninspectable_callback_runs_without_internal_run_id(self):
+        """Optional metadata injection must not block an uninspectable callback."""
+
+        class UninspectableCallable:
+            __signature__ = "invalid"
+
+            def __call__(self) -> dict[str, int]:
+                return {"saved": 1}
+
+        result = safe_task("uninspectable", UninspectableCallable())
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
 
 
 class TestTaskResultHasErrors:
