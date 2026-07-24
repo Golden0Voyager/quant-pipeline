@@ -213,6 +213,7 @@ def health_check(db: DatabaseInterface) -> dict:
     db_size = Path(db.db_path).stat().st_size / (1024 * 1024)
     report_lines.append(f"\n  数据库大小: {db_size:.2f} MB")
     report_lines.append("=" * 50)
+    report_lines.append("📋 详细契约审计: uv run python scripts/audit_data_contracts.py --db <path> --json")
 
     report = "\n".join(report_lines)
     logger.info(report)
