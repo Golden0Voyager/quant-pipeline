@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
-from core.utils import warn_if_all_empty
+from core.utils import is_real_db_path, warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -206,7 +206,7 @@ def _get_etf_update_range(db: DatabaseInterface) -> tuple[str, str, str | None]:
     end_date = today.replace("-", "")
     db_path = getattr(db, "db_path", None)
     latest_date: str | None = None
-    if db_path:
+    if is_real_db_path(db_path):
         try:
             with sqlite3.connect(str(db_path), timeout=5.0) as conn:
                 cur = conn.cursor()
