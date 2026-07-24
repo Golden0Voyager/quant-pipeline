@@ -782,6 +782,107 @@ class SmartMoneyDBProvider:
     def save_quarterly_financials_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_quarterly_financials_batch(records)
 
+    def get_financial_period_coverage(self, periods: list[str]) -> dict[str, int]:
+        """查询各报告期的股票覆盖数。"""
+        if not periods:
+            return {}
+        conn = self._get_read_conn()
+        try:
+            placeholders = ",".join("?" for _ in periods)
+            cur = conn.execute(
+                f"SELECT report_period, COUNT(DISTINCT ts_code) "
+                f"FROM quarterly_financials "
+                f"WHERE report_period IN ({placeholders}) "
+                f"GROUP BY report_period",
+                periods,
+            )
+            return dict(cur.fetchall())
+        finally:
+            conn.close()
+
+    def save_financial_history_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        """原子写入季度财务历史，同时更新最新视图。"""
+        if not records:
+            return {"history_saved": 0, "latest_updated": 0}
+        with self._write_lock:
+            conn = self._get_write_conn()
+            before = conn.total_changes
+            history_saved = 0
+            latest_updated = 0
+            for r in records:
+                ts_code = r.get("ts_code", "")
+                report_period = r.get("report_period", "")
+                publish_date = r.get("publish_date", "")
+                if not ts_code or not report_period or not publish_date:
+                    continue
+                conn.execute(
+                    """INSERT OR REPLACE INTO quarterly_financials_history
+                       (ts_code, report_period, publish_date,
+                        revenue, net_profit, deduct_profit,
+                        operating_cashflow, rd_expense,
+                        gross_margin, net_margin, roe, debt_ratio,
+                        revenue_growth, profit_growth, data_source)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        ts_code, report_period, publish_date,
+                        r.get("revenue"), r.get("net_profit"), r.get("deduct_profit"),
+                        r.get("operating_cashflow"), r.get("rd_expense"),
+                        r.get("gross_margin"), r.get("net_margin"),
+                        r.get("roe"), r.get("debt_ratio"),
+                        r.get("revenue_growth"), r.get("profit_growth"),
+                        r.get("data_source", "akshare"),
+                    ),
+                )
+                history_saved += 1
+                # Refresh latest view — take the most recent publish_date per period
+                conn.execute(
+                    """INSERT OR REPLACE INTO quarterly_financials
+                       (ts_code, report_period,
+                        revenue, net_profit, operating_cashflow,
+                        roe, gross_margin, net_margin,
+                        revenue_growth, profit_growth, debt_ratio, eps, bps,
+                        data_source)
+                       SELECT ? AS ts_code, ? AS report_period,
+                              revenue, net_profit, operating_cashflow,
+                              roe, gross_margin, net_margin,
+                              revenue_growth, profit_growth, debt_ratio, eps, bps,
+                              data_source
+                       FROM quarterly_financials_history
+                       WHERE ts_code = ? AND report_period = ?
+                       ORDER BY publish_date DESC LIMIT 1""",
+                    (ts_code, report_period, ts_code, report_period),
+                )
+                latest_updated += 1
+            self._commit_delta(conn, before)
+        return {"history_saved": history_saved, "latest_updated": latest_updated}
+
+    def _get_read_conn(self) -> sqlite3.Connection:
+        """创建只读连接（不缓存，用完即关）。"""
+        import sqlite3 as _sqlite3
+        return _sqlite3.connect(str(self._db.db_path), timeout=10.0)
+
+    def get_financials_as_of(
+        self, symbol: str, as_of_date: str,
+    ) -> dict[str, Any] | None:
+        """返回给定截止日前已知的最新财务数据。"""
+        conn = self._get_read_conn()
+        try:
+            cur = conn.execute(
+                """SELECT *
+                   FROM quarterly_financials_history
+                   WHERE ts_code = ? AND publish_date <= ?
+                   ORDER BY report_period DESC, publish_date DESC
+                   LIMIT 1""",
+                (symbol, as_of_date),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            columns = [d[0] for d in cur.description]
+            return dict(zip(columns, row))
+        finally:
+            conn.close()
+
     def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
         self._db.save_block_trade(symbol, data)
 
