@@ -73,6 +73,8 @@ class TaskSpec:
         Primary data source identifier (e.g. ``"akshare"``).
     fallback_sources:
         Alternative sources tried when the primary fails.
+    grace_period_days:
+        How many days stale data is tolerated before flagging critical.
     display_label:
         Human-readable label for TUI menus (optional).
     """
@@ -85,6 +87,7 @@ class TaskSpec:
     empty_policy: EmptyPolicy
     primary_source: str
     fallback_sources: tuple[str, ...] = ()
+    grace_period_days: int = 3
     display_label: str = ""
 
 
