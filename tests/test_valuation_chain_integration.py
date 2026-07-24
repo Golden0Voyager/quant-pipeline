@@ -114,10 +114,10 @@ class TestUpdateFundamentals:
 
         with (
             patch("tasks.valuation_chain.logger"),
-            patch("requests.Session") as mock_session_cls,
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("tasks.valuation_chain.datetime") as mock_dt,
         ):
-            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = update_fundamentals(db, loader, symbols=["000001"])
@@ -139,10 +139,10 @@ class TestUpdateFundamentals:
 
         with (
             patch("tasks.valuation_chain.logger"),
-            patch("requests.Session") as mock_session_cls,
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
             patch("tasks.valuation_chain.datetime") as mock_dt,
         ):
-            mock_session_cls.return_value.get.return_value = mock_resp
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
             mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = update_fundamentals(db, loader)
