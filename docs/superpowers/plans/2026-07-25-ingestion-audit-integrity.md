@@ -16,7 +16,7 @@
 - Do not change data-source priority, AkShare calls, task order, retries, rate limiting, or TUI behavior.
 - Preserve one-file-per-commit with an English subject and a Chinese body.
 - Preserve fixed-signature task compatibility and the existing effective caller-provided run-ID behavior.
-- Restore migration 006 to SHA-256 `a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb`.
+- Restore migration 006 to SHA-256 `a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0`.
 - Migration 008 may bridge only the published 006 checksum above and transitional checksum `8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2`.
 - Preserve the uncommitted lock-decorated regression test already present in `tests/test_core_infrastructure.py`; replace the redundant uncommitted `inspect.unwrap` implementation with the strict parameter-kind implementation below.
 
@@ -357,7 +357,7 @@ Add constants matching the design:
 
 ```python
 _PUBLISHED_006_CHECKSUM = (
-    "a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb"
+    "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0"
 )
 _TRANSITIONAL_006_CHECKSUM = (
     "8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2"
@@ -404,7 +404,7 @@ Add these tests:
 
 ```python
 @pytest.mark.parametrize("recorded_checksum", [
-    "a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb",
+    "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0",
     "8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2",
 ])
 def test_migration_008_bridges_known_006_checksums_and_seeds_orphan(
@@ -483,7 +483,7 @@ rtk shasum -a 256 migrations/006_reconcile_ingestion_audit.py
 Expected:
 
 ```text
-a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb
+a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0
 ```
 
 - [ ] **Step 4: Create migration 008**
@@ -501,7 +501,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 PUBLISHED_006_CHECKSUM = (
-    "a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb"
+    "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0"
 )
 TRANSITIONAL_006_CHECKSUM = (
     "8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2"
