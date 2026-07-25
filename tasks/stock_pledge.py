@@ -113,7 +113,7 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
     keep = {"trade_date", "stock_code", "stock_name", "pledger",
             "pledge_amount", "pledge_ratio", "pledge_org"}
     available = [c for c in keep if c in df.columns]
-    df = df[available]
+    df = df[available].drop_duplicates()
 
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
