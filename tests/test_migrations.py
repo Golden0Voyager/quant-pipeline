@@ -475,6 +475,169 @@ def apply(conn):
             ).fetchone()
         assert table == ("lock_proof",)
 
+    @pytest.mark.parametrize(
+        ("filename", "content", "table_name"),
+        [
+            (
+                "001_python_execute.py",
+                """def apply(conn):
+    conn.execute('CREATE TABLE python_execute_control (value TEXT)')
+    conn.execute('COMMIT')
+""",
+                "python_execute_control",
+            ),
+            (
+                "001_python_script.py",
+                """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE python_script_control (value TEXT);
+        -- an explicit transaction escape
+        COMMIT;
+    \"\"\")
+""",
+                "python_script_control",
+            ),
+            (
+                "001_sql_control.sql",
+                """CREATE TABLE sql_control (value TEXT);
+-- an explicit transaction escape
+COMMIT;
+""",
+                "sql_control",
+            ),
+            (
+                "001_sql_block_comment_control.sql",
+                """CREATE TABLE sql_block_comment_control (value TEXT);
+/* an explicit transaction escape */ COMMIT;
+""",
+                "sql_block_comment_control",
+            ),
+        ],
+    )
+    def test_migration_rejects_transaction_control_statements(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+        filename,
+        content,
+        table_name,
+    ):
+        (tmp_migrations_dir / filename).write_text(content)
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="must not control transactions"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_sql_migration_executes_semicolon_free_trailing_statement(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_trailing.sql").write_text(
+            "CREATE TABLE semicolon_free_trailing (value TEXT)"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'semicolon_free_trailing'"
+            ).fetchone()
+        assert table == ("semicolon_free_trailing",)
+
+    def test_success_tracking_failure_rolls_back_migration(self, tmp_db, tmp_migrations_dir):
+        (tmp_migrations_dir / "001_tracking.sql").write_text(
+            "CREATE TABLE tracking_rollback (value TEXT);"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+        engine.plan()
+        with sqlite3.connect(str(tmp_db)) as conn:
+            conn.execute(
+                """CREATE TRIGGER fail_success_tracking
+                   BEFORE INSERT ON schema_migrations
+                   WHEN NEW.version = 1 AND NEW.success = 1
+                   BEGIN
+                       SELECT RAISE(ABORT, 'injected success tracking failure');
+                   END"""
+            )
+            conn.commit()
+
+        with pytest.raises(MigrationError, match="injected success tracking failure"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tracking_rollback'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_sql_migration_acquires_immediate_write_lock(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+        monkeypatch,
+    ):
+        (tmp_migrations_dir / "001_sql_lock.sql").write_text(
+            "CREATE TABLE sql_lock_proof (value TEXT);"
+        )
+        original_connect = sqlite3.connect
+        observed_locks: list[bool] = []
+
+        class LockCheckingConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                result = super().execute(sql, *args, **kwargs)
+                if sql.strip().upper() == "BEGIN IMMEDIATE":
+                    observer = original_connect(str(tmp_db), timeout=0)
+                    try:
+                        with pytest.raises(sqlite3.OperationalError, match="locked|busy"):
+                            observer.execute("BEGIN IMMEDIATE")
+                    finally:
+                        observer.close()
+                    observed_locks.append(True)
+                return result
+
+        def connect(*args, **kwargs):
+            kwargs["factory"] = LockCheckingConnection
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr("core.migrations.sqlite3.connect", connect)
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        assert observed_locks == [True]
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # run_migrations convenience
@@ -811,4 +974,4 @@ def test_migration_008_rolls_back_orphan_seed_when_reconcile_fails(
         ).fetchone()
     assert parent_count == 0
     assert stored == recorded_checksum
-    assert version_8 is None or version_8 == (0,)
+    assert version_8 == (0,)
