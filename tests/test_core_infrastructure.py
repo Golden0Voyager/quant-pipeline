@@ -193,6 +193,73 @@ class TestSafeTask:
         recorded = db.record_ingestion_run.call_args.args[0]
         assert recorded["metadata"]["run_id"] == captured["run_id"]
 
+    def test_lock_decorated_fixed_signature_callback_does_not_receive_run_id(self):
+        """@skip_if_task_locked wrapped fixed-signature callback must not get _task_run_id."""
+        from core.lock import skip_if_task_locked
+
+        @skip_if_task_locked("decorated")
+        def fixed(db: object) -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("decorated", fixed, object())
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_var_positional_run_id_name_does_not_accept_keyword(self):
+        def positional(*_task_run_id: object) -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("positional", positional)
+
+        assert result["status"] == "success"
+
+    def test_pit_capable_callback_records_parent_before_execution(self):
+        db = MagicMock()
+        observed: dict[str, object] = {}
+
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
+            observed["run_id"] = _task_run_id
+            observed["calls_before_callback"] = db.record_ingestion_run.call_count
+            observed["first_status"] = (
+                db.record_ingestion_run.call_args_list[0].args[0]["status"]
+            )
+            return {"saved": 1}
+
+        result = safe_task("pit", supported, db)
+
+        assert result["status"] == "success"
+        assert observed["calls_before_callback"] == 1
+        assert observed["first_status"] == "running"
+        assert db.record_ingestion_run.call_count == 2
+        first = db.record_ingestion_run.call_args_list[0].args[0]
+        final = db.record_ingestion_run.call_args_list[1].args[0]
+        assert first["metadata"]["run_id"] == observed["run_id"]
+        assert final["metadata"]["run_id"] == observed["run_id"]
+
+    def test_failed_parent_write_prevents_pit_callback(self):
+        db = MagicMock()
+        db.record_ingestion_run.side_effect = RuntimeError("audit locked")
+        called = False
+
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
+            nonlocal called
+            called = True
+            return {"saved": 1}
+
+        result = safe_task("pit", supported, db)
+
+        assert called is False
+        assert result["status"] == "failed"
+        assert result["error_kind"] == "database"
+        assert "audit parent" in result["error"]
+
     def test_uninspectable_callback_runs_without_internal_run_id(self):
         """Optional metadata injection must not block an uninspectable callback."""
 
