@@ -84,6 +84,7 @@ class SmartMoneyDBProvider:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA foreign_keys=ON")
             self._write_conn = conn
         return self._write_conn
 
@@ -680,6 +681,23 @@ class SmartMoneyDBProvider:
                     rejected_rows, saved_rows, schema_fingerprint, error_kind,
                     error_message, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    task_name = excluded.task_name,
+                    source = excluded.source,
+                    status = excluded.status,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    requested_date = excluded.requested_date,
+                    data_date = excluded.data_date,
+                    attempts = excluded.attempts,
+                    fetched_rows = excluded.fetched_rows,
+                    accepted_rows = excluded.accepted_rows,
+                    rejected_rows = excluded.rejected_rows,
+                    saved_rows = excluded.saved_rows,
+                    schema_fingerprint = excluded.schema_fingerprint,
+                    error_kind = excluded.error_kind,
+                    error_message = excluded.error_message,
+                    metadata_json = excluded.metadata_json
                 """,
                 (
                     run_id,
