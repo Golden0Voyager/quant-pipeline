@@ -14,6 +14,11 @@ from core.migrations import (
     MigrationScript,
     run_migrations,
 )
+from core.source_record_key import (
+    INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
+    STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+    source_record_key,
+)
 
 _PUBLISHED_006_CHECKSUM = (
     "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0"
@@ -74,6 +79,47 @@ def _prepare_version_7_db(
             )
         conn.commit()
     return engine
+
+
+def _create_legacy_source_record_tables(db_path: str) -> None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("""
+            CREATE TABLE stock_repurchase (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                repurchase_amount REAL,
+                repurchase_price REAL,
+                repurchase_quantity INTEGER,
+                progress_status TEXT,
+                UNIQUE(trade_date, stock_code)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO stock_repurchase
+                (trade_date, stock_code, stock_name, repurchase_amount,
+                 repurchase_price, repurchase_quantity, progress_status)
+            VALUES ('2026-07-21', '000001', 'Ping An Bank', 100.0, 12.0, 10, 'planned')
+        """)
+        conn.execute("""
+            CREATE TABLE institution_survey (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                survey_org TEXT,
+                survey_type TEXT,
+                survey_count INTEGER,
+                UNIQUE(trade_date, stock_code)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO institution_survey
+                (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count)
+            VALUES ('2026-07-21', '000001', 'Ping An Bank', NULL, 'call', 3)
+        """)
+        conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -990,3 +1036,130 @@ def test_migration_008_rolls_back_orphan_seed_when_reconcile_fails(
     assert parent_count == 0
     assert stored == recorded_checksum
     assert version_8 == (0,)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 009 (source record storage keys)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_migration_009_rebuilds_source_record_tables_and_removes_old_unique_key(tmp_db):
+    engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
+    engine.apply_pending()
+    _create_legacy_source_record_tables(str(tmp_db))
+
+    result = engine.apply_pending()
+
+    assert [item["version"] for item in result] == [9]
+    repurchase_second = {
+        "trade_date": "2026-07-21",
+        "stock_code": "000001",
+        "stock_name": "Ping An Bank",
+        "repurchase_amount": 120.0,
+        "repurchase_price": 12.0,
+        "repurchase_price_lower": None,
+        "repurchase_price_upper": None,
+        "repurchase_quantity": 10,
+        "progress_status": "planned",
+    }
+    survey_second = {
+        "trade_date": "2026-07-21",
+        "stock_code": "000001",
+        "stock_name": "Ping An Bank",
+        "survey_org": None,
+        "survey_type": "call",
+        "survey_count": 4,
+    }
+    with sqlite3.connect(str(tmp_db)) as conn:
+        repurchase_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
+        }
+        survey_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(institution_survey)")
+        }
+        conn.execute(
+            """INSERT INTO stock_repurchase
+               (source_record_key, trade_date, stock_code, stock_name,
+                repurchase_amount, repurchase_price, repurchase_price_lower,
+                repurchase_price_upper, repurchase_quantity, progress_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_record_key(repurchase_second, STOCK_REPURCHASE_SOURCE_KEY_FIELDS),
+                repurchase_second["trade_date"],
+                repurchase_second["stock_code"],
+                repurchase_second["stock_name"],
+                repurchase_second["repurchase_amount"],
+                repurchase_second["repurchase_price"],
+                repurchase_second["repurchase_price_lower"],
+                repurchase_second["repurchase_price_upper"],
+                repurchase_second["repurchase_quantity"],
+                repurchase_second["progress_status"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO institution_survey
+               (source_record_key, trade_date, stock_code, stock_name,
+                survey_org, survey_type, survey_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_record_key(survey_second, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS),
+                survey_second["trade_date"],
+                survey_second["stock_code"],
+                survey_second["stock_name"],
+                survey_second["survey_org"],
+                survey_second["survey_type"],
+                survey_second["survey_count"],
+            ),
+        )
+        repurchase_count = conn.execute(
+            "SELECT COUNT(*) FROM stock_repurchase"
+        ).fetchone()[0]
+        survey_count = conn.execute(
+            "SELECT COUNT(*) FROM institution_survey"
+        ).fetchone()[0]
+
+    assert "source_record_key" in repurchase_columns
+    assert "repurchase_price_lower" in repurchase_columns
+    assert "repurchase_price_upper" in repurchase_columns
+    assert "source_record_key" in survey_columns
+    assert repurchase_count == 2
+    assert survey_count == 2
+
+
+def test_migration_009_rolls_back_table_rebuild_when_key_generation_fails(
+    tmp_db,
+    monkeypatch,
+):
+    import core.source_record_key as key_module
+
+    engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
+    engine.apply_pending()
+    _create_legacy_source_record_tables(str(tmp_db))
+
+    def fail_key(record, fields):
+        raise RuntimeError("injected source key failure")
+
+    monkeypatch.setattr(key_module, "source_record_key", fail_key)
+
+    with pytest.raises(MigrationError, match="injected source key failure"):
+        engine.apply_pending()
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        temp_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('stock_repurchase__v9', 'institution_survey__v9')"
+        ).fetchone()
+        repurchase_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
+        }
+        repurchase_count = conn.execute(
+            "SELECT COUNT(*) FROM stock_repurchase"
+        ).fetchone()[0]
+        version_9 = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 9"
+        ).fetchone()
+
+    assert temp_table is None
+    assert "source_record_key" not in repurchase_columns
+    assert repurchase_count == 1
+    assert version_9 == (0,)
