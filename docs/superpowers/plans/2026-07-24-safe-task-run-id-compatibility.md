@@ -319,3 +319,16 @@ pipe-tui
 ```
 
 Do not automatically start a production full-data run as part of the test suite.
+
+## Verification-discovered extension addendum
+
+Task 3 verification found root-level MagicMock SQLite artifacts. Diagnosis
+isolated the two finance-flow tests and `_get_etf_update_range`; a mocked
+`db_path` was being treated as a SQLite filename. The plan was extended with
+the shared `is_real_db_path` guard and a no-artifact regression test.
+
+Final review also required effective caller-provided run-ID alignment: when a
+compatible callback receives a non-empty caller-supplied `_task_run_id`, the
+same ID must be written to the ingestion audit record. It additionally
+required positive `_get_etf_update_range` coverage for both `str` and `Path`
+database paths.
