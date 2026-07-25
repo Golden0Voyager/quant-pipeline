@@ -319,6 +319,105 @@ class TestConnectionEdgeCases:
             migrated.close()
 
 
+class TestSourceRecordStorage:
+    """Repurchase and survey storage preserves distinct source records."""
+
+    def test_stock_repurchase_keeps_distinct_same_day_records(self, provider):
+        records = [
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "repurchase_amount": 100.0,
+                "repurchase_price": 12.0,
+                "repurchase_price_lower": 11.0,
+                "repurchase_price_upper": 13.0,
+                "repurchase_quantity": 10,
+                "progress_status": "planned",
+            },
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "repurchase_amount": 120.0,
+                "repurchase_price": 12.0,
+                "repurchase_price_lower": 11.0,
+                "repurchase_price_upper": 13.0,
+                "repurchase_quantity": 10,
+                "progress_status": "planned",
+            },
+        ]
+
+        assert provider.save_stock_repurchase_batch(records) >= 2
+
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT trade_date, stock_code, repurchase_amount, progress_status
+                   FROM stock_repurchase
+                   ORDER BY repurchase_amount"""
+            ).fetchall()
+
+        assert rows == [
+            ("2026-07-21", "000001", 100.0, "planned"),
+            ("2026-07-21", "000001", 120.0, "planned"),
+        ]
+
+    def test_stock_repurchase_repeated_identical_batch_is_idempotent(self, provider):
+        record = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+            "repurchase_amount": 100.0,
+            "repurchase_price": 12.0,
+            "repurchase_price_lower": 11.0,
+            "repurchase_price_upper": 13.0,
+            "repurchase_quantity": 10,
+            "progress_status": "planned",
+        }
+
+        assert provider.save_stock_repurchase_batch([record]) >= 1
+        assert provider.save_stock_repurchase_batch([record]) >= 0
+
+        with sqlite3.connect(provider.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM stock_repurchase").fetchone()[0]
+
+        assert count == 1
+
+    def test_institution_survey_keeps_distinct_nullable_org_records(self, provider):
+        records = [
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "survey_org": None,
+                "survey_type": "call",
+                "survey_count": 3,
+            },
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "survey_org": None,
+                "survey_type": "call",
+                "survey_count": 4,
+            },
+        ]
+
+        assert provider.save_institution_survey_batch(records) >= 2
+
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT trade_date, stock_code, survey_org, survey_type, survey_count
+                   FROM institution_survey
+                   ORDER BY survey_count"""
+            ).fetchall()
+
+        assert rows == [
+            ("2026-07-21", "000001", None, "call", 3),
+            ("2026-07-21", "000001", None, "call", 4),
+        ]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. 空记录路径 — 所有 batch save 方法在 records=[] 时应返回 0
 # ═══════════════════════════════════════════════════════════════════════════════
