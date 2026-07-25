@@ -56,7 +56,7 @@ for r in results:
 
 ---
 
-## 三、当前迁移清单 (v1–v8)
+## 三、当前迁移清单 (v1–v9)
 
 | 版本 | 文件 | 类型 | 说明 |
 |------|------|------|------|
@@ -66,6 +66,7 @@ for r in results:
 | 006 | `006_reconcile_ingestion_audit.py` | Python | 重建 ingestion_runs + ingestion_rejections，删除旧表，修正 001 checksum |
 | 007 | `007_reconcile_pit_tables.py` | Python | 重建 PIT 表 (quarterly_financials_history 等)，删除旧 PIT 表，修正 003 checksum |
 | 008 | `008_reconcile_orphan_ingestion_runs.py` | Python | 补齐 PIT 孤儿审计父记录，并规范化 006 checksum |
+| 009 | `009_source_record_keys.py` | Python | 为 `stock_repurchase` 和 `institution_survey` 增加来源记录哈希键，移除旧 date+code 唯一约束 |
 
 > 004/005 是试验性迁移，已清理。
 
@@ -110,6 +111,11 @@ engine.apply_pending()
 它会先为 PIT 历史表中的孤立 `snapshot_run_id` 补齐 `ingestion_runs`
 父记录，再把 version 6 的记录规范化为发布版 checksum。其他 checksum
 会硬失败，必须先确认文件和数据库来源。
+
+009 会重建 `stock_repurchase` 和 `institution_survey`，为已有行回填
+`source_record_key`，并移除旧的 `trade_date + stock_code` 唯一约束。
+部署后第一次启动 Provider 或 `pipe-tui` 时可能连续应用 008 和 009；
+启动前建议先备份 `~/Code/quant_data/quant_core.db`。
 
 ### 4.3 Checksum 冲突处理
 
