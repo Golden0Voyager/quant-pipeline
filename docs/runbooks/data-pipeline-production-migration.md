@@ -56,7 +56,7 @@ for r in results:
 
 ---
 
-## 三、当前迁移清单 (v1–v7)
+## 三、当前迁移清单 (v1–v8)
 
 | 版本 | 文件 | 类型 | 说明 |
 |------|------|------|------|
@@ -65,6 +65,7 @@ for r in results:
 | 003 | `003_point_in_time_tables.sql` | SQL | PIT 表 (financial_history_pt 等) |
 | 006 | `006_reconcile_ingestion_audit.py` | Python | 重建 ingestion_runs + ingestion_rejections，删除旧表，修正 001 checksum |
 | 007 | `007_reconcile_pit_tables.py` | Python | 重建 PIT 表 (quarterly_financials_history 等)，删除旧 PIT 表，修正 003 checksum |
+| 008 | `008_reconcile_orphan_ingestion_runs.py` | Python | 补齐 PIT 孤儿审计父记录，并规范化 006 checksum |
 
 > 004/005 是试验性迁移，已清理。
 
@@ -101,6 +102,15 @@ engine.apply_pending()
 2. 删除旧表（`task_run_log` / `financial_history_pt` 等）
 3. 更新 001/003 的 checksum 为当前文件的实际哈希
 
+008 仅接受以下两个已知的 006 历史 checksum：
+
+- 发布版：`a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0`
+- 临时修订版：`8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2`
+
+它会先为 PIT 历史表中的孤立 `snapshot_run_id` 补齐 `ingestion_runs`
+父记录，再把 version 6 的记录规范化为发布版 checksum。其他 checksum
+会硬失败，必须先确认文件和数据库来源。
+
 ### 4.3 Checksum 冲突处理
 
 如果引擎报错 `checksum mismatch for migration N`：
@@ -114,9 +124,8 @@ sqlite3 ~/Code/quant_data/quant_core.db \
 sha256sum migrations/001_ingestion_audit.sql
 sha256sum migrations/003_point_in_time_tables.sql
 
-# 如果文件被有意修改（非生产问题），通过重新校验修复：
-# 编辑 006 或 007 脚本中 _reconcile_checksum 的 UPDATE 语句
-# 然后重新运行对应的 python 迁移
+# 不要编辑已经发布的迁移文件或手工覆盖 schema_migrations checksum。
+# 先用版本控制确认文件来源；合法的历史差异应通过新的对账迁移处理。
 ```
 
 ---
@@ -140,7 +149,8 @@ sqlite3 ~/Code/quant_data/quant_core.db \
 
 ## 六、回滚策略
 
-> 本迁移引擎**不支持自动回滚**。SQLite 无 DDL 事务支持，DDL 执行即提交。
+> 本迁移引擎不提供反向迁移。单个迁移通过 `BEGIN IMMEDIATE` 原子执行，
+> 失败时会回滚；已成功提交的迁移仍需从备份恢复或编写新的前向迁移。
 
 ### 回滚方案
 
