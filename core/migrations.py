@@ -23,7 +23,7 @@ import importlib.util
 import logging
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,61 @@ class MigrationScript:
     _SQLLite3_Connection: Any = field(default=None, repr=False, compare=False)
 
 
+_TRANSACTION_CONTROL_KEYWORDS = frozenset({
+    "BEGIN",
+    "COMMIT",
+    "END",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+})
+
+
+def _iter_sql_statements(script: str) -> Iterator[str]:
+    """Yield complete SQLite statements without invoking ``executescript``."""
+    statement = ""
+    for character in script:
+        statement += character
+        if sqlite3.complete_statement(statement):
+            if statement.strip():
+                yield statement
+            statement = ""
+    if statement.strip():
+        yield statement
+
+
+def _first_sql_keyword(statement: str) -> str:
+    """Return the first keyword, ignoring leading whitespace and comments."""
+    index = 0
+    while index < len(statement):
+        while index < len(statement) and statement[index].isspace():
+            index += 1
+        if statement.startswith("--", index):
+            newline = statement.find("\n", index + 2)
+            if newline == -1:
+                return ""
+            index = newline + 1
+            continue
+        if statement.startswith("/*", index):
+            comment_end = statement.find("*/", index + 2)
+            if comment_end == -1:
+                return ""
+            index = comment_end + 2
+            continue
+        break
+
+    keyword_end = index
+    while keyword_end < len(statement) and statement[keyword_end].isalpha():
+        keyword_end += 1
+    return statement[index:keyword_end].upper()
+
+
+def _reject_transaction_control(statement: str) -> None:
+    keyword = _first_sql_keyword(statement)
+    if keyword in _TRANSACTION_CONTROL_KEYWORDS:
+        raise MigrationError(f"migration scripts must not control transactions: {keyword}")
+
+
 class _TransactionalMigrationConnection:
     """Connection facade that keeps Python migration scripts in the outer transaction.
 
@@ -84,40 +139,25 @@ class _TransactionalMigrationConnection:
     """
 
     def __init__(self, conn: Any) -> None:
-        self._conn = conn
+        self.__conn = conn
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
-        return self._conn.execute(*args, **kwargs)
+        _reject_transaction_control(args[0])
+        return self.__conn.execute(*args, **kwargs)
 
     def executemany(self, *args: Any, **kwargs: Any) -> Any:
-        return self._conn.executemany(*args, **kwargs)
+        _reject_transaction_control(args[0])
+        return self.__conn.executemany(*args, **kwargs)
 
     def executescript(self, script: str) -> None:
-        statement = ""
-        for character in script:
-            statement += character
-            if sqlite3.complete_statement(statement):
-                if statement.strip():
-                    self._conn.execute(statement)
-                statement = ""
-        if statement.strip():
-            self._conn.execute(statement)
+        for statement in _iter_sql_statements(script):
+            self.execute(statement)
 
     def commit(self) -> None:
         raise MigrationError("Python migrations must not commit the outer transaction")
 
     def rollback(self) -> None:
         raise MigrationError("Python migrations must not roll back the outer transaction")
-
-    def __enter__(self) -> _TransactionalMigrationConnection:
-        return self
-
-    def __exit__(self, *args: Any) -> bool:
-        return False
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._conn, name)
-
 
 # ── engine ─────────────────────────────────────────────────────────────
 
@@ -350,15 +390,13 @@ class MigrationEngine:
 
         try:
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("BEGIN IMMEDIATE")
+            migration_conn = _TransactionalMigrationConnection(conn)
 
             if migration.sql is not None:
-                # ``executescript`` commits any transaction already in
-                # progress, so begin inside this single script and leave the
-                # transaction open for validation and success tracking below.
-                conn.executescript(f"BEGIN IMMEDIATE;\n{migration.sql}")
+                migration_conn.executescript(migration.sql)
             elif migration.apply_func is not None:
-                conn.execute("BEGIN IMMEDIATE")
-                migration.apply_func(_TransactionalMigrationConnection(conn))
+                migration.apply_func(migration_conn)
             else:
                 raise MigrationError(
                     f"migration {migration.version} has neither sql nor apply_func"
