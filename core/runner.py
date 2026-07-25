@@ -61,7 +61,8 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     并把结果写入 ``ingestion_runs`` 审计表（如果第一个参数提供 ``record_ingestion_run``）。
     """
     task_start = time.time()
-    run_id = str(uuid.uuid4())
+    fallback_run_id = str(uuid.uuid4())
+    effective_run_id = fallback_run_id
     db = args[0] if args and hasattr(args[0], "record_ingestion_run") else None
 
     def _record(result: TaskResult) -> None:
@@ -73,7 +74,7 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
             started_at = datetime.fromtimestamp(
                 time.time() - elapsed, tz=UTC
             )
-            result.metadata["run_id"] = run_id
+            result.metadata["run_id"] = effective_run_id
             result.metadata["started_at"] = started_at.isoformat(timespec="seconds")
             result.metadata["finished_at"] = finished_at.isoformat(timespec="seconds")
             db.record_ingestion_run(result.to_dict())
@@ -83,7 +84,11 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     # Fixed-signature legacy tasks intentionally run without this internal
     # keyword; compatible callbacks share the ID for PIT / audit writes.
     if _accepts_task_run_id(fn):
-        kwargs.setdefault("_task_run_id", run_id)
+        caller_run_id = kwargs.get("_task_run_id")
+        if isinstance(caller_run_id, str) and caller_run_id:
+            effective_run_id = caller_run_id
+        else:
+            kwargs["_task_run_id"] = fallback_run_id
 
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
