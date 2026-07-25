@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from core.source_record_key import source_record_key
 from providers import SmartMoneyDBProvider
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -87,6 +88,35 @@ def test_pit_write_without_audit_parent_is_rejected(provider):
             "WHERE snapshot_run_id = 'missing-parent'"
         ).fetchone()[0]
     assert count == 0
+
+
+def test_source_record_key_trims_strings_and_hashes_to_sha256():
+    key1 = source_record_key(
+        {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": " Ping An Bank ",
+        },
+        ("trade_date", "stock_code", "stock_name"),
+    )
+    key2 = source_record_key(
+        {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+        },
+        ("trade_date", "stock_code", "stock_name"),
+    )
+
+    assert key1 == key2
+    assert len(key1) == 64
+
+
+def test_source_record_key_treats_missing_values_as_null():
+    assert source_record_key({"survey_org": None}, ("survey_org",)) == source_record_key(
+        {},
+        ("survey_org",),
+    )
 
 
 def test_index_history_failed_write_rolls_back_active_interval(provider):
