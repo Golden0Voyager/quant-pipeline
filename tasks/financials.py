@@ -225,7 +225,14 @@ def update_industry(db: DatabaseInterface) -> dict:
     logger.info(f"📊 共 {total} 只股票需要更新行业")
 
     # 2. 市场前缀映射
-    exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
+    exchange_map = {
+        "sz": "SZ",
+        "gem": "SZ",
+        "sh": "SH",
+        "star": "SH",
+        "unknown": "BJ",
+        "bj": "BJ",
+    }
 
     # 3. 网络请求策略（依次降级）
     # F10 限流探测标志：连续限流时整轮跳过 F10 API，避免浪费时间
