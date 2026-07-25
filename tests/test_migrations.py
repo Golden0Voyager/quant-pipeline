@@ -351,6 +351,130 @@ class TestMigrationEngineErrors:
         assert len(results) == 1
         assert results[0]["version"] == 1
 
+    def test_sql_migration_rolls_back_partial_script(self, tmp_db, tmp_migrations_dir):
+        (tmp_migrations_dir / "001_partial.sql").write_text(
+            "CREATE TABLE sql_partial (value TEXT);\n"
+            "INSERT INTO missing_table VALUES ('boom');\n"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="migration 1 .* failed"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sql_partial'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_python_migration_executescript_rolls_back_partial_script(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_partial.py").write_text(
+            """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE python_partial (value TEXT);
+        INSERT INTO python_partial VALUES ('written');
+    \"\"\")
+    raise RuntimeError('injected failure')
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="migration 1 .* failed"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'python_partial'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_python_migration_executescript_preserves_semicolons_and_trigger_body(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_script.py").write_text(
+            """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE messages (value TEXT NOT NULL);
+        CREATE TABLE events (value TEXT NOT NULL);
+        CREATE TRIGGER record_message AFTER INSERT ON messages
+        BEGIN
+            INSERT INTO events (value) VALUES ('trigger; value');
+        END;
+        INSERT INTO messages (value) VALUES ('payload; value');
+    \"\"\")
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            messages = conn.execute("SELECT value FROM messages").fetchall()
+            events = conn.execute("SELECT value FROM events").fetchall()
+        assert messages == [("payload; value",)]
+        assert events == [("trigger; value",)]
+
+    def test_python_migration_acquires_immediate_write_lock(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        observer_path = repr(str(tmp_db))
+        (tmp_migrations_dir / "001_immediate.py").write_text(
+            f"""import sqlite3
+
+def apply(conn):
+    observer = sqlite3.connect({observer_path}, timeout=0)
+    try:
+        observer.execute('BEGIN IMMEDIATE')
+    except sqlite3.OperationalError:
+        pass
+    else:
+        observer.rollback()
+        raise RuntimeError('migration did not acquire an immediate write lock')
+    finally:
+        observer.close()
+    conn.execute('CREATE TABLE lock_proof (value TEXT)')
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lock_proof'"
+            ).fetchone()
+        assert table == ("lock_proof",)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # run_migrations convenience
@@ -646,3 +770,45 @@ def test_migration_008_rejects_unknown_006_checksum(tmp_db):
 
     with pytest.raises(MigrationError, match="unknown migration 006 checksum"):
         engine.apply_pending()
+
+
+@pytest.mark.parametrize(
+    "recorded_checksum",
+    [_PUBLISHED_006_CHECKSUM, _TRANSITIONAL_006_CHECKSUM],
+)
+def test_migration_008_rolls_back_orphan_seed_when_reconcile_fails(
+    tmp_db,
+    recorded_checksum,
+):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        recorded_checksum,
+        orphan_run_id="orphan-run",
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            """CREATE TRIGGER fail_008_checksum_reconcile
+               BEFORE UPDATE OF checksum ON schema_migrations
+               WHEN OLD.version = 6
+               BEGIN
+                   SELECT RAISE(ABORT, 'injected checksum reconcile failure');
+               END"""
+        )
+        conn.commit()
+
+    with pytest.raises(MigrationError, match="injected checksum reconcile failure"):
+        engine.apply_pending()
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        parent_count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()[0]
+        stored = conn.execute(
+            "SELECT checksum FROM schema_migrations WHERE version = 6"
+        ).fetchone()[0]
+        version_8 = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 8"
+        ).fetchone()
+    assert parent_count == 0
+    assert stored == recorded_checksum
+    assert version_8 is None or version_8 == (0,)
