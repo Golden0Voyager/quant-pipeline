@@ -289,6 +289,7 @@ def update_industry(db: DatabaseInterface) -> dict:
             except Exception:
                 pass
 
+        session = None
         try:
             sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
             session = get_default_client().get_session("sina")
@@ -313,7 +314,8 @@ def update_industry(db: DatabaseInterface) -> dict:
         except Exception:
             pass
         finally:
-            session.close()
+            if session is not None:
+                session.close()
 
         return code, None
 
