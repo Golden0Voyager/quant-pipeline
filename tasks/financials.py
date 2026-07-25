@@ -302,7 +302,7 @@ def update_industry(db: DatabaseInterface) -> dict:
                 import re
 
                 m = re.search(
-                    r"所属行业板块</td>\s*</tr>\s*<tr>.*?<td[^>]*>([^<]+)",
+                    r"所属行业板块[^<]*</td>(?:\s*</tr>\s*<tr>)?\s*<td[^>]*>\s*([^<]+?)\s*</td>",
                     resp.text,
                     re.DOTALL,
                 )
