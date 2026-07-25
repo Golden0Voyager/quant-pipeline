@@ -34,6 +34,61 @@ def provider(tmp_path: Path) -> SmartMoneyDBProvider:
     return SmartMoneyDBProvider(db_path=str(tmp_path / "quant_core_test.db"))
 
 
+def _audit_payload(run_id: str, status: str, saved: int) -> dict[str, Any]:
+    return {
+        "task_name": "pit_task",
+        "status": status,
+        "saved": saved,
+        "metadata": {
+            "run_id": run_id,
+            "started_at": "2026-07-25T00:00:00+00:00",
+            "finished_at": "2026-07-25T00:00:01+00:00",
+        },
+    }
+
+
+def test_record_ingestion_run_upserts_same_parent(provider):
+    provider.record_ingestion_run(_audit_payload("run-1", "running", 0))
+    provider.record_ingestion_run(_audit_payload("run-1", "success", 3))
+
+    with sqlite3.connect(provider.db_path) as conn:
+        rows = conn.execute(
+            "SELECT run_id, status, saved_rows FROM ingestion_runs WHERE run_id = ?",
+            ("run-1",),
+        ).fetchall()
+
+    assert rows == [("run-1", "success", 3)]
+
+
+def test_shared_write_connection_enables_foreign_keys(provider):
+    conn = provider._get_write_conn()
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_pit_write_without_audit_parent_is_rejected(provider):
+    saved = provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000001.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-parent",
+        valid_from="2026-07-25",
+    )
+
+    assert saved == 0
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM index_member_history "
+            "WHERE snapshot_run_id = 'missing-parent'"
+        ).fetchone()[0]
+    assert count == 0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. 底层方法
 # ═══════════════════════════════════════════════════════════════════════════════
