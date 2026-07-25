@@ -32,7 +32,7 @@
 发布版本的 SHA-256 为：
 
 ```text
-a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb
+a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0
 ```
 
 ### 新增 migration 008
@@ -41,7 +41,7 @@ a7830c97017b503c6d7b10412c901a4a4d365210704f8582521dfbe395e1e4eb
 
 1. 读取 `schema_migrations` 中 version 006 的 checksum。
 2. 仅接受两个已知 checksum：
-   - 发布版 `a7830c…`
+   - 发布版 `a783c283…`
    - 当前生产库曾记录的临时修改版 `8273ec…`
 3. 遇到其他未知 checksum 时明确失败，不掩盖迁移漂移。
 4. 从 `index_member_history` 和 `concept_member_history` 收集不存在于
