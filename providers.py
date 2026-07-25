@@ -88,6 +88,12 @@ class SmartMoneyDBProvider:
             self._write_conn = conn
         return self._write_conn
 
+    def _connect_for_audit(self) -> sqlite3.Connection:
+        """Create an audit connection with SQLite foreign keys enabled."""
+        conn = sqlite3.connect(str(self._db.db_path), timeout=10.0)
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
     @staticmethod
     def _commit_delta(conn: sqlite3.Connection, before_changes: int) -> int:
         """提交事务并返回本次事务产生的变更数。"""
@@ -672,7 +678,7 @@ class SmartMoneyDBProvider:
         )
         started_at = result.get("started_at") or meta.get("started_at") or finished_at
 
-        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+        with self._connect_for_audit() as conn:
             conn.execute(
                 """
                 INSERT INTO ingestion_runs (
@@ -730,7 +736,7 @@ class SmartMoneyDBProvider:
     ) -> None:
         """把被拒绝的单行数据写入 ``ingestion_rejections`` 审计表。"""
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+        with self._connect_for_audit() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO ingestion_rejections
@@ -1402,23 +1408,27 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                # close previous active records
-                conn.execute(
-                    "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                    (valid_to,),
-                )
-                # insert new snapshot
-                conn.executemany(
-                    """INSERT INTO concept_member_history
-                       (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
-                       VALUES (?, ?, ?, ?, NULL, ?, ?)""",
-                    [
-                        (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
-                         valid_from, r.get("source", "akshare"), run_id)
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
+                try:
+                    # close previous active records
+                    conn.execute(
+                        "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                        (valid_to,),
+                    )
+                    # insert new snapshot
+                    conn.executemany(
+                        """INSERT INTO concept_member_history
+                           (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
+                           VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                        [
+                            (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
+                             valid_from, r.get("source", "akshare"), run_id)
+                            for r in records
+                        ],
+                    )
+                    return self._commit_delta(conn, before_changes)
+                except Exception:
+                    conn.rollback()
+                    raise
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 概念板块成分股 PIT 历史保存失败: {e}")
@@ -1438,23 +1448,27 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                # close previous active records
-                conn.execute(
-                    "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                    (valid_to,),
-                )
-                # insert new snapshot
-                conn.executemany(
-                    """INSERT INTO index_member_history
-                       (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
-                       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
-                    [
-                        (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
-                         r.get("weight"), valid_from, r.get("source", "akshare"), run_id)
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
+                try:
+                    # close previous active records
+                    conn.execute(
+                        "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                        (valid_to,),
+                    )
+                    # insert new snapshot
+                    conn.executemany(
+                        """INSERT INTO index_member_history
+                           (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
+                           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
+                        [
+                            (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
+                             r.get("weight"), valid_from, r.get("source", "akshare"), run_id)
+                            for r in records
+                        ],
+                    )
+                    return self._commit_delta(conn, before_changes)
+                except Exception:
+                    conn.rollback()
+                    raise
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 指数成分股 PIT 历史保存失败: {e}")
