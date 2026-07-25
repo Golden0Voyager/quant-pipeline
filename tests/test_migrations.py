@@ -451,8 +451,8 @@ def apply(conn):
     observer = sqlite3.connect({observer_path}, timeout=0)
     try:
         observer.execute('BEGIN IMMEDIATE')
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        assert 'locked' in str(exc).lower() or 'busy' in str(exc).lower()
     else:
         observer.rollback()
         raise RuntimeError('migration did not acquire an immediate write lock')
@@ -498,6 +498,14 @@ def apply(conn):
                 "python_script_control",
             ),
             (
+                "001_python_bom_control.py",
+                """def apply(conn):
+    conn.execute('CREATE TABLE python_bom_control (value TEXT)')
+    conn.execute('\\ufeffCOMMIT')
+""",
+                "python_bom_control",
+            ),
+            (
                 "001_sql_control.sql",
                 """CREATE TABLE sql_control (value TEXT);
 -- an explicit transaction escape
@@ -511,6 +519,13 @@ COMMIT;
 /* an explicit transaction escape */ COMMIT;
 """,
                 "sql_block_comment_control",
+            ),
+            (
+                "001_sql_bom_control.sql",
+                """CREATE TABLE sql_bom_control (value TEXT);
+\ufeffCOMMIT;
+""",
+                "sql_bom_control",
             ),
         ],
     )
