@@ -10,7 +10,7 @@ import os
 import subprocess
 from functools import wraps
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from core.runner import _task_result_has_errors, safe_task, task_timer
@@ -175,15 +175,23 @@ class TestSafeTask:
     def test_caller_provided_run_id_is_preserved(self):
         """safe_task must not overwrite a supported caller-provided run ID."""
         captured: dict[str, str | None] = {}
+        db = MagicMock()
 
-        def supported(_task_run_id: str | None = None) -> dict[str, int]:
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
             captured["run_id"] = _task_run_id
             return {"saved": 1}
 
-        result = safe_task("provided", supported, _task_run_id="provided-run-id")
+        result = safe_task(
+            "provided", supported, db, _task_run_id="provided-run-id"
+        )
 
         assert result["status"] == "success"
         assert captured["run_id"] == "provided-run-id"
+        recorded = db.record_ingestion_run.call_args.args[0]
+        assert recorded["metadata"]["run_id"] == captured["run_id"]
 
     def test_uninspectable_callback_runs_without_internal_run_id(self):
         """Optional metadata injection must not block an uninspectable callback."""
