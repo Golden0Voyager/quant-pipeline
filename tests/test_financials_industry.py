@@ -135,7 +135,7 @@ class TestStrategyA:
 
         f10_err = _mock_resp(500)
         sina_ok = _mock_resp(
-            200, text="<html>所属行业板块</td></tr><tr><td>保险</td></html>"
+            200, text="<html>所属行业板块</td><td>保险</td></html>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -167,7 +167,7 @@ class TestStrategyA:
 
         f10_bad = _mock_resp(200, {"jbzl": {"other": "value"}})
         sina_ok = _mock_resp(
-            200, text="所属行业板块</td></tr><tr><td>证券</td>"
+            200, text="所属行业板块</td><td>证券</td>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -190,7 +190,7 @@ class TestStrategyA:
         _create_db(str(db_path), [("000001", "sz", None)])
 
         sina_ok = _mock_resp(
-            200, text="所属行业板块</td></tr><tr><td>银行</td>"
+            200, text="所属行业板块</td><td>银行</td>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -285,8 +285,7 @@ class TestStrategyCFallback:
         html = """
         <html>
         <table>
-        <tr><td>所属行业板块</td></tr>
-        <tr><td>银行</td></tr>
+        <tr><td>所属行业板块</td><td>银行</td></tr>
         </table>
         </html>
         """
@@ -353,7 +352,7 @@ class TestF10Blocked:
         f10_429 = _mock_resp(429)
         # Stock 1 Sina success, Stock 2 Sina success (since _f10_blocked
         # causes both to fall through to Sina after their respective F10 phases)
-        sina_ok = _mock_resp(200, text="所属行业板块</td></tr><tr><td>银行</td>")
+        sina_ok = _mock_resp(200, text="所属行业板块</td><td>银行</td>")
 
         # Track which URLs get called
         call_log: list[str] = []
