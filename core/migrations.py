@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -71,6 +72,51 @@ class MigrationScript:
     apply_func: Callable | None = None
 
     _SQLLite3_Connection: Any = field(default=None, repr=False, compare=False)
+
+
+class _TransactionalMigrationConnection:
+    """Connection facade that keeps Python migration scripts in the outer transaction.
+
+    ``sqlite3.Connection.executescript`` commits an active transaction before
+    executing its script.  Python migrations receive this facade instead, so
+    their scripts are split with SQLite's own statement-completeness parser
+    and each statement is executed on the already-open raw connection.
+    """
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        return self._conn.executemany(*args, **kwargs)
+
+    def executescript(self, script: str) -> None:
+        statement = ""
+        for character in script:
+            statement += character
+            if sqlite3.complete_statement(statement):
+                if statement.strip():
+                    self._conn.execute(statement)
+                statement = ""
+        if statement.strip():
+            self._conn.execute(statement)
+
+    def commit(self) -> None:
+        raise MigrationError("Python migrations must not commit the outer transaction")
+
+    def rollback(self) -> None:
+        raise MigrationError("Python migrations must not roll back the outer transaction")
+
+    def __enter__(self) -> _TransactionalMigrationConnection:
+        return self
+
+    def __exit__(self, *args: Any) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
 
 
 # ── engine ─────────────────────────────────────────────────────────────
@@ -306,9 +352,13 @@ class MigrationEngine:
             conn.execute("PRAGMA foreign_keys = ON")
 
             if migration.sql is not None:
-                conn.executescript(migration.sql)
+                # ``executescript`` commits any transaction already in
+                # progress, so begin inside this single script and leave the
+                # transaction open for validation and success tracking below.
+                conn.executescript(f"BEGIN IMMEDIATE;\n{migration.sql}")
             elif migration.apply_func is not None:
-                migration.apply_func(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                migration.apply_func(_TransactionalMigrationConnection(conn))
             else:
                 raise MigrationError(
                     f"migration {migration.version} has neither sql nor apply_func"
