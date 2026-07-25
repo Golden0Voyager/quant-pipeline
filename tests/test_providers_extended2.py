@@ -89,6 +89,136 @@ def test_pit_write_without_audit_parent_is_rejected(provider):
     assert count == 0
 
 
+def test_index_history_failed_write_rolls_back_active_interval(provider):
+    provider.record_ingestion_run(_audit_payload("index-old", "success", 1))
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000001.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="index-old",
+        valid_from="2026-07-20",
+    ) == 1
+    provider.record_ingestion_run(_audit_payload("index-new", "success", 1))
+
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000002.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-index-parent",
+        valid_from="2026-07-21",
+    ) == 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM index_member_history WHERE snapshot_run_id = ?",
+            ("index-old",),
+        ).fetchall() == [(None,)]
+
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000002.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="index-new",
+        valid_from="2026-07-25",
+    ) == 2
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM index_member_history WHERE snapshot_run_id = ?",
+            ("index-old",),
+        ).fetchall() == [("2026-07-24",)]
+
+
+def test_concept_history_failed_write_rolls_back_active_interval(provider):
+    provider.record_ingestion_run(_audit_payload("concept-old", "success", 1))
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000001.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="concept-old",
+        valid_from="2026-07-20",
+    ) == 1
+    provider.record_ingestion_run(_audit_payload("concept-new", "success", 1))
+
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000002.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-concept-parent",
+        valid_from="2026-07-21",
+    ) == 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM concept_member_history WHERE snapshot_run_id = ?",
+            ("concept-old",),
+        ).fetchall() == [(None,)]
+
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000002.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="concept-new",
+        valid_from="2026-07-25",
+    ) == 2
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM concept_member_history WHERE snapshot_run_id = ?",
+            ("concept-old",),
+        ).fetchall() == [("2026-07-24",)]
+
+
+def test_ingestion_rejection_without_parent_is_rejected(provider):
+    with pytest.raises(sqlite3.IntegrityError):
+        provider.record_ingestion_rejection(
+            "missing-rejection-parent",
+            row_number=1,
+            reason="invalid row",
+            payload={"value": "bad"},
+        )
+
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_rejections WHERE run_id = ?",
+            ("missing-rejection-parent",),
+        ).fetchone()[0]
+    assert count == 0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. 底层方法
 # ═══════════════════════════════════════════════════════════════════════════════
