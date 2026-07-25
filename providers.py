@@ -660,9 +660,16 @@ class SmartMoneyDBProvider:
         else:
             metadata_json = str(metadata)
 
-        run_id = result.get("run_id") or str(uuid.uuid4())
-        finished_at = result.get("finished_at") or datetime.utcnow().isoformat(timespec="seconds")
-        started_at = result.get("started_at") or finished_at
+        # safe_task 把 run_id/started_at/finished_at 放在 metadata 中，
+        # 同时兼容顶层 key 的调用方。
+        meta = metadata if isinstance(metadata, dict) else {}
+        run_id = result.get("run_id") or meta.get("run_id") or str(uuid.uuid4())
+        finished_at = (
+            result.get("finished_at")
+            or meta.get("finished_at")
+            or datetime.utcnow().isoformat(timespec="seconds")
+        )
+        started_at = result.get("started_at") or meta.get("started_at") or finished_at
 
         with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
             conn.execute(
