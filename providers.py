@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from core.source_record_key import (
+    INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
+    STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+    source_record_key,
+)
 from smartmoney_hunter.data_loader import DataLoader
 from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.indicators import IndicatorCalculator
@@ -503,7 +508,7 @@ class SmartMoneyDBProvider:
                         repurchase_price_upper REAL,
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 # ==================== Phase 2: 增减持 ====================
@@ -531,7 +536,7 @@ class SmartMoneyDBProvider:
                         survey_org TEXT,
                         survey_type TEXT,
                         survey_count INTEGER,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 # ==================== Phase 2: 股权质押 ====================
@@ -567,7 +572,7 @@ class SmartMoneyDBProvider:
                         repurchase_price_upper REAL,
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 conn.execute("""
@@ -579,7 +584,7 @@ class SmartMoneyDBProvider:
                         survey_org TEXT,
                         survey_type TEXT,
                         survey_count INTEGER,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 conn.execute("""
@@ -615,16 +620,6 @@ class SmartMoneyDBProvider:
                     WHERE trade_date IS NULL OR TRIM(trade_date) = ''
                        OR stock_code IS NULL OR TRIM(stock_code) = ''
                 """)
-                conn.execute("""
-                    DELETE FROM institution_survey
-                    WHERE id NOT IN (
-                        SELECT MAX(id) FROM institution_survey GROUP BY trade_date, stock_code
-                    )
-                """)
-                conn.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS ux_institution_survey_date_code
-                    ON institution_survey(trade_date, stock_code)
-                """)
                 conn.commit()
                 conn.execute("""
                     DELETE FROM stock_pledge
@@ -632,6 +627,7 @@ class SmartMoneyDBProvider:
                        OR stock_code IS NULL OR TRIM(stock_code) = ''
                 """)
                 conn.commit()
+            self._run_versioned_migrations()
         except Exception as e:
             logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
 
@@ -1926,9 +1922,27 @@ class SmartMoneyDBProvider:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 conn.executemany(
-                    "INSERT OR REPLACE INTO stock_repurchase (trade_date, stock_code, stock_name, repurchase_amount, repurchase_price, repurchase_price_lower, repurchase_price_upper, repurchase_quantity, progress_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO stock_repurchase
+                        (source_record_key, trade_date, stock_code, stock_name,
+                         repurchase_amount, repurchase_price,
+                         repurchase_price_lower, repurchase_price_upper,
+                         repurchase_quantity, progress_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        trade_date = excluded.trade_date,
+                        stock_code = excluded.stock_code,
+                        stock_name = excluded.stock_name,
+                        repurchase_amount = excluded.repurchase_amount,
+                        repurchase_price = excluded.repurchase_price,
+                        repurchase_price_lower = excluded.repurchase_price_lower,
+                        repurchase_price_upper = excluded.repurchase_price_upper,
+                        repurchase_quantity = excluded.repurchase_quantity,
+                        progress_status = excluded.progress_status
+                    """,
                     [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                        (source_record_key(r, STOCK_REPURCHASE_SOURCE_KEY_FIELDS),
+                         r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("repurchase_amount"), r.get("repurchase_price"),
                          r.get("repurchase_price_lower"), r.get("repurchase_price_upper"),
                          r.get("repurchase_quantity"), r.get("progress_status"))
@@ -1977,16 +1991,20 @@ class SmartMoneyDBProvider:
                 conn.executemany(
                     """
                     INSERT INTO institution_survey
-                        (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(trade_date, stock_code) DO UPDATE SET
+                        (source_record_key, trade_date, stock_code, stock_name,
+                         survey_org, survey_type, survey_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        trade_date = excluded.trade_date,
+                        stock_code = excluded.stock_code,
                         stock_name = excluded.stock_name,
                         survey_org = excluded.survey_org,
                         survey_type = excluded.survey_type,
                         survey_count = excluded.survey_count
                     """,
                     [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                        (source_record_key(r, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS),
+                         r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("survey_org"), r.get("survey_type"), r.get("survey_count"))
                         for r in valid_records
                     ],
