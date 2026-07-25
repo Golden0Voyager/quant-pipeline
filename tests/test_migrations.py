@@ -954,7 +954,7 @@ def test_migration_008_bridges_known_006_checksums_and_seeds_orphan(
         orphan_run_id="orphan-run",
     )
 
-    result = engine.apply_pending()
+    result = engine.apply_pending(target_version=8)
 
     assert [item["version"] for item in result] == [8]
     with sqlite3.connect(str(tmp_db)) as conn:
@@ -977,8 +977,8 @@ def test_migration_008_is_idempotent(tmp_db):
         orphan_run_id="orphan-run",
     )
 
-    first = engine.apply_pending()
-    second = engine.apply_pending()
+    first = engine.apply_pending(target_version=8)
+    second = engine.apply_pending(target_version=8)
 
     assert [item["version"] for item in first] == [8]
     assert second == []
@@ -1045,7 +1045,7 @@ def test_migration_008_rolls_back_orphan_seed_when_reconcile_fails(
 
 def test_migration_009_rebuilds_source_record_tables_and_removes_old_unique_key(tmp_db):
     engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
-    engine.apply_pending()
+    engine.apply_pending(target_version=8)
     _create_legacy_source_record_tables(str(tmp_db))
 
     result = engine.apply_pending()
@@ -1133,7 +1133,7 @@ def test_migration_009_rolls_back_table_rebuild_when_key_generation_fails(
     import core.source_record_key as key_module
 
     engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
-    engine.apply_pending()
+    engine.apply_pending(target_version=8)
     _create_legacy_source_record_tables(str(tmp_db))
 
     def fail_key(record, fields):
