@@ -32,7 +32,15 @@ def provider(tmp_path: Path) -> SmartMoneyDBProvider:
 
     ``_ensure_tables()`` 会在 __init__ 中自动创建所有必要表。
     """
-    return SmartMoneyDBProvider(db_path=str(tmp_path / "quant_core_test.db"))
+    db_path = tmp_path / "quant_core_test.db"
+    instance = SmartMoneyDBProvider(db_path=str(db_path))
+    # conftest mocks DatabaseManager and ignores db_path; bind this fixture to
+    # its own SQLite file so source-record preserving tests stay isolated.
+    instance._db.db_path = str(db_path)
+    instance._ensure_wal_mode()
+    instance._ensure_tables()
+    instance._run_versioned_migrations()
+    return instance
 
 
 def _audit_payload(run_id: str, status: str, saved: int) -> dict[str, Any]:
@@ -344,7 +352,7 @@ class TestConnectionEdgeCases:
                     "SELECT survey_count FROM institution_survey WHERE trade_date = ? AND stock_code = ?",
                     ("2026-07-21", "000001"),
                 ).fetchall()
-            assert rows == [(4,)]
+            assert rows == [(3,), (4,)]
         finally:
             migrated.close()
 
