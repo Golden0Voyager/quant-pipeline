@@ -13,6 +13,7 @@ uses ``ingestion_runs`` / ``ingestion_rejections``.  This migration:
 
 import hashlib
 import logging
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 def apply(conn):
     _create_ingestion_tables(conn)
+    _seed_orphan_run_ids(conn)
     _drop_legacy(conn)
     _reconcile_checksum(conn)
     logger.info("  ✅ 006: ingestion audit tables reconciled")
@@ -68,6 +70,55 @@ def _create_ingestion_tables(conn):
 
 def _drop_legacy(conn):
     conn.execute("DROP TABLE IF EXISTS task_run_log")
+
+
+def _seed_orphan_run_ids(conn):
+    """Seed placeholder ingestion_runs records for PIT tables that already
+    have snapshot_run_id values referencing rows that do not yet exist.
+
+    This handles the case where ``index_member_history`` or
+    ``concept_member_history`` were populated before migration 006
+    created the ``ingestion_runs`` table, and the task's ``run_id``
+    was lost because ``record_ingestion_run`` could not find it in the
+    result dict (a bug fixed in providers.py).
+    """
+    orphan_tables = [t for t in ("index_member_history", "concept_member_history")
+                     if _table_exists(conn, t)]
+    if not orphan_tables:
+        return
+
+    to_insert: set[str] = set()
+    for tbl in orphan_tables:
+        rows = conn.execute(
+            f"SELECT DISTINCT snapshot_run_id FROM {tbl} WHERE snapshot_run_id IS NOT NULL"
+        ).fetchall()
+        for (rid,) in rows:
+            if rid:
+                exists = conn.execute(
+                    "SELECT 1 FROM ingestion_runs WHERE run_id = ?", (rid,)
+                ).fetchone()
+                if not exists:
+                    to_insert.add(rid)
+
+    if not to_insert:
+        return
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    for rid in sorted(to_insert):
+        conn.execute(
+            """INSERT OR IGNORE INTO ingestion_runs
+               (run_id, task_name, source, status, started_at, finished_at, metadata_json)
+               VALUES (?, 'reconcile', 'migration-006', 'reconciled', ?, ?, '{}')""",
+            (rid, now, now),
+        )
+    logger.info("  ✅ seeded %d orphaned run_id(s) from %s",
+                len(to_insert), ", ".join(orphan_tables))
+
+
+def _table_exists(conn, name: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone())
 
 
 def _reconcile_checksum(conn):
