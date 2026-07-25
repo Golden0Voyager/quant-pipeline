@@ -353,7 +353,11 @@ STOCK_REPURCHASE_CONTRACT = DataContract(
         FieldRule("repurchase_quantity"),
         FieldRule("progress_status"),
     ),
-    unique_by=("trade_date", "stock_code"),
+    # NOTE: The source can emit multiple distinct repurchase records for the
+    # same stock on the same day (different plans / updates). Exact duplicates
+    # are already removed by ``drop_duplicates()`` in the task, so no unique_by
+    # constraint is enforced here.
+    unique_by=(),
     min_rows=1,
 )
 
@@ -367,7 +371,7 @@ INSTITUTION_SURVEY_CONTRACT = DataContract(
         FieldRule("survey_type"),
         FieldRule("survey_count"),
     ),
-    unique_by=("trade_date", "stock_code"),
+    unique_by=("trade_date", "stock_code", "survey_org"),
     min_rows=1,
 )
 
