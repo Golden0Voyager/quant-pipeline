@@ -15,6 +15,13 @@ from core.migrations import (
     run_migrations,
 )
 
+_PUBLISHED_006_CHECKSUM = (
+    "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0"
+)
+_TRANSITIONAL_006_CHECKSUM = (
+    "8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2"
+)
+
 # ── fixtures ───────────────────────────────────────────────────────────
 
 
@@ -34,6 +41,39 @@ def tmp_migrations_dir(tmp_path: Path) -> Path:
     d = tmp_path / "migrations"
     d.mkdir()
     return d
+
+
+def _real_migrations_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _prepare_version_7_db(
+    db_path: str,
+    recorded_checksum: str,
+    *,
+    orphan_run_id: str | None = None,
+) -> MigrationEngine:
+    engine = MigrationEngine(
+        db_path=str(db_path),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=7)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = 6",
+            (recorded_checksum,),
+        )
+        if orphan_run_id is not None:
+            conn.execute(
+                """INSERT INTO index_member_history
+                   (index_code, index_name, ts_code, weight, valid_from,
+                    valid_to, source, snapshot_run_id)
+                   VALUES ('000300', '沪深300', '000001.SZ', 1.0,
+                           '2026-07-25', NULL, 'test', ?)""",
+                (orphan_run_id,),
+            )
+        conn.commit()
+    return engine
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -545,3 +585,64 @@ class TestMigration007:
                 assert expected in tables, f"missing table {expected}"
             for legacy in ("task_run_log", "financial_history_pt", "concept_member_pt", "index_member_pt"):
                 assert legacy not in tables, f"legacy table {legacy} should have been dropped"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 008 (orphan reconciliation and 006 checksum bridge)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "recorded_checksum",
+    [_PUBLISHED_006_CHECKSUM, _TRANSITIONAL_006_CHECKSUM],
+)
+def test_migration_008_bridges_known_006_checksums_and_seeds_orphan(
+    tmp_db,
+    recorded_checksum,
+):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        recorded_checksum,
+        orphan_run_id="orphan-run",
+    )
+
+    result = engine.apply_pending()
+
+    assert [item["version"] for item in result] == [8]
+    with sqlite3.connect(str(tmp_db)) as conn:
+        parent = conn.execute(
+            "SELECT status FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()
+        stored = conn.execute(
+            "SELECT checksum FROM schema_migrations WHERE version = 6"
+        ).fetchone()[0]
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    assert parent == ("reconciled",)
+    assert stored == _PUBLISHED_006_CHECKSUM
+    assert violations == []
+
+
+def test_migration_008_is_idempotent(tmp_db):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        _PUBLISHED_006_CHECKSUM,
+        orphan_run_id="orphan-run",
+    )
+
+    first = engine.apply_pending()
+    second = engine.apply_pending()
+
+    assert [item["version"] for item in first] == [8]
+    assert second == []
+    with sqlite3.connect(str(tmp_db)) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_migration_008_rejects_unknown_006_checksum(tmp_db):
+    engine = _prepare_version_7_db(str(tmp_db), "unknown")
+
+    with pytest.raises(MigrationError, match="unknown migration 006 checksum"):
+        engine.apply_pending()
