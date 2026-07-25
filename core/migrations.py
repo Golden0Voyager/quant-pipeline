@@ -101,7 +101,9 @@ def _first_sql_keyword(statement: str) -> str:
     """Return the first keyword, ignoring leading whitespace and comments."""
     index = 0
     while index < len(statement):
-        while index < len(statement) and statement[index].isspace():
+        while index < len(statement) and (
+            statement[index].isspace() or statement[index] == "\ufeff"
+        ):
             index += 1
         if statement.startswith("--", index):
             newline = statement.find("\n", index + 2)
