@@ -187,6 +187,52 @@ def health_check(db: DatabaseInterface) -> dict:
         report_lines.append(f"\n  技术指标完整率: {valid_ind}/{total_ind} ({100-null_pct:.1f}%)")
         if null_pct > 20:
             issues.append(f"技术指标空值率过高: {null_pct:.1f}%")
+
+    # ── 字段级质量断言（2026-07 筹码全零/股息率全 NULL 事故后新增） ──
+    # 这三个字段曾静默损坏且连续多日无人察觉，任何一项异常都必须显式告警。
+    # 部分环境（测试 fixture / 旧库）可能缺表缺列，缺失时跳过对应断言。
+    try:
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN turnover_rate IS NOT NULL AND turnover_rate > 0
+                          THEN 1 ELSE 0 END)
+               FROM daily_bars
+               WHERE trade_date = (SELECT MAX(trade_date) FROM daily_bars)"""
+        )
+        tr_total, tr_valid = cursor.fetchone()
+        if tr_total:
+            tr_pct = 100 * (tr_valid or 0) / tr_total
+            report_lines.append(f"  当日换手率非空率: {tr_valid}/{tr_total} ({tr_pct:.1f}%)")
+            if tr_pct < 60:
+                issues.append(f"daily_bars.turnover_rate 当日非空率过低: {tr_pct:.1f}% (< 60%)")
+
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN profit_ratio = 0 AND avg_cost = 0 THEN 1 ELSE 0 END)
+               FROM chip_distribution_em
+               WHERE trade_date = (SELECT MAX(trade_date) FROM chip_distribution_em)"""
+        )
+        chip_total, chip_zero = cursor.fetchone()
+        if chip_total:
+            zero_pct = 100 * (chip_zero or 0) / chip_total
+            report_lines.append(f"  当日筹码全零率: {chip_zero}/{chip_total} ({zero_pct:.1f}%)")
+            if zero_pct > 5:
+                issues.append(f"chip_distribution_em 当日全零行占比过高: {zero_pct:.1f}% (> 5%)")
+
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN dividend_yield IS NOT NULL THEN 1 ELSE 0 END)
+               FROM fundamentals
+               WHERE trade_date = (SELECT MAX(trade_date) FROM fundamentals)"""
+        )
+        dy_total, dy_valid = cursor.fetchone()
+        if dy_total:
+            dy_pct = 100 * (dy_valid or 0) / dy_total
+            report_lines.append(f"  当日股息率非空率: {dy_valid}/{dy_total} ({dy_pct:.1f}%)")
+            if dy_pct < 40:
+                issues.append(f"fundamentals.dividend_yield 当日非空率过低: {dy_pct:.1f}% (< 40%)")
+    except sqlite3.OperationalError as exc:
+        report_lines.append(f"  字段级质量断言跳过（表/列缺失）: {exc}")
     # ── 碎片空间检查 ──
     try:
         cursor.execute("PRAGMA page_count")

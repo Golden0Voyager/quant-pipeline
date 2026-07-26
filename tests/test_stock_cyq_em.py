@@ -693,7 +693,7 @@ class TestStockCyqEm:
         assert len(result) <= 90
 
     def test_fallback_to_db_js_when_numpy_invalid(self, tmp_path: Path):
-        """numpy 路径结果无效（<10 有效行）→ 降级到 JS 路径。"""
+        """换手率全 0 → 拒绝计算（防全零伪数据），不再降级 JS。"""
         db_path = tmp_path / "test.db"
         conn = __import__("sqlite3").connect(str(db_path))
         conn.execute(
@@ -714,15 +714,12 @@ class TestStockCyqEm:
         conn.close()
 
         with patch("core.stock_cyq_em._fetch_kline_em", return_value=None), \
-             patch("core.stock_cyq_em._get_js_runtime") as mock_js:
-            mock_js.return_value = MagicMock()
-            mock_js.return_value.call.return_value = {
-                "bp": 0.5, "ac": "12.0", "c90l": "10.0", "c90h": "14.0",
-                "cn90": 0.15, "c70l": "11.0", "c70h": "13.0", "cn70": 0.08,
-            }
-            result = stock_cyq_em("000001", use_local_db=True, db_path=db_path)
-        assert isinstance(result, pd.DataFrame)
-        assert not result.empty
+             patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None), \
+             patch("core.stock_cyq_em._fetch_kline_sina", return_value=None):
+            # 2026-07 全零筹码事故修复后：换手率全缺失时必须显式报错，
+            # 而非降级 JS 静默产出全 0 行
+            with pytest.raises(ValueError, match="换手率"):
+                stock_cyq_em("000001", use_local_db=True, db_path=db_path)
 
     def test_xueqiu_path(self):
         """雪球 API 路径 → JS 计算。"""

@@ -289,13 +289,24 @@ def update_chip_distribution_em(
         consecutive_failures = 0
 
         records = []
+        rejected_rows = 0
         for _, row in df.iterrows():
+            profit_ratio = float(row["profit_ratio"])
+            avg_cost = float(row["avg_cost"])
+            # 入库校验：NaN 或全零行 (获利比例=0 且 平均成本=0) 属于计算失败的
+            # 伪数据，拒绝入库（真实市场中平均成本必然 > 0）
+            if pd.isna(profit_ratio) or pd.isna(avg_cost):
+                rejected_rows += 1
+                continue
+            if profit_ratio == 0.0 and avg_cost == 0.0:
+                rejected_rows += 1
+                continue
             records.append(
                 {
                     "ts_code": symbol,
                     "trade_date": str(row["trade_date"]),
-                    "profit_ratio": float(row["profit_ratio"]),
-                    "avg_cost": float(row["avg_cost"]),
+                    "profit_ratio": profit_ratio,
+                    "avg_cost": avg_cost,
                     "cost_90_low": float(row["cost_90_low"]),
                     "cost_90_high": float(row["cost_90_high"]),
                     "concentration_90": float(row["concentration_90"]),
@@ -304,6 +315,16 @@ def update_chip_distribution_em(
                     "concentration_70": float(row["concentration_70"]),
                 }
             )
+
+        if not records:
+            logger.warning(
+                f"  {symbol} 筹码数据全部无效 (拒绝 {rejected_rows} 行全零/NaN)，不入库"
+            )
+            failed_count += 1
+            continue
+
+        if rejected_rows:
+            logger.debug(f"  {symbol} 拒绝 {rejected_rows} 行无效筹码数据")
 
         try:
             db.save_chip_distribution_em_batch(records)

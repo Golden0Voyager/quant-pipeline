@@ -51,12 +51,12 @@ def _create_fundamentals_db(db_path: str) -> None:
         "INSERT INTO stock_list (code, name, industry, market) VALUES ('600000', '股票B', '银行', 'sh')"
     )
     conn.execute(
-        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, total_market_cap) "
-        "VALUES ('000001', '2026-07-17', 10.0, 1.0, 1e9)"
+        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, dividend_yield, total_market_cap) "
+        "VALUES ('000001', '2026-07-17', 10.0, 1.0, 2.5, 1e9)"
     )
     conn.execute(
-        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, total_market_cap) "
-        "VALUES ('600000', '2026-07-17', 12.0, 1.2, 2e9)"
+        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, dividend_yield, total_market_cap) "
+        "VALUES ('600000', '2026-07-17', 12.0, 1.2, 3.1, 2e9)"
     )
     conn.commit()
     conn.close()

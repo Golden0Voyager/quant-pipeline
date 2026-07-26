@@ -772,6 +772,22 @@ class TestRunAll:
             r = daily_pipeline.run_all(db, loader, engine)
         assert r == {"status": "skipped", "reason": "非交易日"}
 
+    def test_target_cadences_skip_monthly_and_quarterly(self, tmp_path: Path, weekday_mock):
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=True), \
+             patch("daily_pipeline.logger"), \
+             patch("daily_pipeline._safe_task", return_value={"status": "ok"}) as safe_task:
+            r = daily_pipeline.run_all(db, loader, engine, target_cadences={daily_pipeline.Cadence.TRADING_DAY, daily_pipeline.Cadence.DAILY})
+        # 股票列表是月度任务，应被跳过
+        assert r["stock_list"]["status"] == "skipped"
+        # 季度财务是季度任务，也应被跳过
+        assert r["quarterly_financials"]["status"] == "skipped"
+        # 日线行情是交易日任务，应该执行
+        assert safe_task.call_args_list[0].args[0] == "update_bars"
+
     def test_normal_run(self, tmp_path: Path, weekday_mock):
         db = MagicMock()
         db.db_path = str(tmp_path / "quant_core.db")

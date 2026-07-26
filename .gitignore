@@ -32,3 +32,4 @@ MagicMock*
 *.db
 *.db-wal
 *.db-shm
+scripts/.backfill_turnover_progress.txt
