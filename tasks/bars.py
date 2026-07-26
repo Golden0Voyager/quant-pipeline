@@ -71,6 +71,34 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 熔断哨兵：连续失败触发熔断前，先拉取一只必然有数据的高流动性标的，
+# 区分「网络彻底不可用」与「个别掉队股源端缺数」（如停牌股），避免误熔断。
+CANARY_SYMBOL = "000001"
+MAX_CANARY_PROBES = 3  # 每次运行最多哨兵验证次数，超出后直接信任熔断判定
+
+
+def _canary_probe(loader: DataLoaderInterface) -> bool:
+    """熔断前哨兵验证：拉取哨兵股票近期日线，确认数据源是否真的不可用。
+
+    Returns:
+        True 表示哨兵拉取成功（网络正常，连续失败是个股问题）；
+        False 表示哨兵也失败（网络确实不可用，应当熔断）。
+    """
+    try:
+        start = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
+        df = loader.get_daily_bars(CANARY_SYMBOL, start_date=start)
+        if df is None or df.empty:
+            return False
+        # 纯 yfinance fallback 数据不能证明 AkShare 可用
+        if "data_source" in df.columns:
+            src_values = df["data_source"].dropna().unique()
+            if len(src_values) == 1 and src_values[0] == "yfinance":
+                return False
+        return True
+    except Exception as e:
+        logger.debug(f"哨兵请求失败: {e}")
+        return False
+
 
 def _normalize_trade_date(value: object) -> str | None:
     """Normalize common trade date forms to YYYY-MM-DD for lexical comparison."""
@@ -218,6 +246,29 @@ def update_bars(
     monitor = AkShareMonitor()
     expected_latest = get_expected_latest_trading_day()
 
+    # ── 熔断检查（带哨兵验证）──
+    canary_probes_used = 0
+
+    def _check_abort() -> tuple[bool, str]:
+        """熔断检查：连续失败触发时先做哨兵验证，避免个股数据问题误熔断。"""
+        nonlocal canary_probes_used
+        should_abort, abort_msg = monitor.should_abort()
+        if (
+            should_abort
+            and monitor.current_run_consecutive_failures >= 3
+            and canary_probes_used < MAX_CANARY_PROBES
+        ):
+            canary_probes_used += 1
+            if _canary_probe(loader):
+                logger.warning(
+                    f"⚠️ 连续 {monitor.current_run_consecutive_failures} 次失败触发熔断条件，"
+                    f"但哨兵 {CANARY_SYMBOL} 拉取正常 → 判定为个股数据问题，继续运行"
+                    f"（哨兵验证 {canary_probes_used}/{MAX_CANARY_PROBES}）"
+                )
+                monitor.record(True, f"canary:{CANARY_SYMBOL}")
+                should_abort, abort_msg = monitor.should_abort()
+        return should_abort, abort_msg
+
     # ── 自选股全量拉取初始化 ──
     watchlist_symbols = set()
     backfilled_symbols = set()
@@ -233,6 +284,7 @@ def update_bars(
         logger.warning(f"⚠️ 初始化自选股拉取逻辑失败: {e}")
 
     for batch_idx in range(0, remaining_total, BATCH_SIZE):
+        attempts_before_batch = monitor.current_run_attempts
         batch = remaining_codes[batch_idx : batch_idx + BATCH_SIZE]
         batch_num = batch_idx // BATCH_SIZE + 1
         total_batches = (remaining_total + BATCH_SIZE - 1) // BATCH_SIZE
@@ -298,7 +350,7 @@ def update_bars(
             )
 
             # 并行批次结束后检查是否需要中止
-            should_abort, abort_msg = monitor.should_abort()
+            should_abort, abort_msg = _check_abort()
             if should_abort:
                 logger.warning(f"⛔ {abort_msg}")
                 monitor.flush()
@@ -369,7 +421,7 @@ def update_bars(
                     time.sleep(sleep_time)
 
                 # 检查是否需要中止（AkShare 极度不稳定时）
-                should_abort, abort_msg = monitor.should_abort()
+                should_abort, abort_msg = _check_abort()
                 if should_abort:
                     logger.warning(f"⛔ {abort_msg}")
                     ProgressTracker.save(
@@ -401,11 +453,15 @@ def update_bars(
         monitor.log_status()
 
         if batch_idx + BATCH_SIZE < remaining_total:
-            # 动态调整批次休息：成功率低时增加休息
-            multiplier = monitor.get_recommended_sleep_multiplier()
-            batch_sleep = BATCH_SLEEP * multiplier
-            logger.info(f"⏳ 批次间休息 {batch_sleep:.1f}s... (倍率 {multiplier}x)")
-            time.sleep(batch_sleep)
+            if monitor.current_run_attempts == attempts_before_batch:
+                # 本批次全部跳过（零网络请求），无需限流休息
+                logger.debug("  本批次无网络请求，跳过批次间休息")
+            else:
+                # 动态调整批次休息：成功率低时增加休息
+                multiplier = monitor.get_recommended_sleep_multiplier()
+                batch_sleep = BATCH_SLEEP * multiplier
+                logger.info(f"⏳ 批次间休息 {batch_sleep:.1f}s... (倍率 {multiplier}x)")
+                time.sleep(batch_sleep)
 
     # 处理完成：去重并保存失败队列
     unique_failed = list(dict.fromkeys(failed_symbols))  # 保持顺序去重
