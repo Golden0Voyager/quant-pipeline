@@ -500,3 +500,151 @@ class TestBarsBoundary:
 
         assert r["total"] == 1
         assert r["success"] == 1
+
+
+# ===========================================================================
+# 熔断哨兵验证（Canary Probe）
+# ===========================================================================
+
+class TestCanaryCircuitBreaker:
+    """连续失败熔断前的哨兵验证逻辑。"""
+
+    def _make_failing_run(self, tmp_path: Path):
+        """构造 4 只股票全部失败的场景（db.get_latest_bar_date 抛异常）。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({
+            "code": ["000010.SZ", "000020.SZ", "000030.SZ", "000040.SZ"],
+        })
+        db.get_latest_bar_date.side_effect = Exception("source down")
+        db.watchlist_get_all.return_value = pd.DataFrame()
+        return db, loader, tmp_path / "progress.json"
+
+    def test_canary_success_prevents_abort(self, tmp_path: Path):
+        """连续 3 次失败但哨兵拉取成功 → 不熔断，跑完全部股票。"""
+        db, loader, progress_file = self._make_failing_run(tmp_path)
+        # 哨兵请求走 loader.get_daily_bars，返回有效数据
+        loader.get_daily_bars.return_value = _bars_df(["2026-07-18"])
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.MAX_RETRY", 1), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        # 4 只全部处理完（未提前熔断退出），失败队列完整
+        assert r["failed"] == 4
+        assert len(r["failed_symbols"]) == 4
+        # 哨兵确实被调用过（第 3 次连续失败时触发）
+        assert loader.get_daily_bars.called
+
+    def test_canary_failure_confirms_abort(self, tmp_path: Path):
+        """连续 3 次失败且哨兵也失败 → 照常熔断，剩余股票不处理。"""
+        db, loader, progress_file = self._make_failing_run(tmp_path)
+        loader.get_daily_bars.return_value = pd.DataFrame()  # 哨兵返回空
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.MAX_RETRY", 1), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        # 第 3 只失败后熔断，第 4 只未处理
+        assert r["failed"] == 3
+
+    def test_canary_rejects_pure_yfinance_data(self, tmp_path: Path):
+        """哨兵返回纯 yfinance 数据 → 视为 AkShare 不可用，照常熔断。"""
+        db, loader, progress_file = self._make_failing_run(tmp_path)
+        yf_df = _bars_df(["2026-07-18"])
+        yf_df["data_source"] = "yfinance"
+        loader.get_daily_bars.return_value = yf_df
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.MAX_RETRY", 1), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        assert r["failed"] == 3
+
+    def test_canary_probe_limit(self, tmp_path: Path):
+        """哨兵验证次数耗尽后直接熔断，不再无限探测。"""
+        db = MagicMock()
+        loader = MagicMock()
+        # 13 只全部失败：每 3 次连续失败触发一次哨兵（3 次额度），
+        # 第 12 次失败后额度耗尽 → 熔断
+        codes = [f"{i:06d}.SZ" for i in range(10, 23)]
+        db.get_stock_list.return_value = pd.DataFrame({"code": codes})
+        db.get_latest_bar_date.side_effect = Exception("source down")
+        db.watchlist_get_all.return_value = pd.DataFrame()
+        loader.get_daily_bars.return_value = _bars_df(["2026-07-18"])  # 哨兵永远成功
+
+        with patch("tasks.bars.ProgressTracker.FILE", tmp_path / "progress.json"), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.MAX_RETRY", 1), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        # 额度 3 次用完后，第 4 轮连续 3 次失败直接熔断 → 12 只失败，第 13 只未处理
+        assert r["failed"] == 12
+        # 哨兵正好探测 3 次（loader.get_daily_bars 仅由哨兵调用）
+        assert loader.get_daily_bars.call_count == 3
+
+
+# ===========================================================================
+# 全 skip 批次不休息
+# ===========================================================================
+
+class TestBatchSleepSkip:
+    """批次内零网络请求时跳过批次间休息。"""
+
+    def test_all_skipped_batches_do_not_sleep(self, tmp_path: Path):
+        """多批次全部 skipped → 不调用批次间 time.sleep。"""
+        db = MagicMock()
+        loader = MagicMock()
+        codes = [f"{i:06d}.SZ" for i in range(150)]  # 2 个批次
+        db.get_stock_list.return_value = pd.DataFrame({"code": codes})
+        # 数据已是最新 → 全部 skipped，零网络请求
+        db.get_latest_bar_date.return_value = "2026-07-20"
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        with patch("tasks.bars.ProgressTracker.FILE", tmp_path / "progress.json"), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-20"), \
+             patch("tasks.bars.time.sleep") as mock_sleep, \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        assert r["skipped"] == 150
+        mock_sleep.assert_not_called()
+
+    def test_batch_with_network_activity_still_sleeps(self, tmp_path: Path):
+        """批次内有真实网络请求 → 批次间休息保留。"""
+        db = MagicMock()
+        loader = MagicMock()
+        codes = [f"{i:06d}.SZ" for i in range(101)]  # 2 个批次
+        db.get_stock_list.return_value = pd.DataFrame({"code": codes})
+        db.get_latest_bar_date.return_value = "2026-07-17"  # 落后 → 需要更新
+        db.get_daily_bars.return_value = _bars_df(["2026-07-17"])
+        loader.incremental_update.return_value = _bars_df(["2026-07-17", "2026-07-20"])
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        with patch("tasks.bars.ProgressTracker.FILE", tmp_path / "progress.json"), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-20"), \
+             patch("tasks.bars.time.sleep") as mock_sleep, \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        assert r["success"] == 101
+        assert mock_sleep.called
