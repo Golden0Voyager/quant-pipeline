@@ -138,7 +138,14 @@ def update_indicators(
     total = len(symbols)
     if total == 0:
         logger.info("✅ 所有股票的指标均已是最新，无需计算")
-        return {"success": 0, "failed": 0, "insufficient": 0, "total": 0}
+        return {
+            "status": "success",
+            "saved": 0,
+            "success": 0,
+            "failed": 0,
+            "insufficient": 0,
+            "total": 0,
+        }
 
     success_count = 0
     failed_count = 0
@@ -232,10 +239,13 @@ def update_indicators(
     logger.info("=" * 60)
 
     return {
+        "status": "success" if failed_count == 0 else "degraded",
+        "saved": success_count,
         "success": success_count,
         "failed": failed_count,
         "insufficient": insufficient_count,
         "total": total,
+        "error": None if failed_count == 0 else f"{failed_count} symbols failed",
     }
 
 
@@ -431,7 +441,14 @@ def update_chip_distribution(
     total = len(symbols)
     if total == 0:
         logger.info("所有股票的筹码分布均已是最新，无需计算")
-        return {"success": 0, "failed": 0, "insufficient": 0, "total": 0}
+        return {
+            "status": "success",
+            "saved": 0,
+            "success": 0,
+            "failed": 0,
+            "insufficient": 0,
+            "total": 0,
+        }
 
     n_bins = CHIP_BINS
     min_days = MIN_CHIP_DAYS
@@ -465,8 +482,11 @@ def update_chip_distribution(
     logger.info("=" * 60)
 
     return {
+        "status": "success" if failed_count == 0 else "degraded",
+        "saved": success_count,
         "success": success_count,
         "failed": failed_count,
         "insufficient": insufficient_count,
         "total": total,
+        "error": None if failed_count == 0 else f"{failed_count} symbols failed",
     }
