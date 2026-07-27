@@ -99,7 +99,7 @@ def update_north_flow(db: DatabaseInterface) -> dict:
                 "⏸️  北向资金成交净买额全为零（港交所自 2024-08 停止日度披露），"
                 "跳过写入以避免误导性零值进入策略"
             )
-            return {"saved": 0, "total": len(records), "status": "dead_source"}
+            return {"status": "no_data", "saved": 0, "total": len(records), "reason": "dead_source"}
 
         saved = db.save_north_flow_batch(records)
         logger.info(f"✅ 北向资金保存完成: {saved} 条")
