@@ -647,4 +647,14 @@ def update_china_macro(db: DatabaseInterface) -> dict:
         logger.warning(f"⚠️ GDP 获取失败: {e}")
     results["quarterly_saved"] = saved_q
 
+    # If we got here without an exception, the task ran to completion.
+    # Decide status based on whether any data was actually saved.
+    monthly_saved = results.get("monthly_saved", 0)
+    quarterly_saved = results.get("quarterly_saved", 0)
+    results["saved"] = monthly_saved + quarterly_saved
+    if results["saved"] == 0:
+        results["status"] = "no_data"
+    else:
+        results["status"] = "success"
+
     return dict(results)
