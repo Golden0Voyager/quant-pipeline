@@ -167,17 +167,30 @@ class TestAkShareMonitor:
         assert "连续" in reason
 
     def test_should_abort_low_rate(self):
+        """本次运行 ≥ 20 次请求且成功率 < 20% → 中止。"""
         monitor = self.make_monitor()
 
-        for i in range(10):
-            monitor.records.append({"timestamp": "", "success": True, "symbol": f"{i:06d}"})
-        for i in range(10, 30):
-            success = i % 10 == 0
-            monitor.records.append({"timestamp": "", "success": success, "symbol": f"{i:06d}"})
-
-        monitor.current_run_attempts = 10
-        monitor.current_run_consecutive_failures = 0
+        # 20 次请求：17 失败 + 末尾 3 成功（收尾连续失败归零，确保命中的是成功率规则）
+        for i, ok in enumerate([False] * 17 + [True] * 3):
+            monitor.record(ok, f"{i:06d}")
 
         should, reason = monitor.should_abort()
         assert should
         assert "成功率" in reason
+
+    def test_should_abort_ignores_stale_history(self):
+        """持久化的历史失败记录不影响本次运行的中止判定。"""
+        monitor = self.make_monitor()
+
+        # 模拟前几天攒下的大量失败记录
+        for i in range(30):
+            monitor.records.append({"timestamp": "", "success": False, "symbol": f"{i:06d}"})
+
+        # 本次运行只有少量请求且未连续 3 次失败
+        monitor.record(False, "000001.SZ")
+        monitor.record(True, "000002.SZ")
+        monitor.record(False, "000003.SZ")
+        monitor.record(False, "000004.SZ")
+
+        should, reason = monitor.should_abort()
+        assert not should
