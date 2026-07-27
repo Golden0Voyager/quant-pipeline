@@ -57,6 +57,7 @@ from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
 from core.runner import safe_task
+from core.task_registry import Cadence, lookup_task
 from core.task_result import TaskResult, normalize_task_result
 from core.utils import (
     infer_market as _infer_market,  # noqa: F401
@@ -250,6 +251,9 @@ def _run_registry_task(
     if task_name in ("update_bars",):
         return fn(db, loader, limit=limit, resume=resume, symbols=symbols, force=force)
 
+    if task_name == "update_daily_core":
+        return fn(db, loader, engine, resume=resume, force=force)
+
     if task_name in ("update_fundamentals", "update_fund_flow", "update_quarterly_financials"):
         return fn(db, loader, symbols=symbols)
 
@@ -303,16 +307,50 @@ def _dispatch_chip_force(
 # 主流程编排
 # ===========================================================================
 
-def run_all(
+
+
+def update_daily_core(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
     engine: IndicatorEngineInterface,
     resume: bool = False,
     force: bool = False,
 ) -> dict:
+    """Run all TRADING_DAY and DAILY cadence tasks (the daily core)."""
+    logger.info("\n🚀 启动每日核心任务 (TRADING_DAY + DAILY)")
+    return run_all(
+        db,
+        loader,
+        engine,
+        resume=resume,
+        force=force,
+        target_cadences={Cadence.TRADING_DAY, Cadence.DAILY},
+    )
+
+
+_TASK_CALLABLES["update_daily_core"] = update_daily_core
+
+
+def run_all(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    resume: bool = False,
+    force: bool = False,
+    target_cadences: set[Cadence] | None = None,
+) -> dict:
     """运行完整数据管道。"""
     start_time = time.time()
     _lower_process_priority()
+
+    def _run_task(name: str, fn, *args, **kwargs):
+        if target_cadences is not None:
+            spec = lookup_task(name)
+            if spec is None or spec.cadence not in target_cadences:
+                logger.info("⏭️ 跳过任务: %s (cadence=%s)", name, getattr(spec, "cadence", "unknown"))
+                return {"status": "skipped", "reason": f"cadence not in {target_cadences}"}
+        return _safe_task(name, fn, *args, **kwargs)
+
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
     logger.info(f"⚙️  并行线程: {PARALLEL_WORKERS} (默认 1=串行)")
@@ -323,75 +361,75 @@ def run_all(
         return {"status": "skipped", "reason": "非交易日"}
 
     results = {}
-    results["stock_list"] = _safe_task("update_stock_list", update_stock_list, db)
-    results["bars"] = _safe_task("update_bars", update_bars, db, loader, resume=resume, force=force)
+    results["stock_list"] = _run_task("update_stock_list", update_stock_list, db)
+    results["bars"] = _run_task("update_bars", update_bars, db, loader, resume=resume, force=force)
 
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
     # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
-    results["indicators"] = _safe_task("update_indicators", update_indicators, db, engine)
+    results["indicators"] = _run_task("update_indicators", update_indicators, db, engine)
 
-    results["fundamentals"] = _safe_task("update_fundamentals", update_fundamentals, db, loader)
-    results["market_snapshot"] = _safe_task("update_market_snapshot (雪球)", update_market_snapshot, db)
-    results["fund_flow"] = _safe_task("update_fund_flow", update_fund_flow, db, loader)
-    results["margin_trading"] = _safe_task("update_margin_trading", update_margin_trading, db)
-    results["dragon_tiger"] = _safe_task("update_dragon_tiger", update_dragon_tiger, db)
-    results["block_trade"] = _safe_task("update_block_trade", update_block_trade, db)
-    results["sector_fund_flow"] = _safe_task("update_sector_fund_flow", update_sector_fund_flow, db)
-    results["shareholder_count"] = _safe_task("update_shareholder_count", update_shareholder_count, db)
-    results["quarterly_financials"] = _safe_task("update_quarterly_financials", update_quarterly_financials, db, loader)
-    results["historical_valuation"] = _safe_task("update_historical_valuation", update_historical_valuation, db)
-    results["sector_industry"] = _safe_task("update_sector_industry", update_sector_industry, db)
-    results["industry"] = _safe_task("update_industry", update_industry, db)
-    results["north_flow"] = _safe_task("update_north_flow", update_north_flow, db)
-    results["north_hold"] = _safe_task("update_north_hold", update_north_hold, db)
-    results["index_daily"] = _safe_task("update_index_daily", update_index_daily, db)
-    results["limit_up_down"] = _safe_task("update_limit_up_down", update_limit_up_down, db)
-    results["dividend_summary"] = _safe_task("update_dividend_summary", update_dividend_summary, db)
-    results["gold_price"] = _safe_task("update_gold_price", update_gold_price, db)
-    results["crude_oil"] = _safe_task("update_crude_oil", update_crude_oil, db)
-    results["fx_rate"] = _safe_task("update_usd", update_usd, db)
-    results["global_index"] = _safe_task("update_global_index", update_global_index, db)
-    results["us_treasury"] = _safe_task("update_us_treasury", update_us_treasury, db)
-    results["futures"] = _safe_task("update_futures", update_futures, db)
-    results["china_macro"] = _safe_task("update_china_macro", update_china_macro, db)
-    results["money_market"] = _safe_task("update_money_market", update_money_market, db)
-    results["market_valuation"] = _safe_task("update_market_valuation", update_market_valuation, db)
-    results["concept_board"] = _safe_task("update_concept_board", update_concept_board, db)
+    results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
+    results["market_snapshot"] = _run_task("update_market_snapshot (雪球)", update_market_snapshot, db)
+    results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
+    results["margin_trading"] = _run_task("update_margin_trading", update_margin_trading, db)
+    results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
+    results["block_trade"] = _run_task("update_block_trade", update_block_trade, db)
+    results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
+    results["shareholder_count"] = _run_task("update_shareholder_count", update_shareholder_count, db)
+    results["quarterly_financials"] = _run_task("update_quarterly_financials", update_quarterly_financials, db, loader)
+    results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
+    results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
+    results["industry"] = _run_task("update_industry", update_industry, db)
+    results["north_flow"] = _run_task("update_north_flow", update_north_flow, db)
+    results["north_hold"] = _run_task("update_north_hold", update_north_hold, db)
+    results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
+    results["limit_up_down"] = _run_task("update_limit_up_down", update_limit_up_down, db)
+    results["dividend_summary"] = _run_task("update_dividend_summary", update_dividend_summary, db)
+    results["gold_price"] = _run_task("update_gold_price", update_gold_price, db)
+    results["crude_oil"] = _run_task("update_crude_oil", update_crude_oil, db)
+    results["fx_rate"] = _run_task("update_usd", update_usd, db)
+    results["global_index"] = _run_task("update_global_index", update_global_index, db)
+    results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
+    results["futures"] = _run_task("update_futures", update_futures, db)
+    results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
+    results["money_market"] = _run_task("update_money_market", update_money_market, db)
+    results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
+    results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
 
     # ── Phase 2: 事件型强信号 ──
-    results["option_sentiment"] = _safe_task("update_option_sentiment", update_option_sentiment, db)
-    results["stock_repurchase"] = _safe_task("update_stock_repurchase", update_stock_repurchase, db)
-    results["institution_survey"] = _safe_task("update_institution_survey", update_institution_survey, db)
-    results["stock_pledge"] = _safe_task("update_stock_pledge", update_stock_pledge, db)
+    results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
+    results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
+    results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
+    results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
 
     # ── 新增衍生数据任务 ──
-    results["south_flow"] = _safe_task("update_south_flow", update_south_flow, db)
-    results["ah_premium"] = _safe_task("update_ah_premium", update_ah_premium, db)
-    results["etf_daily"] = _safe_task("update_etf_daily", update_etf_daily, db)
-    results["cb_quotation"] = _safe_task("update_cb_quotation", update_cb_quotation, db)
-    results["cb_redeem"] = _safe_task("update_cb_redeem", update_cb_redeem, db)
-    results["cb_index"] = _safe_task("update_cb_index", update_cb_index, db)
-    results["restricted_share"] = _safe_task("update_restricted_share", update_restricted_share, db)
-    results["earnings_forecast"] = _safe_task("update_earnings_forecast", update_earnings_forecast, db)
-    results["sector_derivatives"] = _safe_task("update_sector_derivatives", update_sector_derivatives, db)
-    results["chip_distribution"] = _safe_task(
+    results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
+    results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
+    results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
+    results["cb_quotation"] = _run_task("update_cb_quotation", update_cb_quotation, db)
+    results["cb_redeem"] = _run_task("update_cb_redeem", update_cb_redeem, db)
+    results["cb_index"] = _run_task("update_cb_index", update_cb_index, db)
+    results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
+    results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
+    results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
+    results["chip_distribution"] = _run_task(
         "update_chip_distribution", update_chip_distribution, db
     )
-    results["chip_distribution_em"] = _safe_task(
+    results["chip_distribution_em"] = _run_task(
         "update_chip_distribution_em", update_chip_distribution_em, db
     )
-    results["financial_history"] = _safe_task(
+    results["financial_history"] = _run_task(
         "update_financial_history", update_financial_history, db
     )
-    results["index_membership"] = _safe_task(
+    results["index_membership"] = _run_task(
         "update_index_membership", update_index_membership, db
     )
-    results["concept_member"] = _safe_task(
+    results["concept_member"] = _run_task(
         "update_concept_member", update_concept_member, db
     )
 
-    results["retry"] = _safe_task("retry_failed", retry_failed, db, loader)
-    results["health"] = _safe_task("health_check", health_check, db)
+    results["retry"] = _run_task("retry_failed", retry_failed, db, loader)
+    results["health"] = _run_task("health_check", health_check, db)
 
     db.close()
     elapsed = time.time() - start_time
@@ -460,7 +498,7 @@ def main():
     try:
         # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
         # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
-        if args.task == "all":
+        if args.task in ("all", "update_daily_core"):
             _acquire_lock()
         elif args.task != "health_check":
             if not TaskLock.acquire(args.task):
@@ -482,6 +520,10 @@ def main():
 
         if args.task == "all":
             results = run_all(db, loader, engine, resume=args.resume, force=args.force)
+            if results.get("crashed"):
+                sys.exit(1)
+        elif args.task == "update_daily_core":
+            results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
         elif args.task in _TASK_CALLABLES:
