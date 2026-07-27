@@ -109,6 +109,7 @@ class TestBarsSmartProbe:
         loader.incremental_update.return_value = _bars_df(["2026-07-17", "2026-07-18"])
 
         with patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-20"), \
+             patch("tasks.bars._detect_suspended_symbols", return_value=set()), \
              patch("tasks.bars.time.sleep"), \
              patch("tasks.bars.logger"):
             r = update_bars(db, loader)
@@ -129,6 +130,7 @@ class TestBarsSmartProbe:
         conn.close()
 
         with patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-20"), \
+             patch("tasks.bars._detect_suspended_symbols", return_value=set()), \
              patch("tasks.bars.time.sleep"), \
              patch("tasks.bars.logger"):
             r = update_bars(db, loader)
@@ -648,3 +650,134 @@ class TestBatchSleepSkip:
 
         assert r["success"] == 101
         assert mock_sleep.called
+
+
+# ===========================================================================
+# 停牌预检（Suspended Precheck）
+# ===========================================================================
+
+def _stub_xueqiu_modules(mock_xq):
+    """构造可注入 sys.modules 的 smartmoney_hunter stub。"""
+    import types
+
+    pkg = types.ModuleType("smartmoney_hunter")
+    pkg.xueqiu = mock_xq
+    return {"smartmoney_hunter": pkg, "smartmoney_hunter.xueqiu": mock_xq}
+
+
+class TestSuspendedPrecheck:
+    """运行前停牌预检：雪球 status + 东财停复牌名单。"""
+
+    def _make_db(self, tmp_path: Path, lagging_dates: dict[str, str]):
+        """建真实库：指定股票的最新日线日期。"""
+        db_path = str(tmp_path / "quant_core.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+        for code, d in lagging_dates.items():
+            conn.execute("INSERT INTO daily_bars VALUES (?, ?)", (f"{code}.SZ", d))
+        conn.commit()
+        conn.close()
+        db = MagicMock()
+        db.db_path = db_path
+        return db
+
+    def test_detects_suspended_via_xueqiu_status(self, tmp_path: Path):
+        """落后股中雪球 status==2 的被识别为停牌。"""
+        import sys
+
+        from tasks.bars import _detect_suspended_symbols
+
+        db = self._make_db(tmp_path, {"002036": "2026-07-22", "000001": "2026-07-24"})
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.return_value = [
+            {"code": "002036", "status": 2},
+        ]
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame()  # 东财无数据
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            result = _detect_suspended_symbols(db, "2026-07-24")
+
+        assert result == {"002036"}
+        # 只查了落后股（000001 已最新，不在查询列表）
+        mock_xq.get_batch_quotes.assert_called_once_with(["002036"])
+
+    def test_tfp_covers_beijing_and_merges(self, tmp_path: Path):
+        """东财停复牌名单覆盖北交所，与雪球结果合并。"""
+        import sys
+
+        from tasks.bars import _detect_suspended_symbols
+
+        db = self._make_db(tmp_path, {"920685": "2026-07-15", "300242": "2026-07-22"})
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame({"代码": ["920685"]})
+        mock_xq = MagicMock()
+        # 带市场前缀的变体也应被归一为 6 位码（防御 [-6:] 截取）
+        mock_xq.get_batch_quotes.return_value = [{"code": "SZ300242", "status": 2}]
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            result = _detect_suspended_symbols(db, "2026-07-24")
+
+        assert result == {"920685", "300242"}
+        # 北交所股不会送入雪球查询
+        mock_xq.get_batch_quotes.assert_called_once_with(["300242"])
+
+    def test_skips_when_too_many_lagging(self, tmp_path: Path):
+        """落后股超过阈值（正常交易日全市场落后）→ 不发起任何网络请求。"""
+        from tasks.bars import _detect_suspended_symbols
+
+        db = self._make_db(tmp_path, {f"{i:06d}": "2026-07-22" for i in range(60)})
+        ak = MagicMock()
+        with patch("tasks.bars.ak", ak):
+            result = _detect_suspended_symbols(db, "2026-07-24")
+
+        assert result == set()
+        ak.stock_tfp_em.assert_not_called()
+
+    def test_guards_no_real_db_and_source_errors(self, tmp_path: Path):
+        """非真实 db / 两源均异常 → 静默降级不抛错。"""
+        import sys
+
+        from tasks.bars import _detect_suspended_symbols
+
+        # 非真实 db_path（MagicMock）→ 直接空集
+        assert _detect_suspended_symbols(MagicMock(), "2026-07-24") == set()
+
+        # 两个数据源都抛异常 → 空集，不抛错
+        db = self._make_db(tmp_path, {"002036": "2026-07-22"})
+        ak = MagicMock()
+        ak.stock_tfp_em.side_effect = RuntimeError("net")
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.side_effect = RuntimeError("net")
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _detect_suspended_symbols(db, "2026-07-24") == set()
+
+    def test_update_bars_skips_suspended_not_failed(self, tmp_path: Path):
+        """集成：停牌股记 skipped 而非 failed，无失败队列。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["002036.SZ", "000001.SZ"]})
+        # 两只都落后；002036 停牌，000001 正常更新成功
+        db.get_latest_bar_date.return_value = "2026-07-22"
+        db.get_daily_bars.return_value = _bars_df(["2026-07-22"])
+        loader.incremental_update.return_value = _bars_df(["2026-07-22", "2026-07-24"])
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        with patch("tasks.bars.ProgressTracker.FILE", tmp_path / "progress.json"), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._detect_suspended_symbols", return_value={"002036"}), \
+             patch("tasks.bars.get_expected_latest_trading_day", return_value="2026-07-24"), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            r = update_bars(db, loader)
+
+        assert r["failed"] == 0
+        assert r["skipped"] == 1
+        assert r["success"] == 1
+        assert r["failed_symbols"] == []
+        # 停牌股未发起任何数据拉取
+        assert all(
+            call.args[0] != "002036.SZ" for call in loader.incremental_update.call_args_list
+        )
