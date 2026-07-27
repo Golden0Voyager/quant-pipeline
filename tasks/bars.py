@@ -28,7 +28,7 @@ _HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
 if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
     sys.path.insert(0, _HUNTER_SRC)
 
-from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: F401
+from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import (
@@ -75,6 +75,65 @@ logger = logging.getLogger(__name__)
 # 区分「网络彻底不可用」与「个别掉队股源端缺数」（如停牌股），避免误熔断。
 CANARY_SYMBOL = "000001"
 MAX_CANARY_PROBES = 3  # 每次运行最多哨兵验证次数，超出后直接信任熔断判定
+
+# 停牌预检：落后股数量在该阈值内才逐只查雪球行情状态
+#（正常交易日开盘前全市场都“落后”，此时预检无意义且请求量大，直接跳过）
+_SUSPEND_PRECHECK_MAX = 50
+
+
+def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None) -> set[str]:
+    """运行前停牌预检：返回停牌股票的 6 位代码集合。
+
+    只检查「日线落后于最新交易日」的少量股票：
+    - 主源：雪球 batch/quote 的 status 字段（status==2 停牌；东财被封时仍可用）
+    - 辅源：东财停复牌名单 stock_tfp_em（覆盖雪球不支持的北交所）
+    任一源失败均静默降级，返回部分或空集合，不影响主流程。
+    """
+    if not _has_real_db_path(db) or not expected_latest:
+        return set()
+
+    # 1. 落后股集合（一次聚合查询，本地 SQL 无网络开销）
+    import sqlite3
+    try:
+        with sqlite3.connect(str(db.db_path), timeout=5.0) as conn:
+            rows = conn.execute(
+                "SELECT ts_code, MAX(trade_date) FROM daily_bars GROUP BY ts_code"
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.debug(f"停牌预检：落后股查询失败: {e}")
+        return set()
+    lagging = {
+        str(c)[:6]
+        for c, d in rows
+        if not d or (_normalize_trade_date(d) or "") < expected_latest
+    }
+    if not lagging or len(lagging) > _SUSPEND_PRECHECK_MAX:
+        return set()
+
+    suspended: set[str] = set()
+
+    # 2. 辅源：东财停复牌名单（一次请求，覆盖北交所）
+    if ak is not None:
+        try:
+            tfp = ak.stock_tfp_em(date=datetime.now().strftime("%Y%m%d"))
+            if tfp is not None and not tfp.empty and "代码" in tfp.columns:
+                tfp_codes = {str(c).split(".")[0].zfill(6) for c in tfp["代码"].tolist()}
+                suspended |= tfp_codes & lagging
+        except Exception as e:
+            logger.debug(f"停牌预检：东财停复牌名单获取失败: {e}")
+
+    # 3. 主源：雪球行情状态确认（不支持北交所）
+    remaining = [c for c in sorted(lagging - suspended) if not is_beijing_stock(c)]
+    if remaining:
+        try:
+            from smartmoney_hunter import xueqiu as xq
+            for quote in xq.get_batch_quotes(remaining):
+                if quote.get("status") == 2 and quote.get("code"):
+                    # 雪球 code 实测为裸 6 位码；取末 6 位防御带 SH/SZ 前缀的变体
+                    suspended.add(str(quote["code"])[-6:])
+        except Exception as e:
+            logger.debug(f"停牌预检：雪球状态查询失败: {e}")
+    return suspended
 
 
 def _canary_probe(loader: DataLoaderInterface) -> bool:
@@ -246,6 +305,17 @@ def update_bars(
     monitor = AkShareMonitor()
     expected_latest = get_expected_latest_trading_day()
 
+    # ── 停牌预检：停牌股直接跳过抓取，不计失败、不触发重试 ──
+    suspended_symbols: set[str] = set()
+    try:
+        suspended_symbols = _detect_suspended_symbols(db, _normalize_trade_date(expected_latest))
+        if suspended_symbols:
+            logger.info(
+                f"⏸️ 停牌预检：{len(suspended_symbols)} 只停牌股本次跳过抓取: {sorted(suspended_symbols)}"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ 停牌预检失败（不影响主流程）: {e}")
+
     # ── 熔断检查（带哨兵验证）──
     canary_probes_used = 0
 
@@ -307,6 +377,7 @@ def update_bars(
                         backfill_file=backfill_file,
                         db_lock=db_write_lock,
                         expected_latest_date=expected_latest,
+                        suspended_symbols=suspended_symbols,
                     ): symbol
                     for symbol in batch
                 }
@@ -378,6 +449,7 @@ def update_bars(
                     backfilled_symbols=backfilled_symbols,
                     backfill_file=backfill_file,
                     expected_latest_date=expected_latest,
+                    suspended_symbols=suspended_symbols,
                 )
                 if result == "success":
                     success_count += 1
@@ -505,6 +577,7 @@ def _update_single_bar(
     backfill_file: Path | None = None,
     db_lock: threading.Lock | None = None,
     expected_latest_date: str | None = None,
+    suspended_symbols: set[str] | None = None,
 ) -> str:
     """更新单只股票的日线数据，带重试。
 
@@ -590,6 +663,11 @@ def _update_single_bar(
             # 轻量查询：先检查 MAX(trade_date)，避免全表扫描（约 5500 次全表读 → 1 次聚合查询）
             latest_date = _normalize_trade_date(db.get_latest_bar_date(symbol))
             if latest_date and expected_latest and latest_date >= expected_latest:
+                return "skipped"
+            # 停牌预检命中：源端不会有新数据，直接跳过避免徒劳重试与失败计数
+            #（例外：上方自选股首次全量回填分支不受此限制——停牌股的历史 K 线依然可拉）
+            if suspended_symbols and symbol[:6] in suspended_symbols:
+                logger.info(f"  ⏸️ {symbol} 停牌中，跳过抓取")
                 return "skipped"
             # 非最新时才读取全量数据做增量更新
             if db_lock:
