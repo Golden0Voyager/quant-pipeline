@@ -467,4 +467,21 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
         results["index_futures_basis"] = f"error: {e}"
         logger.warning(f"⚠️ 基差数据失败: {e}")
 
-    return dict(results)
+    total_saved = sum(
+        (v if isinstance(v, (int, float)) else 0) for v in results.values()
+    )
+    has_error = any(
+        isinstance(v, str) and v.startswith("error:") for v in results.values()
+    )
+    if has_error:
+        results["status"] = "degraded"
+        results["error"] = "部分子任务失败，详见各子任务记录"
+    elif total_saved > 0:
+        results["status"] = "success"
+    else:
+        results["status"] = "no_data"
+        results["reason"] = "all sub-tasks returned empty"
+
+    results["saved"] = total_saved
+    results["total"] = total_saved
+    return results
