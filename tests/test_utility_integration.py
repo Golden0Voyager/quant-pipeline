@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.task_result import TaskStatus, normalize_task_result
 from tasks.utility import health_check, retry_failed
 
 # ===========================================================================
@@ -223,7 +224,7 @@ class TestHealthCheck:
 class TestRetryFailed:
     """Tests for the retry_failed function with mocked ProgressTracker."""
 
-    def test_no_progress_file(self):
+    def test_retry_failed_no_progress_file(self):
         """ProgressTracker.load() returns None → early return."""
         db = MagicMock()
         loader = MagicMock()
@@ -231,10 +232,14 @@ class TestRetryFailed:
             "tasks.utility.ProgressTracker.load", return_value=None
         ), patch("tasks.utility.ProgressTracker.clear") as mock_clear:
             result = retry_failed(db, loader)
-        assert result == {"success": 0, "failed": 0, "total": 0}
+        assert result["status"] == "no_data"
+        assert result["reason"] == "retry queue empty"
+        assert result["saved"] == 0
+        assert result["attempted"] == result["total"] == 0
+        assert normalize_task_result("retry_failed", result).status is TaskStatus.NO_DATA
         mock_clear.assert_called_once()
 
-    def test_empty_queue(self):
+    def test_retry_failed_empty_queue(self):
         """Failed_queue is empty list → early return."""
         db = MagicMock()
         loader = MagicMock()
@@ -243,10 +248,14 @@ class TestRetryFailed:
             return_value={"failed_queue": []},
         ), patch("tasks.utility.ProgressTracker.clear") as mock_clear:
             result = retry_failed(db, loader)
-        assert result == {"success": 0, "failed": 0, "total": 0}
+        assert result["status"] == "no_data"
+        assert result["reason"] == "retry queue empty"
+        assert result["saved"] == 0
+        assert result["attempted"] == result["total"] == 0
+        assert normalize_task_result("retry_failed", result).status is TaskStatus.NO_DATA
         mock_clear.assert_called_once()
 
-    def test_all_succeed(self):
+    def test_retry_failed_all_succeed(self):
         """All retried symbols succeed → ProgressTracker cleared."""
         db = MagicMock()
         loader = MagicMock()
@@ -259,11 +268,14 @@ class TestRetryFailed:
             "tasks.utility._update_single_bar", return_value="success"
         ):
             result = retry_failed(db, loader)
-        assert result == {"success": 3, "failed": 0, "total": 3}
+        assert result["status"] == "success"
+        assert result["saved"] == result["success"] == 3
+        assert result["attempted"] == result["total"] == 3
+        assert normalize_task_result("retry_failed", result).status is TaskStatus.SUCCESS
         mock_clear.assert_called_once()
         mock_save.assert_not_called()
 
-    def test_some_fail(self):
+    def test_retry_failed_some_fail(self):
         """Mixed results → ProgressTracker.save() with remaining failures."""
         db = MagicMock()
         loader = MagicMock()
@@ -282,6 +294,10 @@ class TestRetryFailed:
             "tasks.utility._update_single_bar", side_effect=fake_update
         ):
             result = retry_failed(db, loader)
-        assert result == {"success": 2, "failed": 2, "total": 4}
+        assert result["status"] == "degraded"
+        assert result["saved"] == result["success"] == 2
+        assert result["attempted"] == result["total"] == 4
+        assert result["error"] == "2 failures"
+        assert normalize_task_result("retry_failed", result).status is TaskStatus.DEGRADED
         mock_save.assert_called_once()
         mock_clear.assert_not_called()
