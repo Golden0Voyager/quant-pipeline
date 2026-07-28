@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -202,6 +202,136 @@ class TestBarsResume:
         assert result["saved"] == 1
         assert result["attempted"] == 1
         assert result["failed"] == 0
+
+    def test_retry_resume_with_no_eligible_failures_is_no_data(self, tmp_path: Path):
+        """retry 队列过滤为空是合法零工作量。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001.SZ"]})
+
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "retry",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000001.SZ",
+            "processed": 9,
+            "total": 9,
+            "failed_queue": ["999999.SZ"],
+        }))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars._update_single_bar") as update_one, \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        update_one.assert_not_called()
+        assert result["status"] == "no_data"
+        assert result["attempted"] == 0
+        assert result["reason"]
+
+    @pytest.mark.parametrize("progress_task", [None, "update_bars"])
+    def test_scan_resume_reports_unresolved_failures(
+        self,
+        tmp_path: Path,
+        progress_task: str | None,
+    ):
+        """扫描续传继承的失败队列仍属于本轮最终未解决失败。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({
+            "code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+        })
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        progress = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000001.SZ",
+            "processed": 1,
+            "total": 3,
+            "failed_queue": ["000001.SZ"],
+        }
+        if progress_task is not None:
+            progress["task"] = progress_task
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps(progress))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._update_single_bar", return_value="success") as update_one, \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        assert [call.args[2] for call in update_one.call_args_list] == [
+            "000002.SZ",
+            "000003.SZ",
+        ]
+        assert result["status"] == "degraded"
+        assert result["saved"] == 2
+        assert result["attempted"] == 2
+        assert result["failed"] == 1
+        assert result["failed_symbols"] == ["000001.SZ"]
+        assert normalize_task_result("update_bars", result).status is TaskStatus.DEGRADED
+
+    def test_unknown_progress_does_not_contaminate_current_run(self, tmp_path: Path):
+        """未知任务的 processed/failed_queue 不得进入本轮结果。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({
+            "code": ["000001.SZ", "000002.SZ"],
+        })
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "other_task",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000002.SZ",
+            "processed": 41,
+            "total": 41,
+            "failed_queue": ["999999.SZ"],
+        }))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._update_single_bar", return_value="success"), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        assert result["status"] == "success"
+        assert result["attempted"] == 2
+        assert result["failed"] == 0
+        assert result["failed_symbols"] == []
+
+    def test_expired_progress_does_not_contaminate_current_run(self, tmp_path: Path):
+        """过期进度清理后不得继承 processed/failed_queue。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001.SZ"]})
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "update_bars",
+            "date": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "last_symbol": "000001.SZ",
+            "processed": 17,
+            "total": 17,
+            "failed_queue": ["999999.SZ"],
+        }))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._update_single_bar", return_value="success"), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        assert result["status"] == "success"
+        assert result["attempted"] == 1
+        assert result["failed"] == 0
+        assert result["failed_symbols"] == []
 
     def test_resume_from_checkpoint(self, tmp_path: Path):
         """从断点继续，跳过已处理的股票。"""
@@ -450,6 +580,8 @@ class TestBarsBoundary:
             )
 
         assert r["total"] == 0
+        assert r["status"] == "no_data"
+        assert r["reason"]
 
     def test_empty_stock_list_logs_error_and_returns(self):
         """股票列表为空 → 立即返回。"""
@@ -461,6 +593,8 @@ class TestBarsBoundary:
             r = update_bars(db, loader)
 
         assert r["total"] == 0
+        assert r["status"] == "no_data"
+        assert r["reason"]
 
     def test_final_failed_symbols_saved_to_progress(self, tmp_path: Path):
         """部分失败时记录失败队列到 progress.json。"""
@@ -593,6 +727,12 @@ class TestCanaryCircuitBreaker:
 
         # 第 3 只失败后熔断，第 4 只未处理
         assert r["failed"] == 3
+        assert r["status"] == "aborted"
+        normalised = normalize_task_result("update_bars", r)
+        assert normalised.status is TaskStatus.ABORTED
+        assert normalised.saved == r["saved"]
+        assert normalised.attempted == r["attempted"]
+        assert normalised.error == r["error"]
 
     def test_canary_rejects_pure_yfinance_data(self, tmp_path: Path):
         """哨兵返回纯 yfinance 数据 → 视为 AkShare 不可用，照常熔断。"""
