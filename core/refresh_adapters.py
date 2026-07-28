@@ -26,6 +26,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from core.refresh import RefreshAdapter, RefreshAdapterResult, RefreshContext
 from core.refresh_store import (
@@ -37,14 +38,21 @@ from core.refresh_store import (
 from core.utils import should_skip_beijing
 from interface import DatabaseInterface, DataLoaderInterface, IndicatorEngineInterface
 from tasks.bars import fetch_bars_for_refresh, normalize_bar_row_for_refresh
+from tasks.convertible_bond import fetch_cb_index_records
 from tasks.core_chain import (
     _CHIP_VALUE_COLUMNS,
     _INDICATOR_VALUE_COLUMNS,
     compute_chip_record_for_refresh,
     compute_indicator_record_for_refresh,
 )
-from tasks.index_chain import fetch_chip_em_record_for_refresh
-from tasks.market_flow import _FUND_FLOW_NUMERIC_FIELDS, fetch_fund_flow_records
+from tasks.finance_flow import fetch_south_flow_records
+from tasks.index_chain import fetch_chip_em_record_for_refresh, fetch_index_daily_records
+from tasks.market_flow import (
+    _FUND_FLOW_NUMERIC_FIELDS,
+    fetch_fund_flow_records,
+    fetch_margin_trading_records,
+)
+from tasks.market_valuation import fetch_market_valuation_records
 from tasks.valuation_chain import (
     compute_sector_industry_rows_for_refresh,
     fetch_fundamentals_snapshot,
@@ -861,3 +869,464 @@ def build_derived_refresh_adapters(
             store=store, db_path=db_path
         ),
     }
+
+
+# ===========================================================================
+# 回看接受型公共 helper（Task 9）
+# ===========================================================================
+
+
+def _lookback_candidates(target_date: str, lookback_days: int) -> list[str]:
+    """目标日起逐日回退的候选日期序列（含目标日，新→旧）。"""
+    anchor = date.fromisoformat(target_date)
+    return [
+        (anchor - timedelta(days=offset)).isoformat()
+        for offset in range(lookback_days + 1)
+    ]
+
+
+def _lookback_partition(
+    records: list[dict],
+    target_date: str,
+    lookback_days: int,
+    date_field: str = "trade_date",
+) -> tuple[str, list[dict]]:
+    """从全历史记录中挑回看窗口内最新的日期分区；窗口内无数据 → 上抛。"""
+    window = set(_lookback_candidates(target_date, lookback_days))
+    seen_dates = {str(record.get(date_field, ""))[:10] for record in records}
+    acceptable = sorted(seen_dates & window)
+    if not acceptable:
+        raise RefreshValidationError(
+            f"no partition within {lookback_days}-day lookback of {target_date}"
+        )
+    as_of = acceptable[-1]
+    partition = [
+        record for record in records
+        if str(record.get(date_field, ""))[:10] == as_of
+    ]
+    return as_of, partition
+
+
+# ===========================================================================
+# update_margin_trading（回看接受，逐日探测）
+# ===========================================================================
+
+_MARGIN_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "margin_balance",
+    "margin_buy",
+    "margin_repay",
+    "short_balance",
+    "short_sell",
+    "short_repay",
+    "total_balance",
+    "data_source",
+)
+
+
+@dataclass
+class MarginTradingRefreshAdapter:
+    """融资融券：目标日起逐日探测，接受回看窗口内首个非空日分区。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_margin_trading_records)
+    lookback_days: int = 3
+
+    task_name = "update_margin_trading"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        as_of: str | None = None
+        records: list[dict] = []
+        for candidate in _lookback_candidates(target, self.lookback_days):
+            fetched = self.fetch_records(candidate)
+            if fetched:
+                as_of = candidate
+                records = fetched
+                break
+        if as_of is None:
+            raise RefreshValidationError(
+                f"margin trading has no data within {self.lookback_days}-day"
+                f" lookback of {target}"
+            )
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in records:
+            code = str(record.get("ts_code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            row = {column: record.get(column) for column in _MARGIN_COLUMNS}
+            row["ts_code"] = code
+            row["trade_date"] = as_of
+            rows.append(row)
+
+        if context.symbols is not None:
+            requested = set(context.symbols)
+            rows = [row for row in rows if row["ts_code"] in requested]
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="margin_trading",
+                    columns=_MARGIN_COLUMNS,
+                    rows=_as_store_rows(rows, _MARGIN_COLUMNS),
+                    natural_keys=("trade_date", "ts_code"),
+                )
+            )
+        else:
+            self.store.replace_date_snapshot(
+                DateSnapshotReplacement(
+                    table="margin_trading",
+                    columns=_MARGIN_COLUMNS,
+                    rows=_as_store_rows(rows, _MARGIN_COLUMNS),
+                    date_column="trade_date",
+                    date_value=as_of,
+                    natural_keys=("trade_date", "ts_code"),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=tuple(row["ts_code"] for row in rows),
+            metadata={},
+        )
+
+
+# ===========================================================================
+# update_south_flow（回看接受，历史型源）
+# ===========================================================================
+
+_SOUTH_FLOW_COLUMNS = (
+    "trade_date",
+    "market",
+    "net_buy_amount",
+    "buy_amount",
+    "sell_amount",
+    "cumulative_net_buy",
+    "data_source",
+)
+
+
+@dataclass
+class SouthFlowRefreshAdapter:
+    """南向资金：历史型源只提交回看窗口内最新分区，历史行绝不重写。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[], list[dict]] = field(default=fetch_south_flow_records)
+    lookback_days: int = 3
+
+    task_name = "update_south_flow"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+
+        records = self.fetch_records()
+        as_of, partition = _lookback_partition(
+            records, context.target_date, self.lookback_days
+        )
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in partition:
+            market = str(record.get("market", "")).strip()
+            if not market or market in seen:
+                continue
+            seen.add(market)
+            row = {column: record.get(column) for column in _SOUTH_FLOW_COLUMNS}
+            row["trade_date"] = as_of
+            rows.append(row)
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="south_flow",
+                columns=_SOUTH_FLOW_COLUMNS,
+                rows=_as_store_rows(rows, _SOUTH_FLOW_COLUMNS),
+                date_column="trade_date",
+                date_value=as_of,
+                natural_keys=("trade_date", "market"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={},
+        )
+
+
+# ===========================================================================
+# update_index_daily（回看接受，要求完整指数分区）
+# ===========================================================================
+
+_INDEX_DAILY_COLUMNS = (
+    "index_code",
+    "index_name",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "data_source",
+)
+
+
+@dataclass
+class IndexDailyRefreshAdapter:
+    """四大指数日线：只接受包含全部指数的完整日期分区（防指数滞后）。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[], list[dict]] = field(default=fetch_index_daily_records)
+    lookback_days: int = 3
+
+    task_name = "update_index_daily"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records()
+        expected = {
+            str(record.get("index_code", "")).strip()
+            for record in records
+            if str(record.get("index_code", "")).strip()
+        }
+        if not expected:
+            raise RefreshValidationError("index daily source returned no index codes")
+
+        codes_by_date: dict[str, set[str]] = {}
+        for record in records:
+            trade_date = str(record.get("trade_date", ""))[:10]
+            code = str(record.get("index_code", "")).strip()
+            if trade_date and code:
+                codes_by_date.setdefault(trade_date, set()).add(code)
+
+        as_of: str | None = None
+        for candidate in _lookback_candidates(target, self.lookback_days):
+            if codes_by_date.get(candidate, set()) >= expected:
+                as_of = candidate
+                break
+        if as_of is None:
+            raise RefreshValidationError(
+                f"no complete index partition within {self.lookback_days}-day"
+                f" lookback of {target}"
+            )
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in records:
+            if str(record.get("trade_date", ""))[:10] != as_of:
+                continue
+            code = str(record.get("index_code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            row = {column: record.get(column) for column in _INDEX_DAILY_COLUMNS}
+            row["trade_date"] = as_of
+            rows.append(row)
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="index_daily",
+                columns=_INDEX_DAILY_COLUMNS,
+                rows=_as_store_rows(rows, _INDEX_DAILY_COLUMNS),
+                date_column="trade_date",
+                date_value=as_of,
+                natural_keys=("trade_date", "index_code"),
+                required_fields=("close",),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"indices": len(rows)},
+        )
+
+
+# ===========================================================================
+# update_market_valuation（回看接受，三源全历史合并）
+# ===========================================================================
+
+_MARKET_VALUATION_COLUMNS = (
+    "date",
+    "pe_median",
+    "pe_quantile",
+    "pe_lyr_median",
+    "pb_median",
+    "pb_quantile",
+    "equity_bond_spread",
+    "ebs_ma",
+    "csi300_close",
+    "data_source",
+    "data_date",
+)
+
+
+@dataclass
+class MarketValuationRefreshAdapter:
+    """大盘估值：全历史合并源只发布回看窗口内最新一行，历史行不落库。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_market_valuation_records)
+    lookback_days: int = 3
+
+    task_name = "update_market_valuation"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+        as_of, partition = _lookback_partition(
+            records, target, self.lookback_days, date_field="date"
+        )
+
+        # 三源 setdefault 合并可能缺列，统一用 .get 归一化再转位置元组
+        rows = [
+            {column: record.get(column) for column in _MARKET_VALUATION_COLUMNS}
+            for record in partition[:1]
+        ]
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="market_valuation",
+                columns=_MARKET_VALUATION_COLUMNS,
+                rows=_as_store_rows(rows, _MARKET_VALUATION_COLUMNS),
+                date_column="date",
+                date_value=as_of,
+                natural_keys=("date",),
+                required_fields=("date", "data_source"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={},
+        )
+
+
+# ===========================================================================
+# update_cb_index（回看接受，历史型源）
+# ===========================================================================
+
+_CB_INDEX_COLUMNS = (
+    "trade_date",
+    "index_code",
+    "index_name",
+    "open",
+    "close",
+    "high",
+    "low",
+    "volume",
+    "data_source",
+)
+
+
+@dataclass
+class CbIndexRefreshAdapter:
+    """可转债等权指数：全历史源只提交回看窗口内最新分区。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[], list[dict]] = field(default=fetch_cb_index_records)
+    lookback_days: int = 3
+
+    task_name = "update_cb_index"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+
+        records = self.fetch_records()
+        as_of, partition = _lookback_partition(
+            records, context.target_date, self.lookback_days
+        )
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in partition:
+            code = str(record.get("index_code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            row = {column: record.get(column) for column in _CB_INDEX_COLUMNS}
+            row["trade_date"] = as_of
+            rows.append(row)
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="cb_index",
+                columns=_CB_INDEX_COLUMNS,
+                rows=_as_store_rows(rows, _CB_INDEX_COLUMNS),
+                date_column="trade_date",
+                date_value=as_of,
+                natural_keys=("trade_date", "index_code"),
+                required_fields=("close",),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={},
+        )
+
+
+# ===========================================================================
+# 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
+# ===========================================================================
+
+REFRESH_ADAPTERS: dict[str, type] = {
+    "update_bars": BarsRefreshAdapter,
+    "update_fundamentals": FundamentalsRefreshAdapter,
+    "update_market_snapshot": MarketSnapshotRefreshAdapter,
+    "update_fund_flow": FundFlowRefreshAdapter,
+    "update_indicators": IndicatorsRefreshAdapter,
+    "update_chip_distribution": LocalChipRefreshAdapter,
+    "update_chip_distribution_em": EastmoneyChipRefreshAdapter,
+    "update_historical_valuation": HistoricalValuationRefreshAdapter,
+    "update_sector_industry": SectorIndustryRefreshAdapter,
+    "update_margin_trading": MarginTradingRefreshAdapter,
+    "update_south_flow": SouthFlowRefreshAdapter,
+    "update_index_daily": IndexDailyRefreshAdapter,
+    "update_market_valuation": MarketValuationRefreshAdapter,
+    "update_cb_index": CbIndexRefreshAdapter,
+}
