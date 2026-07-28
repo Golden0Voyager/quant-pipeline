@@ -590,6 +590,54 @@ def test_composite_rejects_duplicate_run_snapshot_table(
     assert _rows(db_path, "SELECT * FROM current_snapshot ORDER BY code") == before
 
 
+@pytest.mark.parametrize("replacement_kind", ["date", "run"])
+def test_composite_rejects_case_insensitive_duplicate_table_names(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+    replacement_kind: str,
+) -> None:
+    if replacement_kind == "date":
+        first: DateSnapshotReplacement | RunSnapshotReplacement = (
+            DateSnapshotReplacement(
+                table="quotes",
+                columns=("ts_code", "trade_date", "close", "source"),
+                rows=(("000001.SZ", "2026-07-27", 10.8, "close"),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("ts_code", "trade_date"),
+            )
+        )
+        second: DateSnapshotReplacement | RunSnapshotReplacement = (
+            DateSnapshotReplacement(
+                table="QUOTES",
+                columns=("ts_code", "trade_date", "close", "source"),
+                rows=(("600000.SH", "2026-07-27", 20.8, "close"),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("ts_code", "trade_date"),
+            )
+        )
+    else:
+        first = RunSnapshotReplacement(
+            table="quotes",
+            columns=("ts_code", "trade_date", "close", "source"),
+            rows=(("000001.SZ", "2026-07-27", 10.8, "close"),),
+            natural_keys=("ts_code", "trade_date"),
+        )
+        second = RunSnapshotReplacement(
+            table="QUOTES",
+            columns=("ts_code", "trade_date", "close", "source"),
+            rows=(("600000.SH", "2026-07-27", 20.8, "close"),),
+            natural_keys=("ts_code", "trade_date"),
+        )
+    before = _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code")
+
+    with pytest.raises(RefreshValidationError, match="duplicate table"):
+        store.replace_composite(CompositeReplacement(replacements=(first, second)))
+
+    assert _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code") == before
+
+
 def test_composite_allows_distinct_tables(
     store: SQLiteRefreshStore,
     db_path: Path,
