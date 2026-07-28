@@ -2257,6 +2257,50 @@ class StockRepurchaseRefreshAdapter:
 
 
 # ===========================================================================
+# update_north_flow（死源：降级保留旧数据，绝无替换）
+# ===========================================================================
+
+_NORTH_FLOW_DEAD_REASON = (
+    "北向逐日资金流源已于 2024-08-16 起停更，保留历史数据不再刷新"
+)
+
+
+@dataclass
+class NorthFlowRefreshAdapter:
+    """北向资金：死源。不抓取、零替换，只盘点并保留既有历史行。"""
+
+    store: SQLiteRefreshStore
+    db_path: str
+
+    task_name = "update_north_flow"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        retained = self._existing_row_count()
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=None,
+            fetched=0,
+            validated=0,
+            replaced=0,
+            retained=retained,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={
+                "source_status": "dead_source",
+                "reason": _NORTH_FLOW_DEAD_REASON,
+            },
+        )
+
+    def _existing_row_count(self) -> int:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM north_flow").fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+
+
+# ===========================================================================
 # 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
 # ===========================================================================
 
@@ -2288,4 +2332,5 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_cb_quotation": CbQuotationRefreshAdapter,
     "update_cb_redeem": CbRedeemRefreshAdapter,
     "update_stock_repurchase": StockRepurchaseRefreshAdapter,
+    "update_north_flow": NorthFlowRefreshAdapter,
 }
