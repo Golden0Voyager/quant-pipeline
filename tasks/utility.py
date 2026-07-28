@@ -56,7 +56,15 @@ def retry_failed(
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
         ProgressTracker.clear()
-        return {"success": 0, "failed": 0, "total": 0}
+        return {
+            "status": "no_data",
+            "reason": "retry queue empty",
+            "saved": 0,
+            "attempted": 0,
+            "success": 0,
+            "failed": 0,
+            "total": 0,
+        }
 
     logger.info("\n" + "=" * 60)
     logger.info(f"🔄 任务: 重试失败队列 ({len(symbols)} 只)")
@@ -85,7 +93,17 @@ def retry_failed(
         ProgressTracker.clear()
         logger.info(f"✅ 重试完成: {success}/{len(symbols)} 只成功")
 
-    return {"success": success, "failed": len(still_failed), "total": len(symbols)}
+    result = {
+        "status": "degraded" if still_failed else "success",
+        "saved": success,
+        "attempted": len(symbols),
+        "success": success,
+        "failed": len(still_failed),
+        "total": len(symbols),
+    }
+    if still_failed:
+        result["error"] = f"{len(still_failed)} failures"
+    return result
 
 
 def health_check(db: DatabaseInterface) -> dict:
