@@ -251,6 +251,17 @@ def update_chip_distribution_em(
     consecutive_failures = 0
     total_retry_delay = 0.0
 
+    def _abort_payload(processed: int) -> dict:
+        return {
+            "success": success_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "total": total,
+            "processed": processed,
+            "aborted": True,
+            "abort_reason": "consecutive_failures",
+        }
+
     for i, symbol in enumerate(symbols, 1):
         # ── 熔断：连续失败超过阈值，冷却一段时间 ──
         if consecutive_failures >= 5 and consecutive_failures % 5 == 0:
@@ -274,19 +285,8 @@ def update_chip_distribution_em(
                     consecutive_failures,
                     total - i,
                 )
-                return {
-                    "success": success_count,
-                    "failed": failed_count,
-                    "skipped": skipped_count,
-                    "total": total,
-                    "processed": i,
-                    "aborted": True,
-                    "abort_reason": "consecutive_failures",
-                }
+                return _abort_payload(i)
             continue
-
-        # 成功一次就重置熔断计数器
-        consecutive_failures = 0
 
         records = []
         rejected_rows = 0
@@ -321,6 +321,14 @@ def update_chip_distribution_em(
                 f"  {symbol} 筹码数据全部无效 (拒绝 {rejected_rows} 行全零/NaN)，不入库"
             )
             failed_count += 1
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                logger.error(
+                    "  🛑 连续 %d 次数据全废，触发硬熔断，跳过剩余 %d 只",
+                    consecutive_failures,
+                    total - i,
+                )
+                return _abort_payload(i)
             continue
 
         if rejected_rows:
@@ -329,9 +337,21 @@ def update_chip_distribution_em(
         try:
             db.save_chip_distribution_em_batch(records)
             success_count += 1
+            # 只有真正入库才重置熔断计数器：抓取成功但数据全废 / 写库失败
+            # 同样意味着这一只没有产出，清零会让熔断永远不触发
+            #（2026-07 全零事故中即因此走完全市场也没能提前中止）
+            consecutive_failures = 0
         except Exception as e:
             logger.warning(f"  {symbol} 保存失败: {e}")
             failed_count += 1
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                logger.error(
+                    "  🛑 连续 %d 次保存失败，触发硬熔断，跳过剩余 %d 只",
+                    consecutive_failures,
+                    total - i,
+                )
+                return _abort_payload(i)
 
         if i % 50 == 0 or i == total:
             logger.info(f"  进度: {i}/{total}  |  成功 {success_count}  失败 {failed_count}  跳过 {skipped_count}")
