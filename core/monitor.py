@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from datetime import datetime
 from typing import Any
 
@@ -24,11 +25,16 @@ class AkShareMonitor:
 
     FLUSH_INTERVAL = 50  # 每 N 条记录写一次磁盘
 
+    ABORT_WINDOW = 20  # 本轮中止判定的滑动窗口大小
+
     def __init__(self):
         self.records = self._load()
         self.current_run_attempts = 0
         self.current_run_successes = 0
         self.current_run_consecutive_failures = 0
+        # 本轮最近 N 次结果：中止判定用滑动窗口而非整轮累计，
+        # 否则前期大量成功会让后期的全面故障永远压不破阈值
+        self.current_run_recent: deque[bool] = deque(maxlen=self.ABORT_WINDOW)
         self._dirty_since_last_save = 0  # 自上次写入以来新增的记录数
 
     def _load(self) -> list[dict[str, Any]]:
@@ -56,6 +62,7 @@ class AkShareMonitor:
             self.current_run_consecutive_failures = 0
         else:
             self.current_run_consecutive_failures += 1
+        self.current_run_recent.append(success)
 
         self.records.append({
             "timestamp": datetime.now().isoformat(),
@@ -108,12 +115,13 @@ class AkShareMonitor:
         # 成功率规则只看本次运行的请求：持久化的 records 跨运行/跨天，
         # 用历史失败记录判定当前中止会在 skip 为主的运行中误杀
         #（历史成功率仍用于 get_recommended_sleep_multiplier 的限流节奏）
-        if self.current_run_attempts >= 20:
-            rate = self.current_run_successes / self.current_run_attempts
+        # 且只看本轮最近 ABORT_WINDOW 次，避免前期成功摊薄后期故障
+        if len(self.current_run_recent) >= self.ABORT_WINDOW:
+            rate = sum(self.current_run_recent) / len(self.current_run_recent)
             if rate < 0.2:
                 return (
                     True,
-                    f"AkShare 本次运行 {self.current_run_attempts} 次请求成功率仅 {rate * 100:.0f}%，"
+                    f"AkShare 本次运行最近 {len(self.current_run_recent)} 次请求成功率仅 {rate * 100:.0f}%，"
                     "建议推迟到晚上 20:00+ 再跑",
                 )
         return False, ""
