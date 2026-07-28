@@ -278,6 +278,32 @@ class TestRetryFailed:
         mock_clear.assert_called_once()
         mock_save.assert_not_called()
 
+    def test_retry_failed_skipped_symbols_are_resolved_without_counting_as_saved(self):
+        """Skipped symbols leave the retry queue but do not count as saved."""
+        with patch(
+            "tasks.utility.ProgressTracker.load",
+            return_value={
+                "task": "retry",
+                "failed_queue": ["000001.SZ", "000002.SZ"],
+            },
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar",
+            side_effect=["success", "skipped"],
+        ):
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert result["status"] == "success"
+        assert result["saved"] == result["success"] == 1
+        assert result["failed"] == 0
+        assert result["attempted"] == result["total"] == 2
+        assert normalize_task_result("retry_failed", result).status is TaskStatus.SUCCESS
+        mock_clear.assert_called_once()
+        mock_save.assert_not_called()
+
     def test_retry_failed_some_fail(self):
         """Mixed results → ProgressTracker.save() with remaining failures."""
         db = MagicMock()
