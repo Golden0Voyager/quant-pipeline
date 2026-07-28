@@ -22,7 +22,9 @@ from core.refresh import RefreshContext
 from core.refresh_adapters import (
     REFRESH_ADAPTERS,
     BarsRefreshAdapter,
+    BlockTradeRefreshAdapter,
     CbIndexRefreshAdapter,
+    DragonTigerRefreshAdapter,
     EastmoneyChipRefreshAdapter,
     EtfDailyRefreshAdapter,
     FundamentalsRefreshAdapter,
@@ -2076,3 +2078,133 @@ class TestOptionSentimentRefreshAdapter:
             adapter.refresh(_context())
 
         assert _query(market_db_path, "SELECT COUNT(*) FROM option_sentiment") == [(1,)]
+
+
+# ===========================================================================
+# 组4：事件型（dragon_tiger / block_trade）—— 键控 UPSERT，绝无删除
+# ===========================================================================
+
+
+def _dragon_record(code: str, reason: str = "日涨幅偏离值", net: float = 5e7) -> dict:
+    return {
+        "ts_code": code,
+        "trade_date": TARGET,
+        "close_price": 11.0,
+        "pct_change": 10.0,
+        "net_buy_amount": net,
+        "buy_amount": 8e7,
+        "sell_amount": 3e7,
+        "turnover_rate": 6.0,
+        "market_cap": 5e9,
+        "reason": reason,
+        "data_source": "akshare",
+        "source_record_key": f"dt-{code}-{TARGET}-{reason}",
+    }
+
+
+def _block_record(code: str, price: float = 9.8, volume: float = 1e5) -> dict:
+    return {
+        "ts_code": code,
+        "trade_date": TARGET,
+        "deal_price": price,
+        "close_price": 10.0,
+        "discount_rate": -2.0,
+        "volume": volume,
+        "amount": price * volume,
+        "buyer_branch": "买方营业部",
+        "seller_branch": "卖方营业部",
+        "data_source": "akshare",
+        "source_record_key": f"bt-{code}-{TARGET}-{price}-{volume}",
+    }
+
+
+class TestDragonTigerRefreshAdapter:
+    def test_upserts_events_and_same_day_rows_survive(self, market_db_path, store):
+        """键控 UPSERT 无目标日删除：同日已有不同键的合法事件必须存活。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO dragon_tiger (source_record_key, ts_code, trade_date, reason, data_source)"
+            " VALUES ('dt-000001-old-reason', '000001', ?, '旧原因', 'akshare')",
+            (TARGET,),
+        )
+        fetch = FakeFetcher([
+            _dragon_record("000001", reason="日涨幅偏离值"),
+            _dragon_record("000001", reason="连续三日涨幅偏离"),
+        ])
+        adapter = DragonTigerRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.as_of_date == TARGET
+        assert result.replaced == 2
+        assert _query(market_db_path, "SELECT COUNT(*) FROM dragon_tiger") == [(3,)]
+
+    def test_authoritative_empty_board_is_success_without_deletion(
+        self, market_db_path, store
+    ):
+        """权威空榜 ≠ 源失败：成功返回且绝不动既有事件行。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO dragon_tiger (source_record_key, ts_code, trade_date, reason, data_source)"
+            " VALUES ('dt-000001-old-reason', '000001', ?, '旧原因', 'akshare')",
+            (TARGET,),
+        )
+        adapter = DragonTigerRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        result = adapter.refresh(_context())
+
+        assert (result.fetched, result.replaced) == (0, 0)
+        assert result.as_of_date == TARGET
+        assert result.failed_symbols == ()
+        assert _query(market_db_path, "SELECT COUNT(*) FROM dragon_tiger") == [(1,)]
+
+    def test_symbol_scope_filters_events(self, market_db_path, store):
+        fetch = FakeFetcher([
+            _dragon_record("000001"),
+            _dragon_record("000002"),
+        ])
+        adapter = DragonTigerRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context(symbols=("000002",)))
+
+        assert result.replaced == 1
+        assert _query(
+            market_db_path, "SELECT ts_code FROM dragon_tiger"
+        ) == [("000002",)]
+
+
+class TestBlockTradeRefreshAdapter:
+    def test_same_day_duplicate_trades_survive(self, market_db_path, store):
+        """同股同日不同价/量的合法多笔交易均入库，已有行保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO block_trade (source_record_key, ts_code, trade_date, deal_price, data_source)"
+            " VALUES ('bt-000001-old', '000001', ?, 9.5, 'akshare')",
+            (TARGET,),
+        )
+        fetch = FakeFetcher([
+            _block_record("000001", price=9.8, volume=1e5),
+            _block_record("000001", price=9.9, volume=2e5),
+        ])
+        adapter = BlockTradeRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 2
+        assert _query(market_db_path, "SELECT COUNT(*) FROM block_trade") == [(3,)]
+
+    def test_authoritative_empty_is_success_without_deletion(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO block_trade (source_record_key, ts_code, trade_date, deal_price, data_source)"
+            " VALUES ('bt-000001-old', '000001', ?, 9.5, 'akshare')",
+            (TARGET,),
+        )
+        adapter = BlockTradeRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        result = adapter.refresh(_context())
+
+        assert (result.fetched, result.replaced) == (0, 0)
+        assert result.as_of_date == TARGET
+        assert _query(market_db_path, "SELECT COUNT(*) FROM block_trade") == [(1,)]
