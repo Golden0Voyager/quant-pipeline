@@ -628,7 +628,6 @@ class SmartMoneyDBProvider:
                        OR stock_code IS NULL OR TRIM(stock_code) = ''
                 """)
                 conn.commit()
-            self._run_versioned_migrations()
         except Exception as e:
             logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
 
