@@ -684,3 +684,110 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
     except Exception as e:
         logger.error(f"❌ 行业对比数据生成失败: {e}")
         return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 收盘刷新 helpers（Task 7）：派生任务只读目标日分区，不写库
+# ===========================================================================
+
+
+def fetch_historical_valuation_rows_for_refresh(
+    db_path: str, target_date: str
+) -> list[dict]:
+    """收盘刷新专用：读取 fundamentals 目标日分区为历史估值快照行。
+
+    每行恰好 6 键（ts_code/trade_date/pe_ttm/pb/ps_ttm/dividend_yield），
+    按 ts_code 去重；分区为空返回 []（由适配器决定保留旧快照）。
+    """
+    import sqlite3  # 局部导入：保持本文件其余部分零改动（append-only）
+
+    conn = sqlite3.connect(db_path)
+    try:
+        fetched = conn.execute(
+            "SELECT ts_code, pe_ttm, pb, ps_ttm, dividend_yield"
+            " FROM fundamentals WHERE trade_date = ?",
+            (target_date,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for code, pe_ttm, pb, ps_ttm, dividend_yield in fetched:
+        code = str(code).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        rows.append({
+            "ts_code": code,
+            "trade_date": target_date,
+            "pe_ttm": pe_ttm,
+            "pb": pb,
+            "ps_ttm": ps_ttm,
+            "dividend_yield": dividend_yield,
+        })
+    return rows
+
+
+def compute_sector_industry_rows_for_refresh(
+    db_path: str, target_date: str
+) -> list[dict]:
+    """收盘刷新专用：由目标日 fundamentals + stock_list 聚合行业对比行。
+
+    只聚合目标日分区；无行业归属的股票计入“未知行业”。刷新模式
+    不做 sector_fund_flow 模糊映射：fund_inflow_rank 置空，
+    data_source 固定为 "derived"；分区为空返回 []。
+    """
+    import sqlite3  # 局部导入：保持本文件其余部分零改动（append-only）
+
+    conn = sqlite3.connect(db_path)
+    try:
+        fund = pd.read_sql_query(
+            "SELECT ts_code, pe_ttm, pb, ps_ttm, roe, revenue_growth,"
+            " profit_growth, market_cap FROM fundamentals WHERE trade_date = ?",
+            conn,
+            params=(target_date,),
+        )
+        stock = pd.read_sql_query("SELECT code, industry FROM stock_list", conn)
+    finally:
+        conn.close()
+
+    if fund.empty:
+        return []
+
+    merged = fund.merge(stock, left_on="ts_code", right_on="code", how="left")
+    merged["industry"] = merged["industry"].fillna("未知行业")
+    merged.loc[
+        merged["industry"].astype(str).str.strip() == "", "industry"
+    ] = "未知行业"
+
+    grouped = merged.groupby("industry").agg(
+        avg_pe=("pe_ttm", "mean"),
+        avg_pb=("pb", "mean"),
+        avg_ps=("ps_ttm", "mean"),
+        avg_roe=("roe", "mean"),
+        avg_revenue_growth=("revenue_growth", "mean"),
+        avg_profit_growth=("profit_growth", "mean"),
+        total_market_cap=("market_cap", "sum"),
+    ).reset_index()
+
+    def _scalar_or_none(value: object) -> float | None:
+        """NaN / None → None（SQLite 不接受 NaN）。"""
+        return None if value is None or value != value else float(value)
+
+    rows: list[dict] = []
+    for _, row in grouped.iterrows():
+        rows.append({
+            "industry_name": str(row["industry"]),
+            "trade_date": target_date,
+            "avg_pe": _scalar_or_none(row["avg_pe"]),
+            "avg_pb": _scalar_or_none(row["avg_pb"]),
+            "avg_ps": _scalar_or_none(row["avg_ps"]),
+            "avg_roe": _scalar_or_none(row["avg_roe"]),
+            "avg_revenue_growth": _scalar_or_none(row["avg_revenue_growth"]),
+            "avg_profit_growth": _scalar_or_none(row["avg_profit_growth"]),
+            "total_market_cap": _scalar_or_none(row["total_market_cap"]),
+            "fund_inflow_rank": None,
+            "data_source": "derived",
+        })
+    return rows
