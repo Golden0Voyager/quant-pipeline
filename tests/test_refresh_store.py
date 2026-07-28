@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -11,6 +12,7 @@ from core.refresh_store import (
     CompositeReplacement,
     DateSnapshotReplacement,
     KeyedUpsertReplacement,
+    RefreshStateError,
     RefreshValidationError,
     RunSnapshotReplacement,
     SQLiteRefreshStore,
@@ -215,6 +217,76 @@ def test_record_task_result_persists_counts_and_stable_metadata_json(
     ]
 
 
+def test_record_task_result_accepts_read_only_mapping_metadata(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    metadata = MappingProxyType({"z": 2, "a": {"nested": True}})
+
+    store.record_task_result(
+        run_id="refresh-1",
+        task_name="update_bars",
+        policy_kind="remote_date_snapshot",
+        requested_date="2026-07-27",
+        as_of_date="2026-07-27",
+        status="success",
+        fetched=1,
+        validated=1,
+        replaced=1,
+        retained=0,
+        failed=0,
+        metadata=metadata,
+    )
+
+    assert _rows(db_path, "SELECT metadata_json FROM refresh_task_runs") == [
+        ('{"a":{"nested":true},"z":2}',)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_error"),
+    [
+        pytest.param(float("nan"), ValueError, id="nan"),
+        pytest.param(float("inf"), ValueError, id="infinity"),
+        pytest.param(object(), TypeError, id="unsupported-nested-value"),
+    ],
+)
+def test_record_task_result_rejects_non_json_metadata_without_writing(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+    value: object,
+    expected_error: type[Exception],
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+
+    with pytest.raises(expected_error):
+        store.record_task_result(
+            run_id="refresh-1",
+            task_name="update_bars",
+            policy_kind="remote_date_snapshot",
+            requested_date="2026-07-27",
+            as_of_date="2026-07-27",
+            status="failed",
+            fetched=0,
+            validated=0,
+            replaced=0,
+            retained=1,
+            failed=1,
+            metadata={"details": {"value": value}},
+        )
+
+    assert _rows(db_path, "SELECT COUNT(*) FROM refresh_task_runs") == [(0,)]
+
+
 def test_finish_run_updates_only_parent_completion_state(
     store: SQLiteRefreshStore,
     db_path: Path,
@@ -253,6 +325,176 @@ def test_finish_run_updates_only_parent_completion_state(
         """SELECT task_name, status, replaced
            FROM refresh_task_runs WHERE run_id = 'refresh-1'""",
     ) == [("update_bars", "success", 5533)]
+
+
+def test_finish_run_rejects_missing_parent_run(
+    store: SQLiteRefreshStore,
+) -> None:
+    with pytest.raises(RefreshStateError, match="not running"):
+        store.finish_run(
+            run_id="missing-run",
+            finished_at="2026-07-28T08:30:00+00:00",
+            status="failed",
+        )
+
+
+def test_finish_run_rejects_second_terminal_transition(
+    store: SQLiteRefreshStore,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    store.finish_run(
+        run_id="refresh-1",
+        finished_at="2026-07-28T08:30:00+00:00",
+        status="success",
+    )
+
+    with pytest.raises(RefreshStateError, match="not running"):
+        store.finish_run(
+            run_id="refresh-1",
+            finished_at="2026-07-28T08:31:00+00:00",
+            status="failed",
+        )
+
+
+@pytest.mark.parametrize("status", ["running", "succes"])
+def test_finish_run_rejects_nonterminal_status(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+    status: str,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+
+    with pytest.raises(RefreshValidationError, match="run status"):
+        store.finish_run(
+            run_id="refresh-1",
+            finished_at="2026-07-28T08:30:00+00:00",
+            status=status,
+        )
+
+    assert _rows(
+        db_path,
+        "SELECT status, finished_at FROM refresh_runs WHERE run_id = 'refresh-1'",
+    ) == [("running", None)]
+
+
+def test_record_task_result_rejects_finished_parent_run(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    store.finish_run(
+        run_id="refresh-1",
+        finished_at="2026-07-28T08:30:00+00:00",
+        status="success",
+    )
+
+    with pytest.raises(RefreshStateError, match="not running"):
+        store.record_task_result(
+            run_id="refresh-1",
+            task_name="update_bars",
+            policy_kind="remote_date_snapshot",
+            requested_date="2026-07-27",
+            as_of_date="2026-07-27",
+            status="failed",
+            fetched=0,
+            validated=0,
+            replaced=0,
+            retained=2,
+            failed=1,
+        )
+
+    assert _rows(db_path, "SELECT COUNT(*) FROM refresh_task_runs") == [(0,)]
+
+
+@pytest.mark.parametrize("status", ["succes", "running"])
+def test_record_task_result_rejects_nonterminal_status(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+    status: str,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+
+    with pytest.raises(RefreshValidationError, match="task status"):
+        store.record_task_result(
+            run_id="refresh-1",
+            task_name="update_bars",
+            policy_kind="remote_date_snapshot",
+            requested_date="2026-07-27",
+            as_of_date="2026-07-27",
+            status=status,
+            fetched=1,
+            validated=1,
+            replaced=1,
+            retained=0,
+            failed=0,
+        )
+
+    assert _rows(db_path, "SELECT COUNT(*) FROM refresh_task_runs") == [(0,)]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fetched", -1),
+        ("validated", -1),
+        ("replaced", -1),
+        ("retained", -1),
+        ("failed", -1),
+        ("fetched", True),
+        ("validated", False),
+        ("replaced", True),
+        ("retained", False),
+        ("failed", True),
+    ],
+)
+def test_record_task_result_rejects_invalid_counter(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    counts: dict[str, object] = {
+        "fetched": 1,
+        "validated": 1,
+        "replaced": 1,
+        "retained": 0,
+        "failed": 0,
+    }
+    counts[field] = value
+
+    with pytest.raises(RefreshValidationError, match=field):
+        store.record_task_result(
+            run_id="refresh-1",
+            task_name="update_bars",
+            policy_kind="remote_date_snapshot",
+            requested_date="2026-07-27",
+            as_of_date="2026-07-27",
+            status="success",
+            **counts,  # type: ignore[arg-type]
+        )
+
+    assert _rows(db_path, "SELECT COUNT(*) FROM refresh_task_runs") == [(0,)]
 
 
 def test_refresh_audit_values_are_bound_instead_of_executed_as_sql(
