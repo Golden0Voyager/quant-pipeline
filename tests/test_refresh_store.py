@@ -196,6 +196,78 @@ def test_minimum_coverage_failure_preserves_old_partition(
     assert _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code") == before
 
 
+def test_empty_date_snapshot_is_rejected_before_opening_a_connection(
+    store: SQLiteRefreshStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _quotes_request(())
+
+    def unexpected_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise AssertionError("validation must run before connecting")
+
+    monkeypatch.setattr("core.refresh_store.sqlite3.connect", unexpected_connect)
+
+    with pytest.raises(RefreshValidationError, match="empty"):
+        store.replace_date_snapshot(request)
+
+
+def test_empty_date_snapshot_preserves_old_partition_by_default(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    before = _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code")
+
+    with pytest.raises(RefreshValidationError, match="empty"):
+        store.replace_date_snapshot(_quotes_request(()))
+
+    assert _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code") == before
+
+
+def test_allow_empty_authorization_requires_a_boolean(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = DateSnapshotReplacement(
+        table="quotes",
+        columns=("ts_code", "trade_date", "close", "source"),
+        rows=(),
+        date_column="trade_date",
+        date_value="2026-07-27",
+        natural_keys=("ts_code", "trade_date"),
+        allow_empty=1,  # type: ignore[arg-type]
+    )
+    before = _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code")
+
+    with pytest.raises(RefreshValidationError, match="allow_empty must be a boolean"):
+        store.replace_date_snapshot(request)
+
+    assert _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code") == before
+
+
+def test_explicit_empty_date_snapshot_clears_only_target_partition(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = DateSnapshotReplacement(
+        table="quotes",
+        columns=("ts_code", "trade_date", "close", "source"),
+        rows=(),
+        date_column="trade_date",
+        date_value="2026-07-27",
+        natural_keys=("ts_code", "trade_date"),
+        required_fields=("ts_code", "trade_date", "close", "source"),
+        minimum_coverage=1.0,
+        allow_empty=True,
+    )
+
+    result = store.replace_date_snapshot(request)
+
+    assert result.replaced == 0
+    assert _rows(db_path, "SELECT * FROM quotes") == [
+        ("000001.SZ", "2026-07-24", 11.0, "close")
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -254,6 +326,46 @@ def test_keyed_upsert_updates_matches_and_keeps_unmentioned_rows(
     ]
 
 
+def test_empty_keyed_upsert_requires_explicit_authorization(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = KeyedUpsertReplacement(
+        table="events",
+        columns=("event_date", "stock_code", "detail"),
+        rows=(),
+        natural_keys=("event_date", "stock_code"),
+        required_fields=("event_date", "stock_code", "detail"),
+    )
+    before = _rows(db_path, "SELECT * FROM events ORDER BY event_date, stock_code")
+
+    with pytest.raises(RefreshValidationError, match="empty"):
+        store.upsert_keyed_snapshot(request)
+
+    assert _rows(db_path, "SELECT * FROM events ORDER BY event_date, stock_code") == before
+
+
+def test_explicit_empty_keyed_upsert_is_a_non_destructive_noop(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = KeyedUpsertReplacement(
+        table="events",
+        columns=("event_date", "stock_code", "detail"),
+        rows=(),
+        natural_keys=("event_date", "stock_code"),
+        required_fields=("event_date", "stock_code", "detail"),
+        minimum_coverage=1.0,
+        allow_empty=True,
+    )
+    before = _rows(db_path, "SELECT * FROM events ORDER BY event_date, stock_code")
+
+    result = store.upsert_keyed_snapshot(request)
+
+    assert result.replaced == 0
+    assert _rows(db_path, "SELECT * FROM events ORDER BY event_date, stock_code") == before
+
+
 def test_run_snapshot_atomically_replaces_the_current_snapshot(
     store: SQLiteRefreshStore,
     db_path: Path,
@@ -273,6 +385,45 @@ def test_run_snapshot_atomically_replaces_the_current_snapshot(
         ("NEW1", 10.0),
         ("NEW2", 20.0),
     ]
+
+
+def test_empty_run_snapshot_preserves_old_rows_by_default(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = RunSnapshotReplacement(
+        table="current_snapshot",
+        columns=("code", "value"),
+        rows=(),
+        natural_keys=("code",),
+        required_fields=("code", "value"),
+    )
+    before = _rows(db_path, "SELECT * FROM current_snapshot ORDER BY code")
+
+    with pytest.raises(RefreshValidationError, match="empty"):
+        store.replace_run_snapshot(request)
+
+    assert _rows(db_path, "SELECT * FROM current_snapshot ORDER BY code") == before
+
+
+def test_explicit_empty_run_snapshot_clears_current_snapshot(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = RunSnapshotReplacement(
+        table="current_snapshot",
+        columns=("code", "value"),
+        rows=(),
+        natural_keys=("code",),
+        required_fields=("code", "value"),
+        minimum_coverage=1.0,
+        allow_empty=True,
+    )
+
+    result = store.replace_run_snapshot(request)
+
+    assert result.replaced == 0
+    assert _rows(db_path, "SELECT * FROM current_snapshot") == []
 
 
 def test_formal_table_constraint_failure_rolls_back_date_replacement(
@@ -311,6 +462,44 @@ def test_fresh_connection_enforces_foreign_keys_and_rolls_back(
     assert _rows(db_path, "SELECT * FROM child_snapshot") == [("OLD", "VALID")]
 
 
+def test_composite_empty_component_is_rejected_before_any_table_changes(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = CompositeReplacement(
+        replacements=(
+            DateSnapshotReplacement(
+                table="sector_daily",
+                columns=("sector_code", "trade_date", "close"),
+                rows=(("BK001", "2026-07-27", 11.0),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+                required_fields=("sector_code", "trade_date", "close"),
+            ),
+            DateSnapshotReplacement(
+                table="sector_valuation",
+                columns=("sector_code", "trade_date", "pe"),
+                rows=(),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+                required_fields=("sector_code", "trade_date", "pe"),
+            ),
+        )
+    )
+
+    with pytest.raises(RefreshValidationError, match="empty"):
+        store.replace_composite(request)
+
+    assert _rows(db_path, "SELECT * FROM sector_daily") == [
+        ("BK001", "2026-07-27", 10.0)
+    ]
+    assert _rows(db_path, "SELECT * FROM sector_valuation") == [
+        ("BK001", "2026-07-27", 15.0)
+    ]
+
+
 def test_composite_failure_rolls_back_every_table(
     store: SQLiteRefreshStore,
     db_path: Path,
@@ -347,3 +536,147 @@ def test_composite_failure_rolls_back_every_table(
     assert _rows(db_path, "SELECT * FROM sector_valuation") == [
         ("BK001", "2026-07-27", 15.0)
     ]
+
+
+def test_composite_rejects_duplicate_date_snapshot_table(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    first = DateSnapshotReplacement(
+        table="quotes",
+        columns=("ts_code", "trade_date", "close", "source"),
+        rows=(("000001.SZ", "2026-07-27", 10.8, "close"),),
+        date_column="trade_date",
+        date_value="2026-07-27",
+        natural_keys=("ts_code", "trade_date"),
+    )
+    second = DateSnapshotReplacement(
+        table="quotes",
+        columns=("ts_code", "trade_date", "close", "source"),
+        rows=(("600000.SH", "2026-07-27", 20.8, "close"),),
+        date_column="trade_date",
+        date_value="2026-07-27",
+        natural_keys=("ts_code", "trade_date"),
+    )
+    before = _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code")
+
+    with pytest.raises(RefreshValidationError, match="duplicate table"):
+        store.replace_composite(CompositeReplacement(replacements=(first, second)))
+
+    assert _rows(db_path, "SELECT * FROM quotes ORDER BY trade_date, ts_code") == before
+
+
+def test_composite_rejects_duplicate_run_snapshot_table(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    first = RunSnapshotReplacement(
+        table="current_snapshot",
+        columns=("code", "value"),
+        rows=(("NEW1", 10.0),),
+        natural_keys=("code",),
+    )
+    second = RunSnapshotReplacement(
+        table="current_snapshot",
+        columns=("code", "value"),
+        rows=(("NEW2", 20.0),),
+        natural_keys=("code",),
+    )
+    before = _rows(db_path, "SELECT * FROM current_snapshot ORDER BY code")
+
+    with pytest.raises(RefreshValidationError, match="duplicate table"):
+        store.replace_composite(CompositeReplacement(replacements=(first, second)))
+
+    assert _rows(db_path, "SELECT * FROM current_snapshot ORDER BY code") == before
+
+
+def test_composite_allows_distinct_tables(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    request = CompositeReplacement(
+        replacements=(
+            DateSnapshotReplacement(
+                table="sector_daily",
+                columns=("sector_code", "trade_date", "close"),
+                rows=(("BK001", "2026-07-27", 11.0),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+            ),
+            DateSnapshotReplacement(
+                table="sector_valuation",
+                columns=("sector_code", "trade_date", "pe"),
+                rows=(("BK001", "2026-07-27", 16.0),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+            ),
+        )
+    )
+
+    result = store.replace_composite(request)
+
+    assert result.replaced == 2
+    assert result.tables == ("sector_daily", "sector_valuation")
+    assert _rows(db_path, "SELECT * FROM sector_daily") == [
+        ("BK001", "2026-07-27", 11.0)
+    ]
+    assert _rows(db_path, "SELECT * FROM sector_valuation") == [
+        ("BK001", "2026-07-27", 16.0)
+    ]
+
+
+def test_composite_checks_all_coverage_under_write_lock_before_any_delete(
+    store: SQLiteRefreshStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr("core.refresh_store.sqlite3.connect", traced_connect)
+    request = CompositeReplacement(
+        replacements=(
+            DateSnapshotReplacement(
+                table="sector_daily",
+                columns=("sector_code", "trade_date", "close"),
+                rows=(("BK001", "2026-07-27", 11.0),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+                minimum_coverage=1.0,
+            ),
+            DateSnapshotReplacement(
+                table="sector_valuation",
+                columns=("sector_code", "trade_date", "pe"),
+                rows=(("BK001", "2026-07-27", 16.0),),
+                date_column="trade_date",
+                date_value="2026-07-27",
+                natural_keys=("sector_code", "trade_date"),
+                minimum_coverage=1.0,
+            ),
+        )
+    )
+
+    store.replace_composite(request)
+
+    begin_index = statements.index("BEGIN IMMEDIATE")
+    count_indexes = [
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("SELECT COUNT(*) FROM")
+        and "_refresh_stage_" not in statement
+    ]
+    first_delete_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("DELETE FROM")
+    )
+    assert len(count_indexes) == 2
+    assert begin_index < min(count_indexes)
+    assert max(count_indexes) < first_delete_index
