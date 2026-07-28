@@ -203,6 +203,116 @@ class TestBarsResume:
         assert result["attempted"] == 1
         assert result["failed"] == 0
 
+    @pytest.mark.parametrize(
+        "scope_kwargs",
+        [{"limit": 1}, {"symbols": ["000001.SZ"]}],
+        ids=["limit", "symbols"],
+    )
+    def test_resume_rejects_scope_restrictions_without_changing_progress(
+        self,
+        tmp_path: Path,
+        scope_kwargs: dict[str, object],
+    ):
+        """resume 与范围限制组合必须显式失败并保留原 checkpoint。"""
+        db = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({
+            "code": ["000001.SZ", "000002.SZ"],
+        })
+        progress_file = tmp_path / "progress.json"
+        original = {
+            "task": "retry",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000001.SZ",
+            "processed": 1,
+            "total": 2,
+            "failed_queue": ["000001.SZ", "000002.SZ"],
+        }
+        progress_file.write_text(json.dumps(original))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.ProgressTracker.clear") as mock_clear, \
+             patch("tasks.bars.ProgressTracker.save") as mock_save:
+            result = update_bars(
+                db,
+                MagicMock(),
+                resume=True,
+                **scope_kwargs,
+            )
+
+        assert result["status"] == "failed"
+        assert result["error_kind"] == "data_quality"
+        assert json.loads(progress_file.read_text()) == original
+        mock_save.assert_not_called()
+        mock_clear.assert_not_called()
+
+    def test_retry_abort_checkpoint_keeps_unattempted_suffix(self, tmp_path: Path):
+        """retry 中途熔断时保存失败项和所有尚未尝试项。"""
+        db = MagicMock()
+        loader = MagicMock()
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        db.get_stock_list.return_value = pd.DataFrame({"code": codes})
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "retry",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000003.SZ",
+            "processed": 0,
+            "total": 3,
+            "failed_queue": codes,
+        }))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.ProgressTracker.LOCK_FILE", tmp_path / "progress.lock"), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.AkShareMonitor.should_abort", return_value=(True, "stop")), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._update_single_bar", return_value="failed") as update_one, \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        assert result["status"] == "aborted"
+        update_one.assert_called_once()
+        saved = json.loads(progress_file.read_text())
+        assert saved["task"] == "retry"
+        assert saved["processed"] == 1
+        assert saved["failed_queue"] == codes
+
+    def test_retry_batch_checkpoint_keeps_unattempted_suffix(self, tmp_path: Path):
+        """retry 首批完成时 checkpoint 仍包含后续批次。"""
+        db = MagicMock()
+        loader = MagicMock()
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        db.get_stock_list.return_value = pd.DataFrame({"code": codes})
+        db.watchlist_get_all.return_value = pd.DataFrame()
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "retry",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "failed_queue": codes,
+        }))
+        save_calls: list[dict[str, object]] = []
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.ProgressTracker.LOCK_FILE", tmp_path / "progress.lock"), \
+             patch("tasks.bars.ProgressTracker.save", side_effect=lambda **kw: save_calls.append(kw)), \
+             patch("tasks.bars.BATCH_SIZE", 2), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.PROGRESS_FLUSH_INTERVAL", 99), \
+             patch("tasks.bars._update_single_bar", return_value="success"), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            update_bars(db, loader, resume=True)
+
+        first_batch = next(
+            call for call in save_calls if call["last_symbol"] == "000002.SZ"
+        )
+        assert first_batch["task"] == "retry"
+        assert first_batch["processed"] == 2
+        assert first_batch["failed_queue"] == ["000003.SZ"]
+
     def test_retry_resume_with_no_eligible_failures_is_no_data(self, tmp_path: Path):
         """retry 队列过滤为空是合法零工作量。"""
         db = MagicMock()
@@ -271,7 +381,9 @@ class TestBarsResume:
         assert result["attempted"] == 2
         assert result["failed"] == 1
         assert result["failed_symbols"] == ["000001.SZ"]
-        assert normalize_task_result("update_bars", result).status is TaskStatus.DEGRADED
+        normalised = normalize_task_result("update_bars", result)
+        assert normalised.status is TaskStatus.DEGRADED
+        assert normalised.attempted == result["attempted"]
 
     def test_unknown_progress_does_not_contaminate_current_run(self, tmp_path: Path):
         """未知任务的 processed/failed_queue 不得进入本轮结果。"""
