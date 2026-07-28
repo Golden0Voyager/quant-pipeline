@@ -91,7 +91,7 @@ def retry_failed(
         result = _update_single_bar(db, loader, symbol)
         if result == "success":
             success += 1
-        else:
+        elif result != "skipped":
             still_failed.append(symbol)
 
     if still_failed:
