@@ -51,6 +51,8 @@ from tasks.institution_survey import fetch_institution_survey_records
 from tasks.macro import fetch_limit_pool_records
 from tasks.market_flow import (
     _FUND_FLOW_NUMERIC_FIELDS,
+    fetch_block_trade_records,
+    fetch_dragon_tiger_records,
     fetch_fund_flow_records,
     fetch_margin_trading_records,
 )
@@ -1707,6 +1709,153 @@ class OptionSentimentRefreshAdapter:
 
 
 # ===========================================================================
+# 事件型公共 helper（组4）：稳定事件键去重 + symbols 过滤，绝无删除
+# ===========================================================================
+
+
+def _event_rows(
+    records: list[dict],
+    columns: tuple[str, ...],
+    symbols: tuple[str, ...] | None,
+) -> list[dict]:
+    """按 source_record_key 去重并按 symbols 过滤事件记录（不碰既有行）。"""
+    requested = set(symbols) if symbols is not None else None
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for record in records:
+        key = str(record.get("source_record_key", "")).strip()
+        code = str(record.get("ts_code", "")).strip()
+        if not key or key in seen or not code:
+            continue
+        if requested is not None and code not in requested:
+            continue
+        seen.add(key)
+        rows.append({column: record.get(column) for column in columns})
+    return rows
+
+
+# ===========================================================================
+# update_dragon_tiger（事件型，键控 UPSERT）
+# ===========================================================================
+
+_DRAGON_TIGER_COLUMNS = (
+    "source_record_key",
+    "ts_code",
+    "trade_date",
+    "close_price",
+    "pct_change",
+    "net_buy_amount",
+    "buy_amount",
+    "sell_amount",
+    "turnover_rate",
+    "market_cap",
+    "reason",
+    "data_source",
+)
+
+
+@dataclass
+class DragonTigerRefreshAdapter:
+    """龙虎榜：稳定事件键 UPSERT，无目标日删除；权威空榜即成功。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_dragon_tiger_records)
+
+    task_name = "update_dragon_tiger"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+        rows = _event_rows(records, _DRAGON_TIGER_COLUMNS, context.symbols)
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="dragon_tiger",
+                    columns=_DRAGON_TIGER_COLUMNS,
+                    rows=_as_store_rows(rows, _DRAGON_TIGER_COLUMNS),
+                    natural_keys=("source_record_key",),
+                    required_fields=("source_record_key", "trade_date", "ts_code"),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=tuple(dict.fromkeys(row["ts_code"] for row in rows)),
+            metadata={"authoritative_empty": not records},
+        )
+
+
+# ===========================================================================
+# update_block_trade（事件型，键控 UPSERT）
+# ===========================================================================
+
+_BLOCK_TRADE_COLUMNS = (
+    "source_record_key",
+    "ts_code",
+    "trade_date",
+    "deal_price",
+    "close_price",
+    "discount_rate",
+    "volume",
+    "amount",
+    "buyer_branch",
+    "seller_branch",
+    "data_source",
+)
+
+
+@dataclass
+class BlockTradeRefreshAdapter:
+    """大宗交易：稳定事件键 UPSERT，同日合法多笔交易存活；权威空即成功。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_block_trade_records)
+
+    task_name = "update_block_trade"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+        rows = _event_rows(records, _BLOCK_TRADE_COLUMNS, context.symbols)
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="block_trade",
+                    columns=_BLOCK_TRADE_COLUMNS,
+                    rows=_as_store_rows(rows, _BLOCK_TRADE_COLUMNS),
+                    natural_keys=("source_record_key",),
+                    required_fields=("source_record_key", "trade_date", "ts_code"),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=tuple(dict.fromkeys(row["ts_code"] for row in rows)),
+            metadata={"authoritative_empty": not records},
+        )
+
+
+# ===========================================================================
 # 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
 # ===========================================================================
 
@@ -1730,4 +1879,6 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_etf_daily": EtfDailyRefreshAdapter,
     "update_limit_up_down": LimitUpDownRefreshAdapter,
     "update_option_sentiment": OptionSentimentRefreshAdapter,
+    "update_dragon_tiger": DragonTigerRefreshAdapter,
+    "update_block_trade": BlockTradeRefreshAdapter,
 }
