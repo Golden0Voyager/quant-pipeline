@@ -13,10 +13,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from tasks.core_chain import (
     _calculate_chip_distribution_for_symbol,
     _process_chip_one,
+    compute_chip_record_for_refresh,
+    compute_indicator_record_for_refresh,
     update_chip_distribution,
     update_stock_list,
 )
@@ -342,3 +345,155 @@ class TestUpdateChipDistribution:
             )
         assert r["total"] == 1
         assert r["success"] == 1
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 7）—— 只返回目标日一条记录，绝不写库
+# ===========================================================================
+
+
+def _fake_indicator_engine() -> MagicMock:
+    """回显 date/close 并附确定性 ma5 的手写 engine fake。"""
+    engine = MagicMock()
+
+    def _calc(df: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({
+            "date": df["date"],
+            "close": df["close"],
+            "ma5": df["close"].rolling(5).mean(),
+        })
+
+    engine.calculate_all_indicators.side_effect = _calc
+    return engine
+
+
+class TestComputeIndicatorRecordForRefresh:
+    """compute_indicator_record_for_refresh：由全量历史计算，只提交目标日。"""
+
+    def test_returns_only_target_date_record(self):
+        """120 天历史 → 单条目标日记录，值来自全历史窗口计算。"""
+        df = _chip_df(120)
+        target = df["trade_date"].iloc[-1]
+        db = MagicMock()
+        db.get_daily_bars.return_value = df
+
+        record, reason = compute_indicator_record_for_refresh(
+            db, _fake_indicator_engine(), "000001.SZ", target
+        )
+
+        assert reason is None
+        assert record["ts_code"] == "000001.SZ"
+        assert record["trade_date"] == target
+        assert record["close"] == pytest.approx(df["close"].iloc[-1])
+        # ma5 由完整历史窗口滚动得出（目标日前 5 天均值）
+        assert record["ma5"] == pytest.approx(df["close"].iloc[-5:].mean())
+        # engine 未输出的指标列统一为 None，而非缺键
+        assert record["macd_hist"] is None
+        # 不写库：helper 不得调用任何 save
+        db.save_indicators_batch.assert_not_called()
+
+    def test_insufficient_history(self):
+        """< 60 天 → (None, 'insufficient')。"""
+        db = MagicMock()
+        db.get_daily_bars.return_value = _chip_df(30)
+        record, reason = compute_indicator_record_for_refresh(
+            db, _fake_indicator_engine(), "000001.SZ", "2024-06-14"
+        )
+        assert record is None
+        assert reason == "insufficient"
+
+    def test_missing_target_date(self):
+        """历史里没有目标日（如停牌）→ (None, 'missing_target')。"""
+        db = MagicMock()
+        db.get_daily_bars.return_value = _chip_df(120)
+        record, reason = compute_indicator_record_for_refresh(
+            db, _fake_indicator_engine(), "000001.SZ", "2030-01-01"
+        )
+        assert record is None
+        assert reason == "missing_target"
+
+    def test_engine_failure(self):
+        """engine 抛异常 → (None, 'failed')。"""
+        db = MagicMock()
+        df = _chip_df(120)
+        db.get_daily_bars.return_value = df
+        engine = MagicMock()
+        engine.calculate_all_indicators.side_effect = ValueError("calc error")
+        with patch("tasks.core_chain.logger"):
+            record, reason = compute_indicator_record_for_refresh(
+                db, engine, "000001.SZ", df["trade_date"].iloc[-1]
+            )
+        assert record is None
+        assert reason == "failed"
+
+    def test_nan_values_coerced_to_none(self):
+        """指标值为 NaN → 记录里存 None（SQLite 不接受 NaN）。"""
+        df = _chip_df(120)
+        target = df["trade_date"].iloc[-1]
+        db = MagicMock()
+        db.get_daily_bars.return_value = df
+        engine = MagicMock()
+        engine.calculate_all_indicators.side_effect = lambda d: pd.DataFrame({
+            "date": d["date"],
+            "close": d["close"],
+            "ma5": [float("nan")] * len(d),
+        })
+
+        record, reason = compute_indicator_record_for_refresh(
+            db, engine, "000001.SZ", target
+        )
+
+        assert reason is None
+        assert record["ma5"] is None
+
+
+class TestComputeChipRecordForRefresh:
+    """compute_chip_record_for_refresh：由全量历史计算，只提交目标日。"""
+
+    def test_returns_only_target_date_record(self):
+        """120 天历史 → 单条目标日记录，与全历史计算的末行一致。"""
+        df = _chip_df(120)
+        target = df["trade_date"].iloc[-1]
+        db = MagicMock()
+        db.get_daily_bars.return_value = df
+
+        record, reason = compute_chip_record_for_refresh(db, "000001.SZ", target)
+
+        assert reason is None
+        assert record["ts_code"] == "000001.SZ"
+        assert record["trade_date"] == target
+        full = _calculate_chip_distribution_for_symbol(df)
+        assert record["avg_cost"] == pytest.approx(full["avg_cost"].iloc[-1])
+        assert record["profit_ratio"] == pytest.approx(full["profit_ratio"].iloc[-1])
+        assert record["chip_concentration"] == pytest.approx(
+            full["chip_concentration"].iloc[-1]
+        )
+        # 不写库
+        db.save_chip_distribution_batch.assert_not_called()
+
+    def test_insufficient_history(self):
+        """< 60 天 → (None, 'insufficient')。"""
+        db = MagicMock()
+        db.get_daily_bars.return_value = _chip_df(30)
+        record, reason = compute_chip_record_for_refresh(db, "000001.SZ", "2024-06-14")
+        assert record is None
+        assert reason == "insufficient"
+
+    def test_missing_target_date(self):
+        """历史里没有目标日 → (None, 'missing_target')。"""
+        db = MagicMock()
+        db.get_daily_bars.return_value = _chip_df(120)
+        record, reason = compute_chip_record_for_refresh(db, "000001.SZ", "2030-01-01")
+        assert record is None
+        assert reason == "missing_target"
+
+    def test_db_failure(self):
+        """读取日线抛异常 → (None, 'failed')。"""
+        db = MagicMock()
+        db.get_daily_bars.side_effect = RuntimeError("DB error")
+        with patch("tasks.core_chain.logger"):
+            record, reason = compute_chip_record_for_refresh(
+                db, "000001.SZ", "2024-06-14"
+            )
+        assert record is None
+        assert reason == "failed"
