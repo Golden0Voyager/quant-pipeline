@@ -668,8 +668,9 @@ def update_bars(
         failed=len(unique_failed),
         skipped=skipped_count,
         total=total,
-        # attempted 与去重后的 failed 用同一口径，保证审计行内部一致
-        attempted=success_count + skipped_count + len(unique_failed),
+        # attempted 只计本轮实际检查数；failed 含续传继承的未解决失败，
+        # 两者允许不相等（见 bars-resume-result-contract 设计）
+        attempted=success_count + failed_count + skipped_count,
         failed_symbols=unique_failed,
     )
 
