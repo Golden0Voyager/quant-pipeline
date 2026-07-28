@@ -15,6 +15,7 @@ import pandas as pd
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
 from core.data_contract import STOCK_PLEDGE_CONTRACT, validate_records
 from core.source_client import get_default_client
+from core.source_record_key import stock_pledge_source_key
 from core.utils import is_real_db_path
 from interface import DatabaseInterface
 
@@ -142,6 +143,9 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": raw_count, "error": f"data contract violations: {violations}"}
     if violations:
         logger.warning(f"⚠️ 股权质押合约校验过滤 {len(records) - len(validated_records)} 条")
+    # 附加稳定源键：null pledger 行重复插入时按键去重（迁移 011 唯一索引）
+    for record in validated_records:
+        record["source_record_key"] = stock_pledge_source_key(record)
     saved = db.save_stock_pledge_batch(validated_records)
     logger.info(f"✅ 股权质押数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
