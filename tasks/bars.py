@@ -453,7 +453,9 @@ def update_bars(
                     f"但哨兵 {CANARY_SYMBOL} 拉取正常 → 判定为个股数据问题，继续运行"
                     f"（哨兵验证 {canary_probes_used}/{MAX_CANARY_PROBES}）"
                 )
-                monitor.record(True, f"canary:{CANARY_SYMBOL}")
+                # 只化解连续失败规则：不经 record() 写伪造成功，
+                # 避免污染持久化监控历史与限流节奏；窗口成功率规则不受哨兵豁免
+                monitor.current_run_consecutive_failures = 0
                 should_abort, abort_msg = monitor.should_abort()
         return should_abort, abort_msg
 
@@ -666,7 +668,8 @@ def update_bars(
         failed=len(unique_failed),
         skipped=skipped_count,
         total=total,
-        attempted=success_count + failed_count + skipped_count,
+        # attempted 与去重后的 failed 用同一口径，保证审计行内部一致
+        attempted=success_count + skipped_count + len(unique_failed),
         failed_symbols=unique_failed,
     )
 
