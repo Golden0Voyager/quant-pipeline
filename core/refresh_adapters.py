@@ -1,10 +1,17 @@
-"""核心远端刷新适配器（Task 6）。
+"""收盘刷新适配器（Task 6 核心远端 + Task 7 派生）。
 
 实现 RefreshAdapter 协议的四个核心远端任务：
 - BarsRefreshAdapter（update_bars）：逐股重抓目标日日线，失败股票保留旧行
 - FundamentalsRefreshAdapter（update_fundamentals）：目标日估值分区替换，保留已有 dividend_yield
 - MarketSnapshotRefreshAdapter（update_market_snapshot）：雪球报价只补 dividend_yield
 - FundFlowRefreshAdapter（update_fund_flow）：资金流 symbol/date → ts_code/trade_date 边界映射
+
+以及五个派生任务（由全量历史计算，只提交目标日行，绝不重写历史）：
+- IndicatorsRefreshAdapter（update_indicators）
+- LocalChipRefreshAdapter（update_chip_distribution）
+- EastmoneyChipRefreshAdapter（update_chip_distribution_em）：显式 scope + 九连败熔断
+- HistoricalValuationRefreshAdapter（update_historical_valuation）
+- SectorIndustryRefreshAdapter（update_sector_industry）
 
 共同约束：
 - symbols=() 表示不刷新任何股票（no-op），symbols=None 表示全市场
@@ -14,7 +21,9 @@
 
 from __future__ import annotations
 
+import random
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -26,10 +35,22 @@ from core.refresh_store import (
     SQLiteRefreshStore,
 )
 from core.utils import should_skip_beijing
-from interface import DatabaseInterface, DataLoaderInterface
+from interface import DatabaseInterface, DataLoaderInterface, IndicatorEngineInterface
 from tasks.bars import fetch_bars_for_refresh, normalize_bar_row_for_refresh
+from tasks.core_chain import (
+    _CHIP_VALUE_COLUMNS,
+    _INDICATOR_VALUE_COLUMNS,
+    compute_chip_record_for_refresh,
+    compute_indicator_record_for_refresh,
+)
+from tasks.index_chain import fetch_chip_em_record_for_refresh
 from tasks.market_flow import _FUND_FLOW_NUMERIC_FIELDS, fetch_fund_flow_records
-from tasks.valuation_chain import fetch_fundamentals_snapshot, fetch_market_snapshot_quotes
+from tasks.valuation_chain import (
+    compute_sector_industry_rows_for_refresh,
+    fetch_fundamentals_snapshot,
+    fetch_historical_valuation_rows_for_refresh,
+    fetch_market_snapshot_quotes,
+)
 
 
 def _noop_result(task_name: str, context: RefreshContext) -> RefreshAdapterResult:
@@ -435,4 +456,408 @@ def build_core_refresh_adapters(
         "update_fundamentals": FundamentalsRefreshAdapter(store=store, db_path=db_path),
         "update_market_snapshot": MarketSnapshotRefreshAdapter(store=store, db_path=db_path),
         "update_fund_flow": FundFlowRefreshAdapter(store=store, loader=loader),
+    }
+
+
+# ===========================================================================
+# 派生任务公共 helper（Task 7）
+# ===========================================================================
+
+
+def _target_partition_symbols(db_path: str, target_date: str) -> list[str]:
+    """symbols=None 时以目标日 daily_bars 分区为派生任务的全市场范围。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        fetched = conn.execute(
+            "SELECT DISTINCT ts_code FROM daily_bars WHERE trade_date = ?"
+            " ORDER BY ts_code",
+            (target_date,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [str(code) for (code,) in fetched]
+
+
+# ===========================================================================
+# update_indicators（派生）
+# ===========================================================================
+
+_INDICATORS_COLUMNS = ("ts_code", "trade_date", *_INDICATOR_VALUE_COLUMNS)
+
+
+@dataclass
+class IndicatorsRefreshAdapter:
+    """由全量历史计算指标，仅 upsert 目标日一行；失败股票旧行保留。"""
+
+    store: SQLiteRefreshStore
+    db: DatabaseInterface
+    engine: IndicatorEngineInterface
+
+    task_name = "update_indicators"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+        symbols = (
+            _target_partition_symbols(str(self.db.db_path), target)
+            if context.symbols is None
+            else list(context.symbols)
+        )
+
+        rows: list[dict] = []
+        changed: list[str] = []
+        failed: list[str] = []
+        insufficient = 0
+        for symbol in symbols:
+            record, reason = compute_indicator_record_for_refresh(
+                self.db, self.engine, symbol, target
+            )
+            if record is not None:
+                rows.append(record)
+                changed.append(symbol)
+            elif reason == "insufficient":
+                insufficient += 1
+            else:
+                failed.append(symbol)
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="indicators",
+                    columns=_INDICATORS_COLUMNS,
+                    rows=_as_store_rows(rows, _INDICATORS_COLUMNS),
+                    natural_keys=("ts_code", "trade_date"),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(symbols),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=len(failed),
+            failed_symbols=tuple(failed),
+            changed_symbols=tuple(changed),
+            metadata={"insufficient": insufficient},
+        )
+
+
+# ===========================================================================
+# update_chip_distribution（派生，本地计算）
+# ===========================================================================
+
+_CHIP_COLUMNS = ("ts_code", "trade_date", *_CHIP_VALUE_COLUMNS)
+
+
+@dataclass
+class LocalChipRefreshAdapter:
+    """由全量历史计算本地筹码分布，仅 upsert 目标日一行。"""
+
+    store: SQLiteRefreshStore
+    db: DatabaseInterface
+
+    task_name = "update_chip_distribution"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+        symbols = (
+            _target_partition_symbols(str(self.db.db_path), target)
+            if context.symbols is None
+            else list(context.symbols)
+        )
+
+        rows: list[dict] = []
+        changed: list[str] = []
+        failed: list[str] = []
+        insufficient = 0
+        for symbol in symbols:
+            record, reason = compute_chip_record_for_refresh(self.db, symbol, target)
+            if record is not None:
+                rows.append(record)
+                changed.append(symbol)
+            elif reason == "insufficient":
+                insufficient += 1
+            else:
+                failed.append(symbol)
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="chip_distribution",
+                    columns=_CHIP_COLUMNS,
+                    rows=_as_store_rows(rows, _CHIP_COLUMNS),
+                    natural_keys=("ts_code", "trade_date"),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(symbols),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=len(failed),
+            failed_symbols=tuple(failed),
+            changed_symbols=tuple(changed),
+            metadata={"insufficient": insufficient},
+        )
+
+
+# ===========================================================================
+# update_historical_valuation（派生）
+# ===========================================================================
+
+_HISTORICAL_VALUATION_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "dividend_yield",
+)
+
+
+@dataclass
+class HistoricalValuationRefreshAdapter:
+    """把 fundamentals 目标日分区快照到 historical_valuation；空分区拒绝。"""
+
+    store: SQLiteRefreshStore
+    db_path: str
+
+    task_name = "update_historical_valuation"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        fetched = fetch_historical_valuation_rows_for_refresh(self.db_path, target)
+        if not fetched:
+            raise RefreshValidationError(
+                f"fundamentals has no {target} partition for historical valuation"
+            )
+
+        rows = fetched
+        if context.symbols is not None:
+            requested = set(context.symbols)
+            rows = [row for row in rows if row["ts_code"] in requested]
+
+        self.store.upsert_keyed_snapshot(
+            KeyedUpsertReplacement(
+                table="historical_valuation",
+                columns=_HISTORICAL_VALUATION_COLUMNS,
+                rows=_as_store_rows(rows, _HISTORICAL_VALUATION_COLUMNS),
+                natural_keys=("ts_code", "trade_date"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(fetched),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=tuple(row["ts_code"] for row in rows),
+            metadata={},
+        )
+
+
+# ===========================================================================
+# update_sector_industry（派生）
+# ===========================================================================
+
+_SECTOR_INDUSTRY_COLUMNS = (
+    "industry_name",
+    "trade_date",
+    "avg_pe",
+    "avg_pb",
+    "avg_ps",
+    "avg_roe",
+    "avg_revenue_growth",
+    "avg_profit_growth",
+    "total_market_cap",
+    "fund_inflow_rank",
+    "data_source",
+)
+
+
+@dataclass
+class SectorIndustryRefreshAdapter:
+    """由目标日 fundamentals 聚合行业对比，整分区替换（清理盘中残留）。"""
+
+    store: SQLiteRefreshStore
+    db_path: str
+
+    task_name = "update_sector_industry"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        rows = compute_sector_industry_rows_for_refresh(self.db_path, target)
+        if not rows:
+            raise RefreshValidationError(
+                f"fundamentals has no {target} partition for sector industry"
+            )
+
+        # 行业行数量级与股票无关，不设覆盖率门槛（空分区已在上方拒绝）
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="sector_industry",
+                columns=_SECTOR_INDUSTRY_COLUMNS,
+                rows=_as_store_rows(rows, _SECTOR_INDUSTRY_COLUMNS),
+                date_column="trade_date",
+                date_value=target,
+                natural_keys=("industry_name", "trade_date"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(rows),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"industries": len(rows)},
+        )
+
+
+# ===========================================================================
+# update_chip_distribution_em（派生，EM 远端 + 硬熔断）
+# ===========================================================================
+
+_CHIP_EM_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "profit_ratio",
+    "avg_cost",
+    "cost_90_low",
+    "cost_90_high",
+    "concentration_90",
+    "cost_70_low",
+    "cost_70_high",
+    "concentration_70",
+)
+
+
+def _default_chip_em_throttle() -> None:
+    """EM 反爬限速：与 legacy 一致的 1-2 秒随机间隔。"""
+    time.sleep(random.uniform(1.0, 2.0))
+
+
+@dataclass
+class EastmoneyChipRefreshAdapter:
+    """EM 筹码刷新：显式目标集、只提交目标日行、九连败硬熔断。
+
+    熔断触发时不删旧筹码行；未处理股票全部并入失败队列，metadata
+    携带 aborted/abort_reason 供编排器与审计记录。只有源端失败
+    （fetch_failed）计入连续失败；成功或其他原因重置计数。
+    """
+
+    store: SQLiteRefreshStore
+    fetch_record: Callable[[str, str], tuple[dict | None, str | None]] = field(
+        default=fetch_chip_em_record_for_refresh
+    )
+    max_consecutive_failures: int = 9
+    throttle: Callable[[], None] = field(default=_default_chip_em_throttle)
+
+    task_name = "update_chip_distribution_em"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        if context.symbols is None:
+            raise RefreshValidationError(
+                "update_chip_distribution_em requires an explicit symbol scope"
+                " in refresh mode (random target selector is forbidden)"
+            )
+        target = context.target_date
+        symbols = list(context.symbols)
+
+        rows: list[dict] = []
+        changed: list[str] = []
+        failed: list[str] = []
+        consecutive = 0
+        aborted = False
+        processed = 0
+        for index, symbol in enumerate(symbols):
+            if index:
+                self.throttle()
+            record, reason = self.fetch_record(symbol, target)
+            processed = index + 1
+            if record is not None:
+                rows.append(record)
+                changed.append(symbol)
+                consecutive = 0
+                continue
+            failed.append(symbol)
+            if reason == "fetch_failed":
+                consecutive += 1
+                if consecutive >= self.max_consecutive_failures:
+                    aborted = True
+                    failed.extend(symbols[index + 1:])
+                    break
+            else:
+                consecutive = 0
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="chip_distribution_em",
+                    columns=_CHIP_EM_COLUMNS,
+                    rows=_as_store_rows(rows, _CHIP_EM_COLUMNS),
+                    natural_keys=("ts_code", "trade_date"),
+                )
+            )
+
+        metadata: dict = {"aborted": aborted}
+        if aborted:
+            metadata["abort_reason"] = "consecutive_failures"
+            metadata["unprocessed"] = len(symbols) - processed
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=processed,
+            validated=len(rows),
+            replaced=len(rows),
+            retained=len(failed),
+            failed_symbols=tuple(failed),
+            changed_symbols=tuple(changed),
+            metadata=metadata,
+        )
+
+
+# ===========================================================================
+# 派生任务显式注册表
+# ===========================================================================
+
+
+def build_derived_refresh_adapters(
+    *,
+    db: DatabaseInterface,
+    engine: IndicatorEngineInterface,
+    store: SQLiteRefreshStore,
+) -> dict[str, RefreshAdapter]:
+    """显式注册派生任务的刷新适配器（键为注册表任务名）。"""
+    db_path = str(db.db_path)
+    return {
+        "update_indicators": IndicatorsRefreshAdapter(store=store, db=db, engine=engine),
+        "update_chip_distribution": LocalChipRefreshAdapter(store=store, db=db),
+        "update_chip_distribution_em": EastmoneyChipRefreshAdapter(store=store),
+        "update_historical_valuation": HistoricalValuationRefreshAdapter(
+            store=store, db_path=db_path
+        ),
+        "update_sector_industry": SectorIndustryRefreshAdapter(
+            store=store, db_path=db_path
+        ),
     }
