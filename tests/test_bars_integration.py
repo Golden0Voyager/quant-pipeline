@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.task_result import TaskStatus, normalize_task_result
 from tasks.bars import update_bars
 
 # ===========================================================================
@@ -168,6 +169,39 @@ class TestBarsSmartProbe:
 
 class TestBarsResume:
     """update_bars resume 路径。"""
+
+    def test_retry_resume_only_processes_failed_queue(self, tmp_path: Path):
+        """retry 进度仅重试其失败队列，而非按扫描断点续传。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_stock_list.return_value = pd.DataFrame({
+            "code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+        })
+        db.watchlist_get_all.return_value = pd.DataFrame()
+
+        progress_file = tmp_path / "progress.json"
+        progress_file.write_text(json.dumps({
+            "task": "retry",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "last_symbol": "000003.SZ",
+            "processed": 3,
+            "total": 3,
+            "failed_queue": ["000002.SZ"],
+        }))
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars._update_single_bar", return_value="success") as update_one, \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"):
+            result = update_bars(db, loader, resume=True)
+
+        update_one.assert_called_once()
+        assert update_one.call_args.args[2] == "000002.SZ"
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+        assert result["attempted"] == 1
+        assert result["failed"] == 0
 
     def test_resume_from_checkpoint(self, tmp_path: Path):
         """从断点继续，跳过已处理的股票。"""
@@ -478,6 +512,8 @@ class TestBarsBoundary:
 
         assert r["success"] == 1
         assert r["failed"] == 0
+        normalised = normalize_task_result("update_bars", r)
+        assert normalised.status is TaskStatus.SUCCESS
         # 全部成功后应清除进度文件
         assert not progress_file.exists()
 
