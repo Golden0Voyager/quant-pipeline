@@ -369,7 +369,7 @@ def run_all(
     results["indicators"] = _run_task("update_indicators", update_indicators, db, engine)
 
     results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
-    results["market_snapshot"] = _run_task("update_market_snapshot (雪球)", update_market_snapshot, db)
+    results["market_snapshot"] = _run_task("update_market_snapshot", update_market_snapshot, db)
     results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
     results["margin_trading"] = _run_task("update_margin_trading", update_margin_trading, db)
     results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
