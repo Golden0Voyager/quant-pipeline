@@ -255,3 +255,83 @@ def update_convertible_bond(db: DatabaseInterface) -> dict:
         logger.warning(f"可转债指数失败: {e}")
 
     return results
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_cb_quotation_records(updated_at: str) -> list[dict]:
+    """收盘刷新专用：抓取可转债实时行情快照并附 updated_at。
+
+    权威空返回 []；源异常直接上抛，由适配器/编排器落实保留旧数据。
+    """
+    df = ak.bond_cb_jsl()
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "ts_code": str(row.get("代码", "")).strip(),
+                "bond_name": str(row.get("转债名称", "")).strip(),
+                "price": _to_float(row.get("现价")),
+                "premium": _to_float(row.get("转股溢价率")),
+                "double_low": _to_float(row.get("双低")),
+                "expire_date": str(row.get("到期时间", ""))[:10],
+                "data_source": "akshare",
+                "updated_at": updated_at,
+            }
+        )
+    return records
+
+
+def fetch_cb_redeem_records(updated_at: str) -> list[dict]:
+    """收盘刷新专用：抓取可转债强赎快照并附 updated_at。
+
+    权威空返回 []；源异常直接上抛。
+    """
+    df = ak.bond_cb_redeem_jsl()
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "ts_code": str(row.get("代码", "")).strip(),
+                "bond_name": str(row.get("名称", "")).strip(),
+                "redeem_flag": str(row.get("强赎状态", "")).strip(),
+                "redeem_price": _to_float(row.get("强赎价")),
+                "redeem_date": str(row.get("最后交易日", ""))[:10],
+                "data_source": "akshare",
+                "updated_at": updated_at,
+            }
+        )
+    return records
+
+
+def fetch_cb_index_records() -> list[dict]:
+    """收盘刷新专用：抓取可转债等权指数全历史并归一化（历史型源）。
+
+    由适配器挑选回看窗口内可接受的目标分区；源异常直接上抛。
+    """
+    df = ak.bond_cb_index_jsl()
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "trade_date": str(row.get("price_dt", ""))[:10],
+                "index_code": "JSL_EW",
+                "index_name": "集思录可转债等权指数",
+                "open": None,
+                "close": _to_float(row.get("price")),
+                "high": None,
+                "low": None,
+                "volume": _to_float(row.get("volume")),
+                "data_source": "akshare",
+            }
+        )
+    return records
