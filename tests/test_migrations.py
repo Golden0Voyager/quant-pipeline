@@ -1048,7 +1048,7 @@ def test_migration_009_rebuilds_source_record_tables_and_removes_old_unique_key(
     engine.apply_pending(target_version=8)
     _create_legacy_source_record_tables(str(tmp_db))
 
-    result = engine.apply_pending()
+    result = engine.apply_pending(target_version=9)
 
     assert [item["version"] for item in result] == [9]
     repurchase_second = {
@@ -1163,3 +1163,173 @@ def test_migration_009_rolls_back_table_rebuild_when_key_generation_fails(
     assert "source_record_key" not in repurchase_columns
     assert repurchase_count == 1
     assert version_9 == (0,)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 010 (close-refresh run audit)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_migration_010_creates_refresh_audit_tables_on_fresh_database(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+
+    result = engine.apply_pending(target_version=10)
+
+    assert result[-1]["version"] == 10
+    with sqlite3.connect(str(tmp_db)) as conn:
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_runs)")
+        }
+        task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_task_runs)")
+        }
+        task_primary_key = tuple(
+            row[1]
+            for row in sorted(
+                conn.execute("PRAGMA table_info(refresh_task_runs)"),
+                key=lambda row: row[5],
+            )
+            if row[5] > 0
+        )
+    assert run_columns == {
+        "run_id",
+        "target_date",
+        "started_at",
+        "finished_at",
+        "status",
+        "symbols_json",
+    }
+    assert task_columns == {
+        "run_id",
+        "task_name",
+        "policy_kind",
+        "requested_date",
+        "as_of_date",
+        "status",
+        "fetched",
+        "validated",
+        "replaced",
+        "retained",
+        "failed",
+        "metadata_json",
+    }
+    assert task_primary_key == ("run_id", "task_name")
+
+
+def test_migration_010_indexes_refresh_run_target_date_and_task_status(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        run_indexes = {
+            row[1]: tuple(
+                column[2]
+                for column in conn.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in conn.execute("PRAGMA index_list(refresh_runs)")
+            if row[2] == 0
+        }
+        task_indexes = {
+            row[1]: tuple(
+                column[2]
+                for column in conn.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in conn.execute("PRAGMA index_list(refresh_task_runs)")
+            if row[2] == 0
+        }
+
+    assert run_indexes["idx_refresh_runs_target_date"] == ("target_date",)
+    assert task_indexes["idx_refresh_task_runs_status"] == ("status",)
+
+
+def test_migration_010_refresh_upgrade_preserves_existing_ingestion_tables(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=9)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        columns_before = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)")
+        )
+        conn.execute(
+            """INSERT INTO ingestion_runs
+               (run_id, task_name, status, started_at, finished_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "legacy-ingestion-run",
+                "update_bars",
+                "success",
+                "2026-07-28T08:00:00+00:00",
+                "2026-07-28T08:05:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    result = engine.apply_pending(target_version=10)
+
+    assert [item["version"] for item in result] == [10]
+    with sqlite3.connect(str(tmp_db)) as conn:
+        columns_after = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)")
+        )
+        legacy_row = conn.execute(
+            """SELECT run_id, task_name, status
+               FROM ingestion_runs WHERE run_id = ?""",
+            ("legacy-ingestion-run",),
+        ).fetchone()
+    assert columns_after == columns_before
+    assert legacy_row == ("legacy-ingestion-run", "update_bars", "success")
+
+
+def test_migration_010_refresh_upgrade_is_idempotent(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+
+    first = engine.apply_pending(target_version=10)
+    second = engine.apply_pending(target_version=10)
+
+    assert first[-1]["version"] == 10
+    assert second == []
+    with sqlite3.connect(str(tmp_db)) as conn:
+        applied = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 10"
+        ).fetchone()[0]
+    assert applied == 1
+
+
+def test_migration_010_refresh_failure_rolls_back_partial_schema(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=9)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute("CREATE TABLE refresh_task_runs (legacy_only TEXT)")
+        conn.commit()
+
+    with pytest.raises(MigrationError, match="no such column: status"):
+        engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        refresh_runs = conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'table' AND name = 'refresh_runs'"""
+        ).fetchone()
+        legacy_columns = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_task_runs)")
+        )
+        failure = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 10"
+        ).fetchone()
+    assert refresh_runs is None
+    assert legacy_columns == ("legacy_only",)
+    assert failure == (0,)
