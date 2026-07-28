@@ -81,6 +81,32 @@ def db_path(tmp_path: Path) -> Path:
                 parent_code TEXT NOT NULL REFERENCES parent_codes(code)
             );
             INSERT INTO child_snapshot VALUES ('OLD', 'VALID');
+
+            CREATE TABLE refresh_runs (
+                run_id TEXT PRIMARY KEY,
+                target_date TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                symbols_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE refresh_task_runs (
+                run_id TEXT NOT NULL REFERENCES refresh_runs(run_id)
+                    ON DELETE CASCADE,
+                task_name TEXT NOT NULL,
+                policy_kind TEXT NOT NULL,
+                requested_date TEXT NOT NULL,
+                as_of_date TEXT,
+                status TEXT NOT NULL,
+                fetched INTEGER NOT NULL DEFAULT 0,
+                validated INTEGER NOT NULL DEFAULT 0,
+                replaced INTEGER NOT NULL DEFAULT 0,
+                retained INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (run_id, task_name)
+            );
             """
         )
     return path
@@ -111,6 +137,217 @@ def _quotes_request(
         required_fields=("ts_code", "trade_date", "close", "source"),
         minimum_coverage=minimum_coverage,
     )
+
+
+def test_start_run_persists_refresh_identity_and_symbol_scope(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+        symbols=("600000.SH", "000001.SZ"),
+    )
+
+    assert _rows(
+        db_path,
+        """SELECT run_id, target_date, started_at, finished_at, status, symbols_json
+           FROM refresh_runs""",
+    ) == [
+        (
+            "refresh-1",
+            "2026-07-27",
+            "2026-07-28T08:00:00+00:00",
+            None,
+            "running",
+            '["600000.SH","000001.SZ"]',
+        )
+    ]
+
+
+def test_record_task_result_persists_counts_and_stable_metadata_json(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+
+    store.record_task_result(
+        run_id="refresh-1",
+        task_name="update_bars",
+        policy_kind="remote_date_snapshot",
+        requested_date="2026-07-27",
+        as_of_date="2026-07-27",
+        status="degraded",
+        fetched=5533,
+        validated=5532,
+        replaced=5532,
+        retained=1,
+        failed=1,
+        metadata={"z": 2, "details": {"retry": 1, "cache": "bypassed"}, "a": 1},
+    )
+
+    assert _rows(
+        db_path,
+        """SELECT run_id, task_name, policy_kind, requested_date, as_of_date,
+                  status, fetched, validated, replaced, retained, failed,
+                  metadata_json
+           FROM refresh_task_runs""",
+    ) == [
+        (
+            "refresh-1",
+            "update_bars",
+            "remote_date_snapshot",
+            "2026-07-27",
+            "2026-07-27",
+            "degraded",
+            5533,
+            5532,
+            5532,
+            1,
+            1,
+            '{"a":1,"details":{"cache":"bypassed","retry":1},"z":2}',
+        )
+    ]
+
+
+def test_finish_run_updates_only_parent_completion_state(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    store.record_task_result(
+        run_id="refresh-1",
+        task_name="update_bars",
+        policy_kind="remote_date_snapshot",
+        requested_date="2026-07-27",
+        as_of_date="2026-07-27",
+        status="success",
+        fetched=5533,
+        validated=5533,
+        replaced=5533,
+        retained=0,
+        failed=0,
+    )
+
+    store.finish_run(
+        run_id="refresh-1",
+        finished_at="2026-07-28T08:30:00+00:00",
+        status="success",
+    )
+
+    assert _rows(
+        db_path,
+        "SELECT status, finished_at FROM refresh_runs WHERE run_id = 'refresh-1'",
+    ) == [("success", "2026-07-28T08:30:00+00:00")]
+    assert _rows(
+        db_path,
+        """SELECT task_name, status, replaced
+           FROM refresh_task_runs WHERE run_id = 'refresh-1'""",
+    ) == [("update_bars", "success", 5533)]
+
+
+def test_refresh_audit_values_are_bound_instead_of_executed_as_sql(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    malicious_run_id = "refresh-1'); DROP TABLE refresh_runs; --"
+    malicious_task = "update_bars'); DROP TABLE quotes; --"
+    store.start_run(
+        run_id=malicious_run_id,
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    store.record_task_result(
+        run_id=malicious_run_id,
+        task_name=malicious_task,
+        policy_kind="remote_date_snapshot",
+        requested_date="2026-07-27",
+        as_of_date=None,
+        status="failed",
+        fetched=0,
+        validated=0,
+        replaced=0,
+        retained=2,
+        failed=1,
+        metadata={"error": "'); DELETE FROM quotes; --"},
+    )
+    store.finish_run(
+        run_id=malicious_run_id,
+        finished_at="2026-07-28T08:01:00+00:00",
+        status="failed",
+    )
+
+    assert _rows(db_path, "SELECT run_id, status FROM refresh_runs") == [
+        (malicious_run_id, "failed")
+    ]
+    assert _rows(db_path, "SELECT task_name FROM refresh_task_runs") == [
+        (malicious_task,)
+    ]
+    assert _rows(db_path, "SELECT COUNT(*) FROM quotes") == [(3,)]
+
+
+def test_failed_refresh_audit_write_cannot_rollback_business_replacement(
+    store: SQLiteRefreshStore,
+    db_path: Path,
+) -> None:
+    store.start_run(
+        run_id="refresh-1",
+        target_date="2026-07-27",
+        started_at="2026-07-28T08:00:00+00:00",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TRIGGER fail_refresh_task_audit
+            BEFORE INSERT ON refresh_task_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'injected refresh audit failure');
+            END;
+            """
+        )
+
+    store.replace_date_snapshot(
+        _quotes_request(
+            (
+                ("000001.SZ", "2026-07-27", 10.8, "close"),
+                ("300001.SZ", "2026-07-27", 30.8, "close"),
+            )
+        )
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="injected refresh audit failure"):
+        store.record_task_result(
+            run_id="refresh-1",
+            task_name="update_bars",
+            policy_kind="remote_date_snapshot",
+            requested_date="2026-07-27",
+            as_of_date="2026-07-27",
+            status="success",
+            fetched=2,
+            validated=2,
+            replaced=2,
+            retained=0,
+            failed=0,
+        )
+
+    assert _rows(
+        db_path,
+        """SELECT ts_code, trade_date, close, source
+           FROM quotes ORDER BY trade_date, ts_code""",
+    ) == [
+        ("000001.SZ", "2026-07-24", 11.0, "close"),
+        ("000001.SZ", "2026-07-27", 10.8, "close"),
+        ("300001.SZ", "2026-07-27", 30.8, "close"),
+    ]
+    assert _rows(db_path, "SELECT COUNT(*) FROM refresh_task_runs") == [(0,)]
 
 
 def test_date_snapshot_replaces_complete_partition_and_preserves_history(
