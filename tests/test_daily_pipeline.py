@@ -843,6 +843,41 @@ class TestRunAll:
 # main() / CLI
 # ===========================================================================
 class TestMain:
+    @pytest.mark.parametrize("status", ["success", "no_data"])
+    def test_direct_task_success_status_does_not_exit(self, weekday_mock, status):
+        mock_fn = MagicMock(
+            return_value={"status": status, "saved": 0, "reason": "current"}
+        )
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
+        ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
+            "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+        ):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+
+    def test_direct_task_degraded_status_exits_one(self, weekday_mock):
+        mock_fn = MagicMock(
+            return_value={
+                "status": "degraded",
+                "saved": 0,
+                "error": "1 failures",
+            }
+        )
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
+        ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
+            "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+        ):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            with pytest.raises(SystemExit) as exc_info:
+                daily_pipeline.main()
+        assert exc_info.value.code == 1
+
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
