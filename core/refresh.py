@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time
 from typing import Any, Literal, Protocol
@@ -149,6 +150,37 @@ class RefreshOrchestrator:
             symbols=context.symbols,
         )
 
+        try:
+            return self._execute(context, ordered_specs)
+        except Exception as exc:
+            # The run row is already open; contain any unexpected error so
+            # run() honors its TaskResult contract and the row does not stay
+            # 'running' forever (see migrations/008 for that failure mode).
+            # Closing the run is best effort: a second store error must not
+            # mask the original outcome.
+            with suppress(Exception):
+                self._store.finish_run(
+                    run_id=context.run_id,
+                    finished_at=self._aware_now().isoformat(),
+                    status="failed",
+                )
+            failure = TaskResult.failed(
+                "refresh_today",
+                ErrorKind.INTERNAL,
+                str(exc),
+            )
+            failure.metadata = {
+                "run_id": context.run_id,
+                "target_date": context.target_date,
+                "error_type": type(exc).__name__,
+            }
+            return failure
+
+    def _execute(
+        self,
+        context: RefreshContext,
+        ordered_specs: tuple[TaskSpec, ...],
+    ) -> TaskResult:
         executions: dict[str, _TaskExecution] = {}
         for spec in ordered_specs:
             policy = spec.refresh_policy
@@ -256,6 +288,13 @@ class RefreshOrchestrator:
             if adapter_result is not None:
                 changed.extend(adapter_result.changed_symbols)
         changed = list(dict.fromkeys(changed))
+        # Contract: an empty upstream changed-symbol set carries no narrowing
+        # information, so the dependent keeps the run's requested scope
+        # unchanged (None for full-market runs, or the requested tuple).
+        # Only a non-empty changed set narrows to changed (or requested ∩
+        # changed).
+        if not changed:
+            return context
         if symbols is None:
             return replace(context, symbols=tuple(changed))
         changed_set = set(changed)
