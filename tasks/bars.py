@@ -209,6 +209,21 @@ def _bars_result(
     return result
 
 
+def _bars_no_data_result(*, reason: str) -> dict[str, Any]:
+    """构造合法零工作量的日线任务结果。"""
+    result = _bars_result(
+        success=0,
+        failed=0,
+        skipped=0,
+        total=0,
+        attempted=0,
+        failed_symbols=[],
+    )
+    result["status"] = "no_data"
+    result["reason"] = reason
+    return result
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -236,14 +251,7 @@ def update_bars(
         stocks = db.get_stock_list()
         if stocks.empty:
             logger.error("❌ 股票列表为空")
-            return _bars_result(
-                success=0,
-                failed=0,
-                skipped=0,
-                total=0,
-                attempted=0,
-                failed_symbols=[],
-            )
+            return _bars_no_data_result(reason="stock list is empty")
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
         bj_count = len(stocks) - len(stock_codes)
     if limit:
@@ -255,6 +263,9 @@ def update_bars(
         logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
     else:
         logger.info(f"📊 共 {total} 只股票待更新（已包含北交所）")
+
+    if total == 0:
+        return _bars_no_data_result(reason="no eligible symbols")
 
     # ── 智能探测：快速 SQL 检查是否全部已是最新 ──
     if not resume and not force and not limit and not symbols and _has_real_db_path(db):
@@ -320,6 +331,11 @@ def update_bars(
                     total = len(stock_codes)
                     progress = None
                     logger.info("🔄 断点续传：仅重试失败队列 (%d 只)", total)
+                    if total == 0:
+                        ProgressTracker.clear()
+                        return _bars_no_data_result(
+                            reason="retry queue has no eligible symbols"
+                        )
                 elif progress_task in (None, "update_bars"):
                     last_symbol = progress.get("last_symbol", "")
                     start_idx = ProgressTracker.find_resume_index(stock_codes, last_symbol)
@@ -333,12 +349,14 @@ def update_bars(
                         "ℹ️  忽略未知进度任务 %s 的扫描断点",
                         progress_task,
                     )
+                    progress = None
             else:
                 logger.info(
                     f"ℹ️  进度文件是昨天的 ({progress.get('date')})，"
                     "今日从头开始"
                 )
                 ProgressTracker.clear()
+                progress = None
         else:
             logger.info("ℹ️  未发现进度文件，从头开始")
     else:
@@ -619,13 +637,13 @@ def update_bars(
     logger.info("📈 日线数据更新完成")
     logger.info(f"  ✅ 成功: {success_count} 只")
     logger.info(f"  ⏭️  跳过(已最新): {skipped_count} 只")
-    logger.info(f"  ❌ 失败: {failed_count} 只")
+    logger.info(f"  ❌ 失败: {len(unique_failed)} 只")
     logger.info("=" * 60)
 
     monitor.flush()
     return _bars_result(
         success=success_count,
-        failed=failed_count,
+        failed=len(unique_failed),
         skipped=skipped_count,
         total=total,
         attempted=success_count + failed_count + skipped_count,
