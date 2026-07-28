@@ -185,3 +185,71 @@ def update_option_sentiment(db: DatabaseInterface) -> dict:
         results["saved"] = 0
 
     return dict(results)
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_option_sentiment_record(trade_date: str) -> dict | None:
+    """收盘刷新专用：抓取目标日 QVIX 与 50ETF 期权 PCR 并合并为单条记录。
+
+    QVIX 历史无目标日行 → 返回 None（是否判定失败由适配器把关）；
+    PCR 源为空或缺 510050 行时仅保留 QVIX 字段；源异常直接上抛。
+    """
+    qvix_df = ak.index_option_50etf_qvix()
+    qvix_value: float | None = None
+    found = False
+    if qvix_df is not None and not qvix_df.empty:
+        for _, row in qvix_df.iterrows():
+            date_val = row.get("date")
+            if date_val is None or pd.isna(date_val):
+                date_val = row.get("日期")
+            if date_val is None or pd.isna(date_val):
+                continue
+            if str(date_val).strip()[:10] != trade_date:
+                continue
+            found = True
+            qvix_value = _to_float(row.get("close"))
+            if qvix_value is None:
+                qvix_value = _to_float(row.get("qvix"))
+            if qvix_value is None:
+                qvix_value = _to_float(row.get("QVIX"))
+            break
+    if not found:
+        return None
+
+    record: dict = {"trade_date": trade_date, "qvix": qvix_value}
+
+    stats_df = ak.option_daily_stats_sse(date=trade_date.replace("-", ""))
+    if stats_df is None or stats_df.empty:
+        return record
+
+    code_col = next((c for c in stats_df.columns if "合约标的代码" in c), None)
+    put_vol_col = next((c for c in stats_df.columns if "认沽成交量" in c), None)
+    call_vol_col = next((c for c in stats_df.columns if "认购成交量" in c), None)
+    put_oi_col = next((c for c in stats_df.columns if "未平仓认沽合约数" in c), None)
+    call_oi_col = next((c for c in stats_df.columns if "未平仓认购合约数" in c), None)
+    pcr_col = next((c for c in stats_df.columns if "认沽/认购" in c), None)
+    if code_col is None or put_vol_col is None or call_vol_col is None:
+        return record
+
+    target = stats_df[stats_df[code_col] == "510050"]
+    if target.empty:
+        return record
+
+    row = target.iloc[0]
+    put_vol = _to_int(row.get(put_vol_col))
+    call_vol = _to_int(row.get(call_vol_col))
+    pcr = _to_float(row.get(pcr_col)) if pcr_col else None
+    if pcr is None and call_vol is not None and call_vol > 0 and put_vol is not None:
+        pcr = round(put_vol / call_vol, 4)
+    record.update({
+        "pcr": pcr,
+        "put_volume": put_vol,
+        "call_volume": call_vol,
+        "put_oi": _to_int(row.get(put_oi_col)) if put_oi_col else None,
+        "call_oi": _to_int(row.get(call_oi_col)) if call_oi_col else None,
+    })
+    return record
