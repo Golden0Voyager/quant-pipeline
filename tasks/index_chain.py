@@ -387,3 +387,62 @@ def update_chip_distribution_em_fullmarket(db: DatabaseInterface) -> dict:
     logger.info(f"已有 {len(existing)} 只，还需拉取 {len(remaining)} 只")
 
     return update_chip_distribution_em(db, symbols_to_update=remaining)
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 7）：只抽目标日一行，不写库
+# ===========================================================================
+
+_CHIP_EM_REFRESH_COLUMNS = (
+    "profit_ratio", "avg_cost",
+    "cost_90_low", "cost_90_high", "concentration_90",
+    "cost_70_low", "cost_70_high", "concentration_70",
+)
+
+
+def fetch_chip_em_record_for_refresh(
+    symbol: str,
+    target_date: str,
+    *,
+    fetch=None,
+) -> tuple[dict | None, str | None]:
+    """收盘刷新专用：抓取 EM 筹码全历史，仅抽目标日一行为写库记录。
+
+    刷新模式下绝不调用随机目标选择器（_get_chip_em_target_symbols）；
+    不写库、不重写历史。EM 源没有 chip_concentration 列，记录中不携带。
+
+    Args:
+        symbol: 股票代码。
+        target_date: 目标交易日 'YYYY-MM-DD'。
+        fetch: 可注入的抓取函数 symbol -> DataFrame | None，
+            默认 _fetch_cyq_em。
+
+    Returns:
+        (record, None) 成功；(None, reason) 未产出记录，reason 取值：
+        "fetch_failed"（源端失败，计入连续失败熔断）、
+        "missing_target"（历史里没有目标日）、
+        "invalid"（目标日行 NaN 或双零，视为无效数据）。
+    """
+    fetcher = fetch if fetch is not None else _fetch_cyq_em
+    df = fetcher(symbol)
+    if df is None or df.empty:
+        return None, "fetch_failed"
+
+    matches = df[df["trade_date"].astype(str).str[:10] == target_date]
+    if matches.empty:
+        return None, "missing_target"
+
+    row = matches.iloc[-1]
+    record: dict[str, object] = {"ts_code": symbol, "trade_date": target_date}
+    for col in _CHIP_EM_REFRESH_COLUMNS:
+        value = row.get(col)
+        # NaN → None（SQLite 不接受 NaN）
+        record[col] = None if value is None or value != value else float(value)
+
+    profit_ratio = record["profit_ratio"]
+    avg_cost = record["avg_cost"]
+    if profit_ratio is None or avg_cost is None:
+        return None, "invalid"
+    if profit_ratio == 0.0 and avg_cost == 0.0:
+        return None, "invalid"
+    return record, None
