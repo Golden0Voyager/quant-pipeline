@@ -22,14 +22,19 @@ from core.refresh import RefreshContext
 from core.refresh_adapters import (
     REFRESH_ADAPTERS,
     BarsRefreshAdapter,
+    CbIndexRefreshAdapter,
     EastmoneyChipRefreshAdapter,
     FundamentalsRefreshAdapter,
     FundFlowRefreshAdapter,
     HistoricalValuationRefreshAdapter,
+    IndexDailyRefreshAdapter,
     IndicatorsRefreshAdapter,
     LocalChipRefreshAdapter,
+    MarginTradingRefreshAdapter,
     MarketSnapshotRefreshAdapter,
+    MarketValuationRefreshAdapter,
     SectorIndustryRefreshAdapter,
+    SouthFlowRefreshAdapter,
     build_core_refresh_adapters,
     build_derived_refresh_adapters,
 )
@@ -1282,3 +1287,446 @@ def test_every_refresh_policy_has_runtime_adapter():
     assert set(REFRESH_ADAPTERS) == {
         spec.name for spec in refreshable_trading_tasks()
     }
+
+
+# ===========================================================================
+# Task 9 剩余适配器：公共 fixture 与 fake
+# ===========================================================================
+
+
+def _create_market_tables(db_path: str) -> None:
+    """补建 Task 9 剩余适配器涉及的正式表（带 UNIQUE 约束）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE margin_trading (
+            ts_code TEXT NOT NULL, trade_date TEXT NOT NULL,
+            margin_balance REAL, margin_buy REAL, margin_repay REAL,
+            short_balance REAL, short_sell REAL, short_repay REAL,
+            total_balance REAL, data_source TEXT,
+            UNIQUE(trade_date, ts_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE south_flow (
+            trade_date TEXT NOT NULL, market TEXT,
+            net_buy_amount REAL, buy_amount REAL, sell_amount REAL,
+            cumulative_net_buy REAL, data_source TEXT,
+            UNIQUE(trade_date, market))"""
+    )
+    conn.execute(
+        """CREATE TABLE north_flow (
+            trade_date TEXT NOT NULL, market TEXT,
+            net_buy_amount REAL, data_source TEXT,
+            UNIQUE(trade_date, market))"""
+    )
+    conn.execute(
+        """CREATE TABLE index_daily (
+            index_code TEXT NOT NULL, index_name TEXT, trade_date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume REAL,
+            data_source TEXT,
+            UNIQUE(trade_date, index_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE market_valuation (
+            date TEXT PRIMARY KEY, pe_median REAL, pe_quantile REAL,
+            pe_lyr_median REAL, pb_median REAL, pb_quantile REAL,
+            equity_bond_spread REAL, ebs_ma REAL, csi300_close REAL,
+            data_source TEXT, data_date TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE cb_index (
+            trade_date TEXT NOT NULL, index_code TEXT, index_name TEXT,
+            open REAL, close REAL, high REAL, low REAL, volume REAL,
+            data_source TEXT,
+            UNIQUE(trade_date, index_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE institution_survey (
+            trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, stock_name TEXT,
+            survey_org TEXT, survey_type TEXT, survey_count INTEGER,
+            source_record_key TEXT NOT NULL UNIQUE)"""
+    )
+    conn.execute(
+        """CREATE TABLE stock_pledge (
+            trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, stock_name TEXT,
+            pledger TEXT, pledge_amount REAL, pledge_ratio REAL, pledge_org TEXT,
+            source_record_key TEXT NOT NULL UNIQUE)"""
+    )
+    conn.execute(
+        """CREATE TABLE etf_daily (
+            ts_code TEXT NOT NULL, name TEXT, trade_date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, volume REAL, amount REAL,
+            data_source TEXT,
+            UNIQUE(ts_code, trade_date))"""
+    )
+    conn.execute(
+        """CREATE TABLE limit_up_down (
+            trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, name TEXT,
+            pct_change REAL, close_price REAL, turnover_rate REAL,
+            limit_type TEXT, board_count INTEGER, industry TEXT, data_source TEXT,
+            UNIQUE(trade_date, ts_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE option_sentiment (
+            trade_date TEXT PRIMARY KEY, qvix REAL, pcr REAL,
+            put_volume INTEGER, call_volume INTEGER,
+            put_oi INTEGER, call_oi INTEGER, implied_vol_avg REAL)"""
+    )
+    conn.execute(
+        """CREATE TABLE dragon_tiger (
+            source_record_key TEXT NOT NULL UNIQUE, ts_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL, close_price REAL, pct_change REAL,
+            net_buy_amount REAL, buy_amount REAL, sell_amount REAL,
+            turnover_rate REAL, market_cap REAL, reason TEXT, data_source TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE block_trade (
+            source_record_key TEXT NOT NULL UNIQUE, ts_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL, deal_price REAL, close_price REAL,
+            discount_rate REAL, volume REAL, amount REAL,
+            buyer_branch TEXT, seller_branch TEXT, data_source TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE sector_fund_flow (
+            trade_date TEXT NOT NULL, sector_name TEXT NOT NULL,
+            main_net_inflow REAL, main_net_inflow_pct REAL,
+            super_large_net_inflow REAL, large_net_inflow REAL,
+            medium_net_inflow REAL, small_net_inflow REAL, data_source TEXT,
+            UNIQUE(trade_date, sector_name))"""
+    )
+    conn.execute(
+        """CREATE TABLE ah_premium (
+            trade_date TEXT NOT NULL, ts_code TEXT, h_code TEXT, name TEXT,
+            a_price REAL, h_price REAL, premium REAL, data_source TEXT,
+            UNIQUE(trade_date, ts_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE cb_quotation (
+            ts_code TEXT, bond_name TEXT, price REAL, premium REAL,
+            double_low REAL, expire_date TEXT, data_source TEXT, updated_at TEXT,
+            UNIQUE(ts_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE cb_redeem (
+            ts_code TEXT, bond_name TEXT, redeem_flag TEXT, redeem_price REAL,
+            redeem_date TEXT, data_source TEXT, updated_at TEXT,
+            UNIQUE(ts_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE concept_board (
+            trade_date TEXT NOT NULL, concept_code TEXT NOT NULL, concept_name TEXT,
+            pct_change REAL, turnover REAL, up_count INTEGER, down_count INTEGER,
+            data_source TEXT,
+            UNIQUE(trade_date, concept_code))"""
+    )
+    conn.execute(
+        """CREATE TABLE stock_repurchase (
+            trade_date TEXT NOT NULL, stock_code TEXT NOT NULL, stock_name TEXT,
+            repurchase_amount REAL, repurchase_price REAL,
+            repurchase_price_lower REAL, repurchase_price_upper REAL,
+            repurchase_quantity INTEGER, progress_status TEXT,
+            source_record_key TEXT NOT NULL UNIQUE)"""
+    )
+    conn.execute(
+        """CREATE TABLE sector_daily (
+            sector_name TEXT, trade_date TEXT NOT NULL,
+            open REAL, close REAL, high REAL, low REAL, volume REAL, amount REAL,
+            pct_change REAL, data_source TEXT,
+            UNIQUE(sector_name, trade_date))"""
+    )
+    conn.execute(
+        """CREATE TABLE sector_valuation (
+            sector_name TEXT, trade_date TEXT NOT NULL,
+            pe REAL, pb REAL, total_mv REAL, data_source TEXT,
+            UNIQUE(sector_name, trade_date))"""
+    )
+    conn.execute(
+        """CREATE TABLE index_futures_basis (
+            trade_date TEXT NOT NULL, futures_code TEXT,
+            futures_price REAL, index_price REAL, basis REAL, basis_pct REAL,
+            data_source TEXT,
+            UNIQUE(trade_date, futures_code))"""
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def market_db_path(db_path: str) -> str:
+    _create_market_tables(db_path)
+    return db_path
+
+
+class FakeFetcher:
+    """记录调用参数并按预设返回记录（或抛预设异常）的手写 fetch fake。"""
+
+    def __init__(self, result: list | dict | Exception | None = None):
+        self.result = result
+        self.calls: list[tuple] = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class FakeDatedFetcher:
+    """按日期返回预设记录的手写 fetch fake（逐日探测型源）。"""
+
+    def __init__(self, by_date: dict[str, list | Exception]):
+        self.by_date = by_date
+        self.calls: list[str] = []
+
+    def __call__(self, trade_date: str) -> list[dict]:
+        self.calls.append(trade_date)
+        item = self.by_date.get(trade_date, [])
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _margin_record(code: str, trade_date: str, balance: float = 1e8) -> dict:
+    return {
+        "ts_code": code,
+        "trade_date": trade_date,
+        "margin_balance": balance,
+        "margin_buy": 2e7,
+        "margin_repay": 1e7,
+        "short_balance": 5e5,
+        "short_sell": 2e5,
+        "short_repay": 1e5,
+        "total_balance": balance + 5e5,
+        "data_source": "akshare",
+    }
+
+
+def _south_record(trade_date: str, market: str = "南向", net: float = 30.0) -> dict:
+    return {
+        "trade_date": trade_date,
+        "market": market,
+        "net_buy_amount": net,
+        "buy_amount": 100.0,
+        "sell_amount": 70.0,
+        "cumulative_net_buy": 2e4,
+        "data_source": "akshare",
+    }
+
+
+def _index_record(code: str, trade_date: str, close: float = 3000.0) -> dict:
+    return {
+        "index_code": code,
+        "index_name": f"指数{code}",
+        "trade_date": trade_date,
+        "open": close - 10.0,
+        "high": close + 20.0,
+        "low": close - 20.0,
+        "close": close,
+        "volume": 1e9,
+        "data_source": "akshare",
+    }
+
+
+def _cb_index_record(trade_date: str, price: float = 2100.0) -> dict:
+    return {
+        "trade_date": trade_date,
+        "index_code": "JSL_EW",
+        "index_name": "集思录可转债等权指数",
+        "open": None,
+        "close": price,
+        "high": None,
+        "low": None,
+        "volume": 8e8,
+        "data_source": "akshare",
+    }
+
+
+# ===========================================================================
+# 组1：回看接受型（LATEST_AVAILABLE_WITHIN_LOOKBACK）
+# ===========================================================================
+
+
+class TestMarginTradingRefreshAdapter:
+    def test_accepts_prior_day_partition_when_target_empty(self, market_db_path, store):
+        """目标日空 → 逐日回退到最近有数据的回看日，as_of 为接受日。"""
+        fetch = FakeDatedFetcher({
+            "2026-07-27": [],
+            "2026-07-26": [],
+            "2026-07-25": [],
+            "2026-07-24": [_margin_record("000001", "2026-07-24")],
+        })
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == "2026-07-24"
+        assert fetch.calls == ["2026-07-27", "2026-07-26", "2026-07-25", "2026-07-24"]
+        rows = _query(
+            market_db_path,
+            "SELECT ts_code, trade_date FROM margin_trading",
+        )
+        assert rows == [("000001", "2026-07-24")]
+
+    def test_all_candidates_empty_raises_and_keeps_old_rows(self, market_db_path, store):
+        """回看窗口内全部空 → 上抛，旧数据保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO margin_trading (ts_code, trade_date, margin_balance, data_source)"
+            " VALUES ('000001', '2026-07-24', 9e7, 'akshare')",
+        )
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=FakeDatedFetcher({}))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM margin_trading") == [(1,)]
+
+    def test_symbol_scope_upserts_only_requested(self, market_db_path, store):
+        """symbols 显式范围只 upsert 请求股票，其余旧行保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO margin_trading (ts_code, trade_date, margin_balance, data_source)"
+            " VALUES ('000002', '2026-07-27', 8e7, 'akshare')",
+        )
+        fetch = FakeDatedFetcher({
+            TARGET: [
+                _margin_record("000001", TARGET, balance=1.1e8),
+                _margin_record("000002", TARGET, balance=2.2e8),
+            ],
+        })
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.as_of_date == TARGET
+        assert result.replaced == 1
+        rows = _query(
+            market_db_path,
+            "SELECT ts_code, margin_balance FROM margin_trading ORDER BY ts_code",
+        )
+        assert rows == [("000001", 1.1e8), ("000002", 8e7)]
+
+    def test_empty_symbol_scope_is_noop(self, market_db_path, store):
+        fetch = FakeDatedFetcher({TARGET: [_margin_record("000001", TARGET)]})
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context(symbols=()))
+
+        assert fetch.calls == []
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+class TestSouthFlowRefreshAdapter:
+    def test_submits_only_accepted_partition_never_rewrites_history(
+        self, market_db_path, store
+    ):
+        """历史型源只提交回看窗口内最新分区，历史行绝不重写。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO south_flow (trade_date, market, net_buy_amount, data_source)"
+            " VALUES ('2026-07-20', '南向', 11.0, 'akshare')",
+        )
+        fetch = FakeFetcher([
+            _south_record("2026-07-20", net=99.0),
+            _south_record("2026-07-24", net=42.0),
+        ])
+        adapter = SouthFlowRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == "2026-07-24"
+        assert result.replaced == 1
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, net_buy_amount FROM south_flow ORDER BY trade_date",
+        )
+        assert rows == [("2026-07-20", 11.0), ("2026-07-24", 42.0)]
+
+    def test_no_partition_within_lookback_raises(self, market_db_path, store):
+        adapter = SouthFlowRefreshAdapter(
+            store=store, fetch_records=FakeFetcher([_south_record("2026-07-20")])
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+
+class TestIndexDailyRefreshAdapter:
+    def test_accepts_latest_complete_partition(self, market_db_path, store):
+        """目标日缺一个指数 → 回退到最近的完整分区。"""
+        fetch = FakeFetcher([
+            _index_record("sh000001", "2026-07-24", close=3300.0),
+            _index_record("sz399001", "2026-07-24", close=10500.0),
+            _index_record("sh000001", TARGET, close=3310.0),
+        ])
+        adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == "2026-07-24"
+        assert result.replaced == 2
+        rows = _query(
+            market_db_path,
+            "SELECT index_code, trade_date FROM index_daily ORDER BY index_code",
+        )
+        assert rows == [("sh000001", "2026-07-24"), ("sz399001", "2026-07-24")]
+
+    def test_no_complete_partition_within_lookback_raises(self, market_db_path, store):
+        fetch = FakeFetcher([
+            _index_record("sh000001", "2026-07-10"),
+            _index_record("sz399001", "2026-07-10"),
+            _index_record("sh000001", TARGET),
+        ])
+        adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+
+class TestMarketValuationRefreshAdapter:
+    def test_publishes_single_accepted_row_from_history(self, market_db_path, store):
+        """全历史合并源只发布回看窗口内最新一行，历史行不落库。"""
+        fetch = FakeFetcher([
+            {"date": "2026-06-30", "pe_median": 30.0, "data_source": "legu", "data_date": TARGET},
+            {"date": "2026-07-24", "pe_median": 31.5, "pb_median": 3.1,
+             "data_source": "legu", "data_date": TARGET},
+        ])
+        adapter = MarketValuationRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.as_of_date == "2026-07-24"
+        rows = _query(
+            market_db_path,
+            "SELECT date, pe_median, pb_median, pe_lyr_median FROM market_valuation",
+        )
+        assert rows == [("2026-07-24", 31.5, 3.1, None)]
+
+    def test_stale_history_only_raises(self, market_db_path, store):
+        adapter = MarketValuationRefreshAdapter(
+            store=store,
+            fetch_records=FakeFetcher([
+                {"date": "2026-07-01", "pe_median": 30.0, "data_source": "legu", "data_date": TARGET},
+            ]),
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+
+class TestCbIndexRefreshAdapter:
+    def test_accepts_lookback_partition(self, market_db_path, store):
+        fetch = FakeFetcher([
+            _cb_index_record("2026-07-20", price=2050.0),
+            _cb_index_record("2026-07-25", price=2101.5),
+        ])
+        adapter = CbIndexRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == "2026-07-25"
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, index_code, close FROM cb_index",
+        )
+        assert rows == [("2026-07-25", "JSL_EW", 2101.5)]
