@@ -105,4 +105,3 @@ Strict RED–GREEN coverage:
   rerun.
 - Restoring the old task contracts avoids storage changes by rejecting or
   collapsing valid source data, which does not meet the data-integrity goal.
-
