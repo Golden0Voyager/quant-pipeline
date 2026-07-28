@@ -11,7 +11,12 @@ def apply(conn):
             target_date  TEXT NOT NULL,
             started_at   TEXT NOT NULL,
             finished_at  TEXT,
-            status       TEXT NOT NULL,
+            status       TEXT NOT NULL CHECK (
+                status IN (
+                    'running', 'success', 'no_data', 'degraded', 'failed',
+                    'aborted'
+                )
+            ),
             symbols_json TEXT NOT NULL DEFAULT '[]'
         )
     """)
@@ -23,12 +28,24 @@ def apply(conn):
             policy_kind     TEXT NOT NULL,
             requested_date  TEXT NOT NULL,
             as_of_date      TEXT,
-            status          TEXT NOT NULL,
-            fetched         INTEGER NOT NULL DEFAULT 0,
-            validated       INTEGER NOT NULL DEFAULT 0,
-            replaced        INTEGER NOT NULL DEFAULT 0,
-            retained        INTEGER NOT NULL DEFAULT 0,
-            failed          INTEGER NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL CHECK (
+                status IN ('success', 'no_data', 'degraded', 'failed', 'aborted')
+            ),
+            fetched         INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(fetched) = 'integer' AND fetched >= 0
+            ),
+            validated       INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(validated) = 'integer' AND validated >= 0
+            ),
+            replaced        INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(replaced) = 'integer' AND replaced >= 0
+            ),
+            retained        INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(retained) = 'integer' AND retained >= 0
+            ),
+            failed          INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(failed) = 'integer' AND failed >= 0
+            ),
             metadata_json   TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (run_id, task_name)
         )
