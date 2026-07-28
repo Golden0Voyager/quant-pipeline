@@ -170,11 +170,13 @@ class TestRefreshPolicies:
             if s.cadence is not Cadence.TRADING_DAY
         )
 
-    def test_every_policy_table_is_declared_by_its_task(self):
+    def test_every_policy_declares_nonempty_contracts_for_all_written_tables(self):
         for spec in refreshable_trading_tasks():
             assert spec.refresh_policy is not None
-            assert set(spec.refresh_policy.natural_keys) <= set(spec.tables)
-            assert set(spec.refresh_policy.required_fields) <= set(spec.tables)
+            assert set(spec.refresh_policy.natural_keys) == set(spec.tables)
+            assert set(spec.refresh_policy.required_fields) == set(spec.tables)
+            assert all(spec.refresh_policy.natural_keys.values())
+            assert all(spec.refresh_policy.required_fields.values())
 
     def test_every_policy_dependency_names_a_registered_task(self):
         registered_names = {spec.name for spec in TASK_REGISTRY}
@@ -187,6 +189,67 @@ class TestRefreshPolicies:
         assert spec is not None
         assert spec.refresh_policy is not None
         assert spec.refresh_policy.dependencies == ("update_fundamentals",)
+
+    def test_market_snapshot_accepts_normal_xueqiu_coverage(self):
+        spec = lookup_task("update_market_snapshot")
+        assert spec is not None
+        assert spec.refresh_policy is not None
+        assert spec.refresh_policy.required_fields == {
+            "fundamentals": ("ts_code", "trade_date"),
+        }
+        assert spec.refresh_policy.minimum_coverage == 0.4
+
+    def test_multi_event_tasks_use_stable_source_record_keys(self):
+        expected = {
+            "update_dragon_tiger": ("trade_date", "ts_code"),
+            "update_block_trade": ("trade_date", "ts_code"),
+            "update_stock_pledge": ("trade_date", "stock_code"),
+        }
+        for task_name, business_fields in expected.items():
+            spec = lookup_task(task_name)
+            assert spec is not None
+            assert spec.refresh_policy is not None
+            table = spec.tables[0]
+            assert spec.refresh_policy.natural_keys[table] == ("source_record_key",)
+            assert spec.refresh_policy.required_fields[table] == (
+                "source_record_key",
+                *business_fields,
+            )
+
+    def test_derived_tasks_depend_on_fresh_upstreams(self):
+        historical_valuation = lookup_task("update_historical_valuation")
+        sector_industry = lookup_task("update_sector_industry")
+        assert historical_valuation is not None
+        assert sector_industry is not None
+        assert historical_valuation.refresh_policy is not None
+        assert sector_industry.refresh_policy is not None
+        assert historical_valuation.refresh_policy.dependencies == (
+            "update_fundamentals",
+            "update_market_snapshot",
+        )
+        assert sector_industry.refresh_policy.dependencies == ("update_fundamentals",)
+
+    def test_high_risk_policy_values_remain_explicit(self):
+        expected = {
+            "update_bars": {
+                "minimum_coverage": 0.8,
+                "cache_namespace": "daily_bars",
+            },
+            "update_margin_trading": {"lookback_days": 3},
+            "update_south_flow": {"lookback_days": 3},
+            "update_index_daily": {"lookback_days": 3},
+            "update_cb_index": {"lookback_days": 3},
+            "update_market_valuation": {"lookback_days": 3},
+            "update_institution_survey": {"lookback_days": 30},
+            "update_stock_pledge": {"lookback_days": 30},
+        }
+
+        for task_name, values in expected.items():
+            spec = lookup_task(task_name)
+            assert spec is not None
+            assert spec.refresh_policy is not None
+            for field, value in values.items():
+                assert getattr(spec.refresh_policy, field) == value
 
     def test_sector_derivatives_declares_all_written_tables(self):
         spec = lookup_task("update_sector_derivatives")
