@@ -158,6 +158,59 @@ class TestStockPledge:
         assert result["saved"] == 1
         assert any(call.kwargs.get("date") == "20260630" for call in ak.stock_gpzy_pledge_ratio_em.call_args_list)
 
+    def test_update_stock_pledge_attaches_stable_source_key(self):
+        """任务层记录必须携带稳定 source_record_key（null pledger 容忍）。"""
+        db = MagicMock()
+        db.save_stock_pledge_batch.return_value = 1
+        with patch.object(stock_pledge, "ak", _ak_with(_pledge_df())):
+            stock_pledge.update_stock_pledge(db)
+            first_keys = [
+                r["source_record_key"]
+                for r in db.save_stock_pledge_batch.call_args.args[0]
+            ]
+            stock_pledge.update_stock_pledge(db)
+            second_keys = [
+                r["source_record_key"]
+                for r in db.save_stock_pledge_batch.call_args.args[0]
+            ]
+        assert all(isinstance(k, str) and len(k) == 64 for k in first_keys)
+        # 同一源行重复抓取 → 键稳定不变
+        assert first_keys == second_keys
+
+    def test_provider_null_pledger_rows_dedupe_on_stable_key(self, tmp_path):
+        """真库：null pledger 行写入两次 → 稳定键去重为 1 行且取最新值。"""
+        import sqlite3
+
+        from providers import SmartMoneyDBProvider
+
+        db_path = tmp_path / "pledge_keys_test.db"
+        provider = SmartMoneyDBProvider(db_path=str(db_path))
+        # conftest 的 DatabaseManager mock 固定共享路径，重绑到本用例专属库
+        provider._db.db_path = str(db_path)
+        provider._ensure_wal_mode()
+        provider._ensure_tables()
+        provider._run_versioned_migrations()
+        record = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "平安银行",
+            "pledger": None,
+            "pledge_amount": 1000000.0,
+            "pledge_ratio": 0.05,
+            "pledge_org": None,
+        }
+        try:
+            assert provider.save_stock_pledge_batch([record]) == 1
+            provider.save_stock_pledge_batch([{**record, "pledge_ratio": 0.06}])
+            with sqlite3.connect(str(db_path)) as conn:
+                rows = conn.execute(
+                    """SELECT pledger, pledge_ratio FROM stock_pledge
+                       WHERE trade_date = '2026-07-21' AND stock_code = '000001'"""
+                ).fetchall()
+        finally:
+            provider.close()
+        assert rows == [(None, 0.06)]
+
 
 # ===========================================================================
 # 2. stock_repurchase
