@@ -121,8 +121,11 @@ class SQLiteRefreshStore:
         """Publish all component replacements in one transaction."""
         if not request.replacements:
             raise RefreshValidationError("composite replacement must not be empty")
-        tables = tuple(replacement.table for replacement in request.replacements)
-        if len(tables) != len(set(tables)):
+        table_keys = []
+        for replacement in request.replacements:
+            self._validate_identifier(replacement.table)
+            table_keys.append(replacement.table.casefold())
+        if len(table_keys) != len(set(table_keys)):
             raise RefreshValidationError("composite replacement contains a duplicate table")
         return self._replace_atomically(request.replacements)
 
