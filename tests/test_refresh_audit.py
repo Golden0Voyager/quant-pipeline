@@ -1,0 +1,280 @@
+"""Data-quality tests for close-refresh task audit."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from core.refresh import RefreshAdapterResult, RefreshContext
+from core.refresh_audit import RefreshAudit, RefreshAuditError
+from core.task_registry import (
+    Cadence,
+    DateStrategy,
+    EmptyPolicy,
+    RefreshKind,
+    RefreshPolicy,
+    TaskSpec,
+)
+
+
+def _spec(
+    *,
+    strategy: DateStrategy = DateStrategy.EXACT_TARGET,
+    lookback_days: int = 0,
+    minimum_coverage: float | None = None,
+    required_fields: tuple[str, ...] = ("code", "trade_date"),
+    natural_keys: tuple[str, ...] = ("code", "trade_date"),
+) -> TaskSpec:
+    return TaskSpec(
+        name="audit_task",
+        callable=None,
+        tables=("quotes",),
+        cadence=Cadence.TRADING_DAY,
+        date_columns={"quotes": "trade_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="test",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            strategy,
+            {"quotes": natural_keys},
+            {"quotes": required_fields},
+            minimum_coverage=minimum_coverage,
+            lookback_days=lookback_days,
+        ),
+    )
+
+
+def _context() -> RefreshContext:
+    return RefreshContext(
+        target_date="2026-07-27",
+        started_at=datetime(2026, 7, 27, 8, tzinfo=UTC),
+        run_id="refresh-1",
+    )
+
+
+def _result(
+    *,
+    as_of_date: str | None = "2026-07-27",
+    fetched: int = 1,
+    validated: int = 1,
+    replaced: int = 1,
+    retained: int = 0,
+    metadata: dict[str, object] | None = None,
+) -> RefreshAdapterResult:
+    return RefreshAdapterResult(
+        task_name="audit_task",
+        as_of_date=as_of_date,
+        fetched=fetched,
+        validated=validated,
+        replaced=replaced,
+        retained=retained,
+        failed_symbols=(),
+        changed_symbols=(),
+        metadata=metadata or {},
+    )
+
+
+def test_exact_target_rejects_stale_as_of_date() -> None:
+    with pytest.raises(RefreshAuditError, match="target date"):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(as_of_date="2026-07-24"),
+        )
+
+
+def test_lookback_accepts_latest_available_date_inside_window() -> None:
+    report = RefreshAudit().validate_task(
+        _spec(
+            strategy=DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            lookback_days=3,
+        ),
+        _context(),
+        _result(as_of_date="2026-07-24"),
+    )
+
+    assert report.validated == 1
+    assert report.degraded is False
+
+
+@pytest.mark.parametrize("as_of_date", ["2026-07-23", "2026-07-28"])
+def test_lookback_rejects_too_old_or_future_date(as_of_date: str) -> None:
+    with pytest.raises(RefreshAuditError, match="lookback"):
+        RefreshAudit().validate_task(
+            _spec(
+                strategy=DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+                lookback_days=3,
+            ),
+            _context(),
+            _result(as_of_date=as_of_date),
+        )
+
+
+def test_run_snapshot_requires_current_run_identity() -> None:
+    spec = _spec(strategy=DateStrategy.RUN_SNAPSHOT)
+    with pytest.raises(RefreshAuditError, match="run_id"):
+        RefreshAudit().validate_task(
+            spec,
+            _context(),
+            _result(as_of_date=None, metadata={"run_id": "old-run"}),
+        )
+
+    report = RefreshAudit().validate_task(
+        spec,
+        _context(),
+        _result(as_of_date=None, metadata={"run_id": "refresh-1"}),
+    )
+    assert report.validated == 1
+
+
+def test_duplicate_natural_keys_are_rejected() -> None:
+    rows = {
+        "quotes": (
+            {"code": "000001.SZ", "trade_date": "2026-07-27"},
+            {"code": "000001.SZ", "trade_date": "2026-07-27"},
+        )
+    }
+    with pytest.raises(RefreshAuditError, match="duplicate"):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(fetched=2, validated=2, replaced=2),
+            rows_by_table=rows,
+        )
+
+
+@pytest.mark.parametrize("missing_value", [None, "", "   "])
+def test_required_fields_reject_null_or_blank(missing_value: object) -> None:
+    rows = {
+        "quotes": (
+            {"code": missing_value, "trade_date": "2026-07-27"},
+        )
+    }
+    with pytest.raises(RefreshAuditError, match="required field"):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(),
+            rows_by_table=rows,
+        )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {
+            "code": "000001.SZ",
+            "trade_date": "2026-07-27",
+            "open": 10,
+            "high": 9,
+            "low": 8,
+            "close": 9.5,
+            "volume": 1,
+            "amount": 1,
+        },
+        {
+            "code": "000001.SZ",
+            "trade_date": "2026-07-27",
+            "open": 10,
+            "high": 11,
+            "low": 10.5,
+            "close": 10,
+            "volume": 1,
+            "amount": 1,
+        },
+        {
+            "code": "000001.SZ",
+            "trade_date": "2026-07-27",
+            "open": 10,
+            "high": 9,
+            "low": 11,
+            "close": 10,
+            "volume": 1,
+            "amount": 1,
+        },
+    ],
+    ids=["high-below-open", "low-above-close", "high-below-low"],
+)
+def test_ohlc_invariants_are_enforced(row: dict[str, object]) -> None:
+    with pytest.raises(RefreshAuditError, match="OHLC"):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(),
+            rows_by_table={"quotes": (row,)},
+        )
+
+
+@pytest.mark.parametrize("field", ["volume", "amount"])
+def test_volume_and_amount_must_be_nonnegative(field: str) -> None:
+    row = {
+        "code": "000001.SZ",
+        "trade_date": "2026-07-27",
+        "open": 10,
+        "high": 11,
+        "low": 9,
+        "close": 10.5,
+        "volume": 1,
+        "amount": 1,
+    }
+    row[field] = -1
+
+    with pytest.raises(RefreshAuditError, match=field):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(),
+            rows_by_table={"quotes": (row,)},
+        )
+
+
+def test_coverage_threshold_uses_declared_baseline() -> None:
+    with pytest.raises(RefreshAuditError, match="coverage"):
+        RefreshAudit().validate_task(
+            _spec(minimum_coverage=0.8),
+            _context(),
+            _result(fetched=7, validated=7, replaced=7),
+            rows_by_table={
+                "quotes": tuple(
+                    {"code": str(index), "trade_date": "2026-07-27"}
+                    for index in range(7)
+                )
+            },
+            baseline_counts={"quotes": 10},
+        )
+
+
+def test_dead_source_is_degraded_metadata_and_cannot_claim_replacement() -> None:
+    audit = RefreshAudit()
+    report = audit.validate_task(
+        _spec(),
+        _context(),
+        _result(
+            as_of_date=None,
+            fetched=0,
+            validated=0,
+            replaced=0,
+            retained=10,
+            metadata={
+                "source_status": "dead_source",
+                "reason": "provider endpoint retired",
+            },
+        ),
+    )
+    assert report.degraded is True
+    assert report.dead_source is True
+
+    with pytest.raises(RefreshAuditError, match="dead source"):
+        audit.validate_task(
+            _spec(),
+            _context(),
+            _result(
+                replaced=1,
+                retained=10,
+                metadata={
+                    "source_status": "dead_source",
+                    "reason": "provider endpoint retired",
+                },
+            ),
+        )
