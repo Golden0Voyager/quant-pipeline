@@ -30,6 +30,7 @@ from datetime import date, timedelta
 
 from core.refresh import RefreshAdapter, RefreshAdapterResult, RefreshContext
 from core.refresh_store import (
+    CompositeReplacement,
     DateSnapshotReplacement,
     KeyedUpsertReplacement,
     RefreshValidationError,
@@ -70,6 +71,11 @@ from tasks.market_flow import (
 )
 from tasks.market_valuation import fetch_market_valuation_records
 from tasks.option_sentiment import fetch_option_sentiment_record
+from tasks.sector_derivatives import (
+    fetch_index_futures_basis_records,
+    fetch_sector_daily_records,
+    fetch_sector_valuation_records,
+)
 from tasks.stock_pledge import fetch_stock_pledge_records
 from tasks.stock_repurchase import fetch_stock_repurchase_records
 from tasks.valuation_chain import (
@@ -2301,6 +2307,143 @@ class NorthFlowRefreshAdapter:
 
 
 # ===========================================================================
+# update_sector_derivatives（复合：三表目标日分区一次事务替换）
+# ===========================================================================
+
+_SECTOR_DAILY_COLUMNS = (
+    "sector_name",
+    "trade_date",
+    "open",
+    "close",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "pct_change",
+    "data_source",
+)
+
+_SECTOR_VALUATION_COLUMNS = (
+    "sector_name",
+    "trade_date",
+    "pe",
+    "pb",
+    "total_mv",
+    "data_source",
+)
+
+_INDEX_FUTURES_BASIS_COLUMNS = (
+    "trade_date",
+    "futures_code",
+    "futures_price",
+    "index_price",
+    "basis",
+    "basis_pct",
+    "data_source",
+)
+
+
+def _target_only(records: list[dict], target_date: str) -> list[dict]:
+    """只保留目标日记录 —— 历史型源绝不重写历史分区。"""
+    return [
+        record
+        for record in records
+        if str(record.get("trade_date", ""))[:10] == target_date
+    ]
+
+
+@dataclass
+class SectorDerivativesRefreshAdapter:
+    """行业衍生：三表目标日分区在一次复合原子事务中替换（all-or-nothing）。"""
+
+    store: SQLiteRefreshStore
+    fetch_daily: Callable[[str], list[dict]] = field(default=fetch_sector_daily_records)
+    fetch_valuation: Callable[[str], list[dict]] = field(default=fetch_sector_valuation_records)
+    fetch_basis: Callable[[str], list[dict]] = field(default=fetch_index_futures_basis_records)
+
+    task_name = "update_sector_derivatives"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        raw_daily = self.fetch_daily(target)
+        raw_valuation = self.fetch_valuation(target)
+        raw_basis = self.fetch_basis(target)
+
+        daily = _target_only(raw_daily, target)
+        valuation = _target_only(raw_valuation, target)
+        basis = _target_only(raw_basis, target)
+        for label, component in (
+            ("sector daily", daily),
+            ("sector valuation", valuation),
+            ("index futures basis", basis),
+        ):
+            if not component:
+                raise RefreshValidationError(
+                    f"{label} has no {target} rows; refusing composite replacement"
+                )
+
+        daily_rows = _snapshot_rows(daily, _SECTOR_DAILY_COLUMNS, ("sector_name", "trade_date"))
+        valuation_rows = _snapshot_rows(
+            valuation, _SECTOR_VALUATION_COLUMNS, ("sector_name", "trade_date")
+        )
+        basis_rows = _snapshot_rows(
+            basis, _INDEX_FUTURES_BASIS_COLUMNS, ("trade_date", "futures_code")
+        )
+
+        self.store.replace_composite(
+            CompositeReplacement((
+                DateSnapshotReplacement(
+                    table="sector_daily",
+                    columns=_SECTOR_DAILY_COLUMNS,
+                    rows=_as_store_rows(daily_rows, _SECTOR_DAILY_COLUMNS),
+                    date_column="trade_date",
+                    date_value=target,
+                    natural_keys=("sector_name", "trade_date"),
+                    required_fields=("close",),
+                ),
+                DateSnapshotReplacement(
+                    table="sector_valuation",
+                    columns=_SECTOR_VALUATION_COLUMNS,
+                    rows=_as_store_rows(valuation_rows, _SECTOR_VALUATION_COLUMNS),
+                    date_column="trade_date",
+                    date_value=target,
+                    natural_keys=("sector_name", "trade_date"),
+                    required_fields=("sector_name",),
+                ),
+                DateSnapshotReplacement(
+                    table="index_futures_basis",
+                    columns=_INDEX_FUTURES_BASIS_COLUMNS,
+                    rows=_as_store_rows(basis_rows, _INDEX_FUTURES_BASIS_COLUMNS),
+                    date_column="trade_date",
+                    date_value=target,
+                    natural_keys=("trade_date", "futures_code"),
+                    required_fields=("basis",),
+                ),
+            ))
+        )
+
+        replaced = len(daily_rows) + len(valuation_rows) + len(basis_rows)
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(raw_daily) + len(raw_valuation) + len(raw_basis),
+            validated=replaced,
+            replaced=replaced,
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={
+                "sector_daily": len(daily_rows),
+                "sector_valuation": len(valuation_rows),
+                "index_futures_basis": len(basis_rows),
+            },
+        )
+
+
+# ===========================================================================
 # 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
 # ===========================================================================
 
@@ -2333,4 +2476,5 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_cb_redeem": CbRedeemRefreshAdapter,
     "update_stock_repurchase": StockRepurchaseRefreshAdapter,
     "update_north_flow": NorthFlowRefreshAdapter,
+    "update_sector_derivatives": SectorDerivativesRefreshAdapter,
 }
