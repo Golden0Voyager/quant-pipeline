@@ -3216,3 +3216,56 @@ def test_get_expected_latest_trading_day_monday_before_market():
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
         result = get_expected_latest_trading_day()
         assert result == "2026-06-19"  # previous Friday
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：fetch_limit_pool_records 只抓取不落库
+# ===========================================================================
+
+
+def test_fetch_limit_pool_records_merges_up_and_down():
+    """涨停池 + 跌停池合并为 legacy 形状；limit_type 互异。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.return_value = pd.DataFrame(
+        [{"代码": "600000", "名称": "浦发银行", "涨跌幅": 10.0, "最新价": 11.0,
+          "换手率": 2.0, "连板数": 2, "所属行业": "银行"}]
+    )
+    fake_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame(
+        [{"代码": "000001", "名称": "平安银行", "涨跌幅": -10.0, "最新价": 9.0,
+          "换手率": 1.0, "所属行业": "银行"}]
+    )
+    with patch.object(macro, "ak", fake_ak):
+        records = macro.fetch_limit_pool_records("2026-07-27")
+
+    fake_ak.stock_zt_pool_em.assert_called_once_with(date="20260727")
+    fake_ak.stock_zt_pool_dtgc_em.assert_called_once_with(date="20260727")
+    assert len(records) == 2
+    by_type = {r["limit_type"]: r for r in records}
+    assert by_type["涨停"]["ts_code"] == "600000"
+    assert by_type["涨停"]["board_count"] == 2
+    assert by_type["跌停"]["ts_code"] == "000001"
+    assert by_type["跌停"]["board_count"] is None
+    assert all(r["trade_date"] == "2026-07-27" for r in records)
+
+
+def test_fetch_limit_pool_records_authoritative_empty():
+    """两池均权威空 → 返回 []（空池 ≠ 源失败）。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.return_value = pd.DataFrame()
+    fake_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    with patch.object(macro, "ak", fake_ak):
+        assert macro.fetch_limit_pool_records("2026-07-27") == []
+
+
+def test_fetch_limit_pool_records_propagates_source_error():
+    """任一池源异常直接上抛，不得吞掉后当空池处理。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.side_effect = ConnectionError("em down")
+    with patch.object(macro, "ak", fake_ak), pytest.raises(ConnectionError):
+        macro.fetch_limit_pool_records("2026-07-27")
