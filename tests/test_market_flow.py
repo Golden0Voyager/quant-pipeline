@@ -7,6 +7,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 import tasks.market_flow as mf
 
@@ -380,3 +381,80 @@ def test_update_sector_fund_flow_exception():
         res = mf.update_sector_fund_flow(db)
     assert res["saved"] == 0
     assert "error" in res
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 6）：fetch_fund_flow_records 不落库
+# ===========================================================================
+
+_REFRESH_TARGET = "2026-07-27"
+
+
+class _RecordingFlowLoader:
+    """记录调用次数并返回预设 DataFrame 的手写 fake。"""
+
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+        self.calls = 0
+
+    def get_market_fund_flow(self) -> pd.DataFrame:
+        self.calls += 1
+        return self.df
+
+
+def test_fetch_fund_flow_records_legacy_shape():
+    """返回 legacy 形状（symbol/date 键），跳过空 code 与全空数值行。"""
+    loader = _RecordingFlowLoader(_flow_df())
+
+    records = mf.fetch_fund_flow_records(loader, _REFRESH_TARGET)
+
+    assert loader.calls == 1
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["symbol"] == "600000"
+    assert rec["date"] == _REFRESH_TARGET
+    assert rec["main_net_inflow"] == 100.0
+    assert rec["simulated"] is False
+
+
+def test_fetch_fund_flow_records_converts_nan_to_none():
+    """部分 NaN 数值字段转为 None，行仍保留。"""
+    df = pd.DataFrame(
+        [
+            {
+                "code": "000002",
+                "main_net_inflow": 5.0,
+                "main_net_inflow_pct": float("nan"),
+                "super_large_net_inflow": float("nan"),
+                "super_large_net_inflow_pct": float("nan"),
+                "large_net_inflow": float("nan"),
+                "large_net_inflow_pct": float("nan"),
+            }
+        ]
+    )
+    records = mf.fetch_fund_flow_records(_RecordingFlowLoader(df), _REFRESH_TARGET)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["main_net_inflow"] == 5.0
+    assert rec["main_net_inflow_pct"] is None
+    assert rec["large_net_inflow"] is None
+
+
+def test_fetch_fund_flow_records_empty_source():
+    """源端空 DataFrame → 返回空列表（失败语义由适配器把关）。"""
+    records = mf.fetch_fund_flow_records(
+        _RecordingFlowLoader(pd.DataFrame()), _REFRESH_TARGET
+    )
+    assert records == []
+
+
+def test_fetch_fund_flow_records_propagates_loader_error():
+    """loader 异常直接上抛，不吃掉（保留旧数据由编排器处理）。"""
+
+    class _BrokenLoader:
+        def get_market_fund_flow(self):
+            raise ConnectionError("eastmoney down")
+
+    with pytest.raises(ConnectionError):
+        mf.fetch_fund_flow_records(_BrokenLoader(), _REFRESH_TARGET)
