@@ -713,13 +713,15 @@ class TestStockCyqEm:
         conn.commit()
         conn.close()
 
-        with patch("core.stock_cyq_em._fetch_kline_em", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None), \
-             patch("core.stock_cyq_em._fetch_kline_sina", return_value=None):
+        with (
+            patch("core.stock_cyq_em._fetch_kline_em", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_xueqiu", return_value=None),
+            patch("core.stock_cyq_em._fetch_kline_sina", return_value=None),
             # 2026-07 全零筹码事故修复后：换手率全缺失时必须显式报错，
             # 而非降级 JS 静默产出全 0 行
-            with pytest.raises(ValueError, match="换手率"):
-                stock_cyq_em("000001", use_local_db=True, db_path=db_path)
+            pytest.raises(ValueError, match="换手率"),
+        ):
+            stock_cyq_em("000001", use_local_db=True, db_path=db_path)
 
     def test_xueqiu_path(self):
         """雪球 API 路径 → JS 计算。"""
