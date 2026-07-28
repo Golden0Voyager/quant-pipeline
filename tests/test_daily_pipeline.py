@@ -853,10 +853,13 @@ class TestMain:
         ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
             "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
         ):
-            factory.get_db.return_value = MagicMock()
-            factory.get_loader.return_value = MagicMock()
+            factory.get_db.return_value = db = MagicMock()
+            factory.get_loader.return_value = loader = MagicMock()
             factory.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
+        mock_fn.assert_called_once_with(
+            db, loader, limit=None, resume=False, symbols=None, force=False
+        )
 
     def test_direct_task_degraded_status_exits_one(self, weekday_mock):
         mock_fn = MagicMock(
@@ -871,12 +874,15 @@ class TestMain:
         ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
             "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
         ):
-            factory.get_db.return_value = MagicMock()
-            factory.get_loader.return_value = MagicMock()
+            factory.get_db.return_value = db = MagicMock()
+            factory.get_loader.return_value = loader = MagicMock()
             factory.get_indicator_engine.return_value = MagicMock()
             with pytest.raises(SystemExit) as exc_info:
                 daily_pipeline.main()
         assert exc_info.value.code == 1
+        mock_fn.assert_called_once_with(
+            db, loader, limit=None, resume=False, symbols=None, force=False
+        )
 
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
