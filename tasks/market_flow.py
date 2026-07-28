@@ -90,6 +90,45 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 
 
 # ===========================================================================
+# 收盘刷新 helper（Task 6）：只抓取/归一化，不写库
+# ===========================================================================
+
+_FUND_FLOW_NUMERIC_FIELDS = (
+    "main_net_inflow",
+    "main_net_inflow_pct",
+    "super_large_net_inflow",
+    "super_large_net_inflow_pct",
+    "large_net_inflow",
+    "large_net_inflow_pct",
+)
+
+
+def fetch_fund_flow_records(loader: DataLoaderInterface, trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取全市场资金流并归一化为 legacy 记录形状，不写库。
+
+    跳过空 code 与六个数值字段全空的行；部分 NaN 转为 None；
+    loader 异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    df = loader.get_market_fund_flow()
+    if df is None or df.empty:
+        return []
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        code = str(row.get("code", "")).strip()
+        if not code:
+            continue
+        values = {
+            field: (None if pd.isna(row.get(field)) else float(row.get(field)))
+            for field in _FUND_FLOW_NUMERIC_FIELDS
+        }
+        if all(value is None for value in values.values()):
+            continue
+        records.append({"symbol": code, "date": trade_date, **values, "simulated": False})
+    return records
+
+
+# ===========================================================================
 # 任务 5: 批量获取融资融券数据
 # ===========================================================================
 
