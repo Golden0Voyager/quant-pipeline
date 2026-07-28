@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -77,6 +78,20 @@ class RecordingStore:
         self.calls.append(("task", kwargs))
 
     def finish_run(self, **kwargs: Any) -> None:
+        self.calls.append(("finish", kwargs))
+
+
+@dataclass
+class RecordCrashStore(RecordingStore):
+    finish_error: bool = False
+
+    def record_task_result(self, **kwargs: Any) -> None:
+        self.calls.append(("task", kwargs))
+        raise sqlite3.OperationalError("database is locked")
+
+    def finish_run(self, **kwargs: Any) -> None:
+        if self.finish_error:
+            raise sqlite3.OperationalError("finish failed")
         self.calls.append(("finish", kwargs))
 
 
@@ -289,6 +304,96 @@ def test_changed_symbols_flow_to_supported_dependent_task() -> None:
 
     assert result.status is TaskStatus.SUCCESS
     assert derived_calls[0].symbols == ("000001.SZ",)
+
+
+def test_empty_upstream_changed_set_keeps_full_market_scope_for_dependent() -> None:
+    base_calls: list[RefreshContext] = []
+    derived_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("base", supports_symbols=True),
+            _spec(
+                "derived",
+                dependencies=("base",),
+                supports_symbols=True,
+            ),
+        ),
+        adapters={
+            "base": RecordingAdapter("base", base_calls),
+            "derived": RecordingAdapter("derived", derived_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert derived_calls[0].symbols is None
+
+
+def test_nonempty_upstream_changed_set_narrows_full_market_dependent() -> None:
+    base_calls: list[RefreshContext] = []
+    derived_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("base", supports_symbols=True),
+            _spec(
+                "derived",
+                dependencies=("base",),
+                supports_symbols=True,
+            ),
+        ),
+        adapters={
+            "base": RecordingAdapter(
+                "base",
+                base_calls,
+                result=_adapter_result(
+                    "base",
+                    changed_symbols=("000001.SZ", "600000.SH"),
+                ),
+            ),
+            "derived": RecordingAdapter("derived", derived_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert derived_calls[0].symbols == ("000001.SZ", "600000.SH")
+
+
+def test_store_error_mid_run_returns_failed_result_and_finishes_run_failed() -> None:
+    store = RecordCrashStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.exit_failure is True
+    assert result.metadata["error_type"] == "OperationalError"
+    finishes = [kwargs for call, kwargs in store.calls if call == "finish"]
+    assert [kwargs["status"] for kwargs in finishes] == ["failed"]
+
+
+def test_finish_run_error_does_not_mask_failed_outcome() -> None:
+    store = RecordCrashStore(finish_error=True)
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.metadata["error_type"] == "OperationalError"
 
 
 def test_adapter_failure_is_retried_once_then_success_is_audited() -> None:
