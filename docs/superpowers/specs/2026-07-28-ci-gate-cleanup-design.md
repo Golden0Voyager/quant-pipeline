@@ -46,4 +46,3 @@ fixture，并严格断言状态为 `healthy`。这验证的是“预期日期数
 2. 两个 Ruff 目标文件及全仓 Ruff；
 3. 完整 pytest；
 4. `git diff --check` 与工作树检查。
-
