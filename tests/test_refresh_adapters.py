@@ -20,6 +20,7 @@ import pytest
 
 from core.refresh import RefreshContext
 from core.refresh_adapters import (
+    REFRESH_ADAPTERS,
     BarsRefreshAdapter,
     EastmoneyChipRefreshAdapter,
     FundamentalsRefreshAdapter,
@@ -33,6 +34,7 @@ from core.refresh_adapters import (
     build_derived_refresh_adapters,
 )
 from core.refresh_store import RefreshValidationError, SQLiteRefreshStore
+from core.task_registry import refreshable_trading_tasks
 
 TARGET = "2026-07-27"
 
@@ -1269,3 +1271,14 @@ def test_build_derived_refresh_adapters_registry(derived_db_path, store):
     assert adapters["update_indicators"].engine is engine
     assert adapters["update_indicators"].db is db
     assert adapters["update_chip_distribution"].db is db
+
+
+# ===========================================================================
+# 运行时适配器覆盖（Task 9 Step 1，逐字）
+# ===========================================================================
+
+
+def test_every_refresh_policy_has_runtime_adapter():
+    assert set(REFRESH_ADAPTERS) == {
+        spec.name for spec in refreshable_trading_tasks()
+    }
