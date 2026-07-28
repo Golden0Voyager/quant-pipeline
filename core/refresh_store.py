@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 type Row = tuple[object, ...]
 type Rows = tuple[Row, ...]
+
+
+def _stable_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 class RefreshValidationError(ValueError):
@@ -95,6 +107,93 @@ class SQLiteRefreshStore:
             raise ValueError("db_path must not be empty")
         self._db_path = Path(db_path)
         self._timeout = timeout
+
+    def start_run(
+        self,
+        *,
+        run_id: str,
+        target_date: str,
+        started_at: str,
+        symbols: tuple[str, ...] | None = None,
+    ) -> None:
+        """Persist the start of one close-refresh run."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO refresh_runs
+                   (run_id, target_date, started_at, status, symbols_json)
+                   VALUES (?, ?, ?, 'running', ?)""",
+                (
+                    run_id,
+                    target_date,
+                    started_at,
+                    _stable_json(symbols),
+                ),
+            )
+        finally:
+            conn.close()
+
+    def record_task_result(
+        self,
+        *,
+        run_id: str,
+        task_name: str,
+        policy_kind: str,
+        requested_date: str,
+        as_of_date: str | None,
+        status: str,
+        fetched: int,
+        validated: int,
+        replaced: int,
+        retained: int,
+        failed: int,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist the final result for one task in a refresh run."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO refresh_task_runs
+                   (run_id, task_name, policy_kind, requested_date, as_of_date,
+                    status, fetched, validated, replaced, retained, failed,
+                    metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    task_name,
+                    policy_kind,
+                    requested_date,
+                    as_of_date,
+                    status,
+                    fetched,
+                    validated,
+                    replaced,
+                    retained,
+                    failed,
+                    _stable_json(metadata or {}),
+                ),
+            )
+        finally:
+            conn.close()
+
+    def finish_run(
+        self,
+        *,
+        run_id: str,
+        finished_at: str,
+        status: str,
+    ) -> None:
+        """Persist the completion state for one close-refresh run."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """UPDATE refresh_runs
+                   SET finished_at = ?, status = ?
+                   WHERE run_id = ?""",
+                (finished_at, status, run_id),
+            )
+        finally:
+            conn.close()
 
     def replace_date_snapshot(
         self,
