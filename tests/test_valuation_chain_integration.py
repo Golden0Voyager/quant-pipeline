@@ -14,8 +14,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from tasks.valuation_chain import (
+    fetch_fundamentals_snapshot,
+    fetch_market_snapshot_quotes,
     update_fundamentals,
     update_historical_valuation,
     update_market_snapshot,
@@ -555,3 +558,139 @@ class TestUpdateMarketSnapshotWithToken:
 
         assert r["updated"] == 0
         assert r["total"] == 2
+
+
+# ===========================================================================
+# 收盘刷新 helpers（Task 6）：不落库的抓取 / 归一化
+# ===========================================================================
+
+_REFRESH_TARGET = "2026-07-27"
+
+
+class _FakeResponse:
+    """手写 requests 响应 fake，只提供 json()。"""
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _RecordingSession:
+    """记录请求参数并按页返回预设 payload 的手写 session fake。"""
+
+    def __init__(self, pages: list[dict]):
+        self.pages = pages
+        self.calls: list[dict] = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append(dict(params))
+        page = int(params["pageNumber"]) - 1
+        return _FakeResponse(self.pages[page])
+
+
+def _valuation_page(records: list[dict], count: int) -> dict:
+    return {"success": True, "result": {"data": records, "count": count}}
+
+
+class TestFetchFundamentalsSnapshot:
+    """fetch_fundamentals_snapshot 只抓目标日，无 5000 行阈值，不写库。"""
+
+    def test_fetches_target_date_across_pages(self):
+        """只请求目标日 filter，分页拼接，归一化为写库记录形状。"""
+        session = _RecordingSession([
+            _valuation_page([
+                {"SECURITY_CODE": "000001", "TRADE_DATE": f"{_REFRESH_TARGET} 00:00:00",
+                 "PE_TTM": 10.0, "PB_MRQ": 1.5, "PS_TTM": 2.0,
+                 "PEG_CAR": 1.2, "TOTAL_MARKET_CAP": 1e9},
+                {"SECURITY_CODE": "600000", "TRADE_DATE": f"{_REFRESH_TARGET} 00:00:00",
+                 "PE_TTM": 8.0, "PB_MRQ": 0.8, "PS_TTM": 1.0,
+                 "PEG_CAR": None, "TOTAL_MARKET_CAP": 5e9},
+            ], count=3),
+            _valuation_page([
+                {"SECURITY_CODE": "600519", "TRADE_DATE": f"{_REFRESH_TARGET} 00:00:00",
+                 "PE_TTM": 30.0, "PB_MRQ": 9.0, "PS_TTM": 12.0,
+                 "PEG_CAR": 2.0, "TOTAL_MARKET_CAP": 2e12},
+            ], count=3),
+        ])
+
+        records = fetch_fundamentals_snapshot(
+            _REFRESH_TARGET, session=session, page_size=2
+        )
+
+        assert len(records) == 3
+        assert len(session.calls) == 2
+        assert all(
+            call["filter"] == f"(TRADE_DATE='{_REFRESH_TARGET}')" for call in session.calls
+        )
+        first = records[0]
+        assert first["ts_code"] == "000001"
+        assert first["trade_date"] == _REFRESH_TARGET
+        assert first["pe_ttm"] == 10.0
+        assert first["pb"] == 1.5
+        assert first["peg"] == 1.2
+        assert first["dividend_yield"] is None
+
+    def test_returns_empty_when_source_has_no_target_data(self):
+        session = _RecordingSession([{"success": True, "result": None}])
+        records = fetch_fundamentals_snapshot(
+            _REFRESH_TARGET, session=session, page_size=2
+        )
+        assert records == []
+
+    def test_propagates_source_errors(self):
+        """源端异常直接上抛，交给适配器/编排器处理（保留旧数据）。"""
+
+        class _BrokenSession:
+            def get(self, url, params=None, timeout=None):
+                raise ConnectionError("eastmoney down")
+
+        with pytest.raises(ConnectionError):
+            fetch_fundamentals_snapshot(_REFRESH_TARGET, session=_BrokenSession())
+
+
+class TestFetchMarketSnapshotQuotes:
+    """fetch_market_snapshot_quotes 只拉行情不写库，无 token 即报错。"""
+
+    def test_requires_token(self):
+        with patch("smartmoney_hunter.xueqiu._get_token", return_value=None), \
+             pytest.raises(RuntimeError):
+            fetch_market_snapshot_quotes(["600000"])
+
+    def test_filters_beijing_and_batches(self):
+        """北交所代码不进雪球请求，其余按批拉取并拼接。"""
+        seen_chunks: list[list[str]] = []
+
+        def fake_batch(chunk):
+            seen_chunks.append(list(chunk))
+            return [{"code": code, "dividend_yield": 2.0} for code in chunk]
+
+        with patch("smartmoney_hunter.xueqiu._get_token", return_value="tok"), \
+             patch("smartmoney_hunter.xueqiu.get_batch_quotes", side_effect=fake_batch), \
+             patch("tasks.valuation_chain.is_beijing_stock", lambda c: c.startswith(("4", "8"))), \
+             patch("tasks.valuation_chain.time.sleep"):
+            quotes = fetch_market_snapshot_quotes(
+                ["600000", "830001", "000001"], batch_size=1
+            )
+
+        assert seen_chunks == [["600000"], ["000001"]]
+        assert [q["code"] for q in quotes] == ["600000", "000001"]
+
+    def test_single_batch_failure_is_partial(self):
+        """单批失败静默降级，其余批次继续（覆盖率由适配器把关）。"""
+        calls = {"n": 0}
+
+        def flaky_batch(chunk):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("risk control")
+            return [{"code": code, "dividend_yield": 1.0} for code in chunk]
+
+        with patch("smartmoney_hunter.xueqiu._get_token", return_value="tok"), \
+             patch("smartmoney_hunter.xueqiu.get_batch_quotes", side_effect=flaky_batch), \
+             patch("tasks.valuation_chain.time.sleep"), \
+             patch("tasks.valuation_chain.logger"):
+            quotes = fetch_market_snapshot_quotes(["600000", "000001"], batch_size=1)
+
+        assert [q["code"] for q in quotes] == ["000001"]
