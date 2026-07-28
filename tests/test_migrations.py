@@ -1333,3 +1333,97 @@ def test_migration_010_refresh_failure_rolls_back_partial_schema(tmp_db):
     assert refresh_runs is None
     assert legacy_columns == ("legacy_only",)
     assert failure == (0,)
+
+
+def test_migration_010_refresh_status_checks_reject_invalid_states(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                """INSERT INTO refresh_runs
+                   (run_id, target_date, started_at, status)
+                   VALUES (?, ?, ?, ?)""",
+                ("invalid-run", "2026-07-27", "2026-07-28T08:00:00Z", "succes"),
+            )
+        conn.execute(
+            """INSERT INTO refresh_runs
+               (run_id, target_date, started_at, status)
+               VALUES (?, ?, ?, ?)""",
+            ("refresh-1", "2026-07-27", "2026-07-28T08:00:00Z", "running"),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                """INSERT INTO refresh_task_runs
+                   (run_id, task_name, policy_kind, requested_date, status)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    "refresh-1",
+                    "update_bars",
+                    "remote_date_snapshot",
+                    "2026-07-27",
+                    "running",
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fetched", -1),
+        ("validated", -1),
+        ("replaced", -1),
+        ("retained", -1),
+        ("failed", -1),
+        ("fetched", 1.5),
+        ("validated", 1.5),
+        ("replaced", 1.5),
+        ("retained", 1.5),
+        ("failed", 1.5),
+    ],
+)
+def test_migration_010_refresh_counter_checks_require_nonnegative_integers(
+    tmp_db,
+    field,
+    value,
+):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            """INSERT INTO refresh_runs
+               (run_id, target_date, started_at, status)
+               VALUES (?, ?, ?, ?)""",
+            ("refresh-1", "2026-07-27", "2026-07-28T08:00:00Z", "running"),
+        )
+        conn.execute(
+            """INSERT INTO refresh_task_runs
+               (run_id, task_name, policy_kind, requested_date, status)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "refresh-1",
+                "update_bars",
+                "remote_date_snapshot",
+                "2026-07-27",
+                "success",
+            ),
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                f"UPDATE refresh_task_runs SET {field} = ?",
+                (value,),
+            )
+
+        stored = conn.execute(
+            f"SELECT {field} FROM refresh_task_runs"
+        ).fetchone()[0]
+    assert stored == 0
