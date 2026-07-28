@@ -30,6 +30,7 @@ class DateSnapshotReplacement:
     natural_keys: tuple[str, ...]
     required_fields: tuple[str, ...] = ()
     minimum_coverage: float | None = None
+    allow_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,7 @@ class KeyedUpsertReplacement:
     natural_keys: tuple[str, ...]
     required_fields: tuple[str, ...] = ()
     minimum_coverage: float | None = None
+    allow_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class RunSnapshotReplacement:
     natural_keys: tuple[str, ...]
     required_fields: tuple[str, ...] = ()
     minimum_coverage: float | None = None
+    allow_empty: bool = False
 
 
 type Replacement = (
@@ -118,6 +121,9 @@ class SQLiteRefreshStore:
         """Publish all component replacements in one transaction."""
         if not request.replacements:
             raise RefreshValidationError("composite replacement must not be empty")
+        tables = tuple(replacement.table for replacement in request.replacements)
+        if len(tables) != len(set(tables)):
+            raise RefreshValidationError("composite replacement contains a duplicate table")
         return self._replace_atomically(request.replacements)
 
     def _replace_atomically(
@@ -132,6 +138,9 @@ class SQLiteRefreshStore:
             staged = tuple(self._stage(conn, request) for request in requests)
             conn.execute("BEGIN IMMEDIATE")
             try:
+                for item in staged:
+                    old_count = self._existing_count(conn, item.request)
+                    self._validate_coverage(item.request, old_count)
                 for item in staged:
                     self._publish_staged(conn, item)
                 conn.commit()
@@ -173,6 +182,12 @@ class SQLiteRefreshStore:
             raise RefreshValidationError("columns must be unique")
         if not request.natural_keys:
             raise RefreshValidationError("natural keys must not be empty")
+        if type(request.allow_empty) is not bool:
+            raise RefreshValidationError("allow_empty must be a boolean")
+        if not request.rows and not request.allow_empty:
+            raise RefreshValidationError(
+                "empty rows require explicit allow_empty=True authorization"
+            )
 
         declared = set(columns)
         expected_fields = set(request.natural_keys) | set(request.required_fields)
@@ -226,8 +241,6 @@ class SQLiteRefreshStore:
     ) -> _StagedReplacement:
         table = self._quoted(request.table)
         columns = self._column_list(request.columns)
-        old_count = self._existing_count(conn, request)
-        self._validate_coverage(request, old_count)
 
         staging_name = f"_refresh_stage_{uuid4().hex}"
         staging = self._quoted(staging_name)
@@ -269,7 +282,7 @@ class SQLiteRefreshStore:
     @staticmethod
     def _validate_coverage(request: Replacement, old_count: int) -> None:
         minimum = request.minimum_coverage
-        if minimum is None:
+        if minimum is None or not request.rows and request.allow_empty:
             return
         baseline = max(old_count, 1)
         coverage = len(request.rows) / baseline
