@@ -788,6 +788,34 @@ class TestRunAll:
         # 日线行情是交易日任务，应该执行
         assert safe_task.call_args_list[0].args[0] == "update_bars"
 
+    def test_trading_day_cadence_runs_market_snapshot_with_canonical_name(
+        self, tmp_path: Path, weekday_mock
+    ):
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+
+        with patch(
+            "daily_pipeline._should_update", return_value=True
+        ), patch(
+            "daily_pipeline.logger"
+        ), patch(
+            "daily_pipeline._safe_task", return_value={"status": "ok"}
+        ) as safe_task:
+            daily_pipeline.run_all(
+                db,
+                loader,
+                engine,
+                target_cadences={daily_pipeline.Cadence.TRADING_DAY},
+            )
+
+        safe_task.assert_any_call(
+            "update_market_snapshot",
+            daily_pipeline.update_market_snapshot,
+            db,
+        )
+
     def test_normal_run(self, tmp_path: Path, weekday_mock):
         db = MagicMock()
         db.db_path = str(tmp_path / "quant_core.db")
