@@ -11,6 +11,7 @@ import time  # noqa: F401
 from datetime import datetime
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.source_record_key import block_trade_source_key, dragon_tiger_source_key
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -244,7 +245,7 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
                 code = str(row.get("代码", "")).strip()
                 if not code:
                     continue
-                batch_records.append({
+                record = {
                     "ts_code": code,
                     "trade_date": target_date,
                     "close_price": row.get("收盘价"),
@@ -256,7 +257,10 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
                     "market_cap": row.get("流通市值"),
                     "reason": row.get("上榜原因", ""),
                     "data_source": "akshare",
-                })
+                }
+                # 稳定事件键：同股同日不同上榜原因的合法多事件互异
+                record["source_record_key"] = dragon_tiger_source_key(record)
+                batch_records.append(record)
             except Exception:
                 continue
 
@@ -304,7 +308,7 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
                 code = str(row.get("证券代码", "")).strip()
                 if not code:
                     continue
-                batch_records.append({
+                record = {
                     "ts_code": code,
                     "trade_date": target_date,
                     "deal_price": row.get("成交价"),
@@ -315,7 +319,10 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
                     "buyer_branch": row.get("买方营业部", ""),
                     "seller_branch": row.get("卖方营业部", ""),
                     "data_source": "akshare",
-                })
+                }
+                # 稳定事件键：同股同日不同价/量的合法多笔交易互异
+                record["source_record_key"] = block_trade_source_key(record)
+                batch_records.append(record)
             except Exception:
                 continue
 
