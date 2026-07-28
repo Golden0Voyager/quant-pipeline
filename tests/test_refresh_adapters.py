@@ -44,6 +44,7 @@ from core.refresh_adapters import (
     MarketValuationRefreshAdapter,
     NorthFlowRefreshAdapter,
     OptionSentimentRefreshAdapter,
+    SectorDerivativesRefreshAdapter,
     SectorFundFlowRefreshAdapter,
     SectorIndustryRefreshAdapter,
     SouthFlowRefreshAdapter,
@@ -2526,3 +2527,150 @@ class TestNorthFlowRefreshAdapter:
 
         assert result.retained == 0
         assert result.metadata["source_status"] == "dead_source"
+
+
+# ===========================================================================
+# 组7：复合行业衍生（sector_daily / sector_valuation / index_futures_basis）
+# ===========================================================================
+
+
+def _sector_daily_record(sector: str, trade_date: str = TARGET) -> dict:
+    return {
+        "sector_name": sector,
+        "trade_date": trade_date,
+        "open": 100.0,
+        "close": 101.5,
+        "high": 102.0,
+        "low": 99.0,
+        "volume": 1e8,
+        "amount": 1e9,
+        "pct_change": 1.5,
+        "data_source": "akshare",
+    }
+
+
+def _sector_valuation_record(sector: str, trade_date: str = TARGET) -> dict:
+    return {
+        "sector_name": sector,
+        "trade_date": trade_date,
+        "pe": 20.0,
+        "pb": 2.0,
+        "total_mv": 1e12,
+        "data_source": "akshare",
+    }
+
+
+def _basis_record(code: str = "IF0", trade_date: str = TARGET) -> dict:
+    return {
+        "trade_date": trade_date,
+        "futures_code": code,
+        "futures_price": 3900.0,
+        "index_price": 3880.0,
+        "basis": 20.0,
+        "basis_pct": 0.5155,
+        "data_source": "akshare",
+    }
+
+
+class TestSectorDerivativesRefreshAdapter:
+    def test_replaces_three_target_partitions_in_one_transaction(self, market_db_path, store):
+        """三表目标日分区一次复合事务替换；非目标日记录被过滤。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_daily (sector_name, trade_date, close, data_source)"
+            " VALUES ('盘中残留', ?, 1.0, 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_daily (sector_name, trade_date, close, data_source)"
+            " VALUES ('银行', '2026-07-24', 99.0, 'akshare')",
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_valuation (sector_name, trade_date, pe, data_source)"
+            " VALUES ('盘中残留', ?, 1.0, 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO index_futures_basis (trade_date, futures_code, basis, data_source)"
+            " VALUES (?, 'IC0', 1.0, 'akshare')",
+            (TARGET,),
+        )
+        fetch_daily = FakeFetcher([
+            _sector_daily_record("电子"),
+            _sector_daily_record("银行"),
+        ])
+        fetch_valuation = FakeFetcher([
+            _sector_valuation_record("银行"),
+            _sector_valuation_record("旧日分区", trade_date="2026-07-24"),
+        ])
+        fetch_basis = FakeFetcher([_basis_record("IF0")])
+        adapter = SectorDerivativesRefreshAdapter(
+            store=store,
+            fetch_daily=fetch_daily,
+            fetch_valuation=fetch_valuation,
+            fetch_basis=fetch_basis,
+        )
+
+        result = adapter.refresh(_context())
+
+        assert fetch_daily.calls == [(TARGET,)]
+        assert fetch_valuation.calls == [(TARGET,)]
+        assert fetch_basis.calls == [(TARGET,)]
+        assert result.as_of_date == TARGET
+        assert result.replaced == 4
+        rows = _query(
+            market_db_path,
+            "SELECT sector_name, trade_date FROM sector_daily ORDER BY trade_date, sector_name",
+        )
+        assert rows == [
+            ("银行", "2026-07-24"),
+            ("电子", TARGET),
+            ("银行", TARGET),
+        ]
+        assert _query(
+            market_db_path,
+            "SELECT sector_name FROM sector_valuation WHERE trade_date = ?",
+            (TARGET,),
+        ) == [("银行",)]
+        assert _query(
+            market_db_path,
+            "SELECT futures_code FROM index_futures_basis WHERE trade_date = ?",
+            (TARGET,),
+        ) == [("IF0",)]
+
+    def test_any_empty_component_raises_and_keeps_all_tables(self, market_db_path, store):
+        """任一分量目标日无数据 → 上抛，三表全部保留旧行（all-or-nothing）。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_daily (sector_name, trade_date, close, data_source)"
+            " VALUES ('银行', ?, 99.0, 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_valuation (sector_name, trade_date, pe, data_source)"
+            " VALUES ('银行', ?, 20.0, 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO index_futures_basis (trade_date, futures_code, basis, data_source)"
+            " VALUES (?, 'IC0', 1.0, 'akshare')",
+            (TARGET,),
+        )
+        adapter = SectorDerivativesRefreshAdapter(
+            store=store,
+            fetch_daily=FakeFetcher([_sector_daily_record("电子")]),
+            fetch_valuation=FakeFetcher([_sector_valuation_record("银行")]),
+            fetch_basis=FakeFetcher([]),
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM sector_daily") == [(1,)]
+        assert _query(market_db_path, "SELECT COUNT(*) FROM sector_valuation") == [(1,)]
+        assert _query(market_db_path, "SELECT COUNT(*) FROM index_futures_basis") == [(1,)]
