@@ -245,7 +245,7 @@ class TestRetryFailed:
         loader = MagicMock()
         with patch(
             "tasks.utility.ProgressTracker.load",
-            return_value={"failed_queue": []},
+            return_value={"task": "retry", "failed_queue": []},
         ), patch("tasks.utility.ProgressTracker.clear") as mock_clear:
             result = retry_failed(db, loader)
         assert result["status"] == "no_data"
@@ -261,7 +261,10 @@ class TestRetryFailed:
         loader = MagicMock()
         with patch(
             "tasks.utility.ProgressTracker.load",
-            return_value={"failed_queue": ["000001", "000002", "000003"]},
+            return_value={
+                "task": "retry",
+                "failed_queue": ["000001", "000002", "000003"],
+            },
         ), patch("tasks.utility.ProgressTracker.clear") as mock_clear, patch(
             "tasks.utility.ProgressTracker.save"
         ) as mock_save, patch(
@@ -286,6 +289,7 @@ class TestRetryFailed:
         with patch(
             "tasks.utility.ProgressTracker.load",
             return_value={
+                "task": "retry",
                 "failed_queue": ["000001", "000002", "000003", "000004"]
             },
         ), patch("tasks.utility.ProgressTracker.clear") as mock_clear, patch(
@@ -300,4 +304,64 @@ class TestRetryFailed:
         assert result["error"] == "2 failures"
         assert normalize_task_result("retry_failed", result).status is TaskStatus.DEGRADED
         mock_save.assert_called_once()
+        mock_clear.assert_not_called()
+
+    @pytest.mark.parametrize("progress_task", [None, "update_bars"])
+    def test_retry_failed_preserves_scan_checkpoint(self, progress_task):
+        """scan/legacy checkpoint 不能由 retry_failed 消费或清理。"""
+        data = {
+            "failed_queue": ["000001.SZ", "000002.SZ"],
+            "last_symbol": "000002.SZ",
+            "processed": 2,
+        }
+        if progress_task is not None:
+            data["task"] = progress_task
+
+        with patch(
+            "tasks.utility.ProgressTracker.load", return_value=data
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar"
+        ) as mock_update:
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert result["status"] == "no_data"
+        assert result["reason"]
+        mock_update.assert_not_called()
+        mock_save.assert_not_called()
+        mock_clear.assert_not_called()
+
+    def test_retry_failed_deduplicates_and_records_attempted(self):
+        """重复 symbol 仅尝试一次，checkpoint processed 写实际尝试数。"""
+        with patch(
+            "tasks.utility.ProgressTracker.load",
+            return_value={
+                "task": "retry",
+                "failed_queue": ["000001.SZ", "000001.SZ", "000002.SZ"],
+            },
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar",
+            side_effect=["failed", "success"],
+        ) as mock_update:
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert [call.args[2] for call in mock_update.call_args_list] == [
+            "000001.SZ",
+            "000002.SZ",
+        ]
+        assert result["attempted"] == 2
+        mock_save.assert_called_once_with(
+            task="retry",
+            last_symbol="000002.SZ",
+            processed=2,
+            total=2,
+            failed_queue=["000001.SZ"],
+        )
         mock_clear.assert_not_called()
