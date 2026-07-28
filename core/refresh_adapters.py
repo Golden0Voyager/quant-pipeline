@@ -47,12 +47,14 @@ from tasks.core_chain import (
 )
 from tasks.finance_flow import fetch_south_flow_records
 from tasks.index_chain import fetch_chip_em_record_for_refresh, fetch_index_daily_records
+from tasks.institution_survey import fetch_institution_survey_records
 from tasks.market_flow import (
     _FUND_FLOW_NUMERIC_FIELDS,
     fetch_fund_flow_records,
     fetch_margin_trading_records,
 )
 from tasks.market_valuation import fetch_market_valuation_records
+from tasks.stock_pledge import fetch_stock_pledge_records
 from tasks.valuation_chain import (
     compute_sector_industry_rows_for_refresh,
     fetch_fundamentals_snapshot,
@@ -1311,6 +1313,160 @@ class CbIndexRefreshAdapter:
 
 
 # ===========================================================================
+# update_institution_survey（键控 30 日回看）
+# ===========================================================================
+
+_SURVEY_COLUMNS = (
+    "trade_date",
+    "stock_code",
+    "stock_name",
+    "survey_org",
+    "survey_type",
+    "survey_count",
+    "source_record_key",
+)
+
+
+@dataclass
+class InstitutionSurveyRefreshAdapter:
+    """机构调研：按窗口起始日抓取，窗口内记录键控 upsert，绝不删旧行。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_institution_survey_records)
+    lookback_days: int = 30
+
+    task_name = "update_institution_survey"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+        start = (
+            date.fromisoformat(target) - timedelta(days=self.lookback_days)
+        ).isoformat()
+
+        records = self.fetch_records(start)
+        window = [
+            record for record in records
+            if start <= str(record.get("trade_date", ""))[:10] <= target
+        ]
+        if not window:
+            raise RefreshValidationError(
+                f"institution survey has no records within {self.lookback_days}-day"
+                f" lookback of {target}"
+            )
+        as_of = max(str(record["trade_date"])[:10] for record in window)
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in window:
+            key = str(record.get("source_record_key", "")).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append({column: record.get(column) for column in _SURVEY_COLUMNS})
+
+        self.store.upsert_keyed_snapshot(
+            KeyedUpsertReplacement(
+                table="institution_survey",
+                columns=_SURVEY_COLUMNS,
+                rows=_as_store_rows(rows, _SURVEY_COLUMNS),
+                natural_keys=("source_record_key",),
+                required_fields=("source_record_key", "trade_date", "stock_code"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"window_start": start},
+        )
+
+
+# ===========================================================================
+# update_stock_pledge（键控 30 日回看，逐日探测）
+# ===========================================================================
+
+_PLEDGE_COLUMNS = (
+    "trade_date",
+    "stock_code",
+    "stock_name",
+    "pledger",
+    "pledge_amount",
+    "pledge_ratio",
+    "pledge_org",
+    "source_record_key",
+)
+
+
+@dataclass
+class StockPledgeRefreshAdapter:
+    """股权质押：目标日起逐日探测，接受首个非空日；键控 upsert 绝不删旧行。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_stock_pledge_records)
+    lookback_days: int = 30
+
+    task_name = "update_stock_pledge"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        as_of: str | None = None
+        records: list[dict] = []
+        for candidate in _lookback_candidates(target, self.lookback_days):
+            fetched = self.fetch_records(candidate)
+            if fetched:
+                as_of = candidate
+                records = fetched
+                break
+        if as_of is None:
+            raise RefreshValidationError(
+                f"stock pledge has no data within {self.lookback_days}-day"
+                f" lookback of {target}"
+            )
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in records:
+            key = str(record.get("source_record_key", "")).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append({column: record.get(column) for column in _PLEDGE_COLUMNS})
+
+        self.store.upsert_keyed_snapshot(
+            KeyedUpsertReplacement(
+                table="stock_pledge",
+                columns=_PLEDGE_COLUMNS,
+                rows=_as_store_rows(rows, _PLEDGE_COLUMNS),
+                natural_keys=("source_record_key",),
+                required_fields=("source_record_key", "trade_date", "stock_code"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=as_of,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={},
+        )
+
+
+# ===========================================================================
 # 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
 # ===========================================================================
 
@@ -1329,4 +1485,6 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_index_daily": IndexDailyRefreshAdapter,
     "update_market_valuation": MarketValuationRefreshAdapter,
     "update_cb_index": CbIndexRefreshAdapter,
+    "update_institution_survey": InstitutionSurveyRefreshAdapter,
+    "update_stock_pledge": StockPledgeRefreshAdapter,
 }
