@@ -1930,16 +1930,7 @@ class SmartMoneyDBProvider:
                          repurchase_price_lower, repurchase_price_upper,
                          repurchase_quantity, progress_status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source_record_key) DO UPDATE SET
-                        trade_date = excluded.trade_date,
-                        stock_code = excluded.stock_code,
-                        stock_name = excluded.stock_name,
-                        repurchase_amount = excluded.repurchase_amount,
-                        repurchase_price = excluded.repurchase_price,
-                        repurchase_price_lower = excluded.repurchase_price_lower,
-                        repurchase_price_upper = excluded.repurchase_price_upper,
-                        repurchase_quantity = excluded.repurchase_quantity,
-                        progress_status = excluded.progress_status
+                    ON CONFLICT(source_record_key) DO NOTHING
                     """,
                     [
                         (source_record_key(r, STOCK_REPURCHASE_SOURCE_KEY_FIELDS),
@@ -1995,13 +1986,7 @@ class SmartMoneyDBProvider:
                         (source_record_key, trade_date, stock_code, stock_name,
                          survey_org, survey_type, survey_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source_record_key) DO UPDATE SET
-                        trade_date = excluded.trade_date,
-                        stock_code = excluded.stock_code,
-                        stock_name = excluded.stock_name,
-                        survey_org = excluded.survey_org,
-                        survey_type = excluded.survey_type,
-                        survey_count = excluded.survey_count
+                    ON CONFLICT(source_record_key) DO NOTHING
                     """,
                     [
                         (source_record_key(r, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS),
