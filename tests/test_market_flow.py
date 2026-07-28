@@ -458,3 +458,148 @@ def test_fetch_fund_flow_records_propagates_loader_error():
 
     with pytest.raises(ConnectionError):
         mf.fetch_fund_flow_records(_BrokenLoader(), _REFRESH_TARGET)
+
+
+# ===========================================================================
+# 事件键（Task 8）：同股同日合法多事件必须携带互异稳定键并在真库中存活
+# ===========================================================================
+
+
+def test_update_dragon_tiger_attaches_distinct_source_keys():
+    """同股同日两条不同上榜原因 → 两条记录携带互异的 source_record_key。"""
+    db = MagicMock()
+    db.save_dragon_tiger_batch.return_value = 2
+    fake_ak = MagicMock()
+    fake_ak.stock_lhb_detail_em.return_value = pd.DataFrame(
+        [
+            {"代码": "600000", "收盘价": 10.0, "涨跌幅": 1.0, "龙虎榜净买额": 5.0,
+             "龙虎榜买入额": 8.0, "龙虎榜卖出额": 3.0, "换手率": 2.0, "流通市值": 100.0,
+             "上榜原因": "涨幅偏离"},
+            {"代码": "600000", "收盘价": 10.0, "涨跌幅": 1.0, "龙虎榜净买额": 5.0,
+             "龙虎榜买入额": 8.0, "龙虎榜卖出额": 3.0, "换手率": 2.0, "流通市值": 100.0,
+             "上榜原因": "换手率达20%"},
+        ]
+    )
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_dragon_tiger(db)
+
+    assert res["saved"] == 2
+    saved_rows = db.save_dragon_tiger_batch.call_args.args[0]
+    keys = [r["source_record_key"] for r in saved_rows]
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+    assert all(isinstance(k, str) and len(k) == 64 for k in keys)
+
+
+def test_update_block_trade_attaches_distinct_source_keys():
+    """同股同日两笔不同价格/成交量的大宗交易 → 键互异。"""
+    db = MagicMock()
+    db.save_block_trade_batch.return_value = 2
+    fake_ak = MagicMock()
+    fake_ak.stock_dzjy_mrmx.return_value = pd.DataFrame(
+        [
+            {"证券代码": "600000", "成交价": 10.0, "收盘价": 9.5, "折溢率": -5.0,
+             "成交量": 100, "成交额": 1000, "买方营业部": "A", "卖方营业部": "B"},
+            {"证券代码": "600000", "成交价": 9.8, "收盘价": 9.5, "折溢率": -3.0,
+             "成交量": 200, "成交额": 1960, "买方营业部": "A", "卖方营业部": "B"},
+        ]
+    )
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_block_trade(db)
+
+    assert res["saved"] == 2
+    saved_rows = db.save_block_trade_batch.call_args.args[0]
+    keys = [r["source_record_key"] for r in saved_rows]
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+    assert all(isinstance(k, str) and len(k) == 64 for k in keys)
+
+
+def _make_event_provider(tmp_path):
+    """真临时 SQLite 库上的 SmartMoneyDBProvider（conftest 会 mock DatabaseManager，
+    需显式重绑 db_path 后重跑建表与迁移，同 test_providers_extended2 fixture）。"""
+    from providers import SmartMoneyDBProvider
+
+    db_path = tmp_path / "event_keys_test.db"
+    provider = SmartMoneyDBProvider(db_path=str(db_path))
+    provider._db.db_path = str(db_path)
+    provider._ensure_wal_mode()
+    provider._ensure_tables()
+    provider._run_versioned_migrations()
+    return provider
+
+
+def _dragon_records() -> list[dict]:
+    base = {
+        "ts_code": "600000",
+        "trade_date": "2026-07-21",
+        "close_price": 10.0,
+        "pct_change": 1.0,
+        "net_buy_amount": 5.0,
+        "buy_amount": 8.0,
+        "sell_amount": 3.0,
+        "turnover_rate": 2.0,
+        "market_cap": 100.0,
+        "data_source": "akshare",
+    }
+    return [
+        {**base, "reason": "涨幅偏离"},
+        {**base, "reason": "换手率达20%"},
+    ]
+
+
+def _block_records() -> list[dict]:
+    base = {
+        "ts_code": "600000",
+        "trade_date": "2026-07-21",
+        "close_price": 9.5,
+        "buyer_branch": "A",
+        "seller_branch": "B",
+        "data_source": "akshare",
+    }
+    return [
+        {**base, "deal_price": 10.0, "discount_rate": -5.0, "volume": 100.0, "amount": 1000.0},
+        {**base, "deal_price": 9.8, "discount_rate": -3.0, "volume": 200.0, "amount": 1960.0},
+    ]
+
+
+def test_provider_dragon_tiger_batch_keeps_two_reasons_and_dedupes_on_rerun(tmp_path):
+    """真库：同股同日两条不同原因均存活；重跑同批不膨胀。"""
+    import sqlite3
+
+    provider = _make_event_provider(tmp_path)
+    try:
+        assert provider.save_dragon_tiger_batch(_dragon_records()) >= 2
+        provider.save_dragon_tiger_batch(_dragon_records())
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT reason FROM dragon_tiger
+                   WHERE ts_code = '600000' AND trade_date = '2026-07-21'
+                   ORDER BY reason"""
+            ).fetchall()
+    finally:
+        provider.close()
+    assert rows == [("换手率达20%",), ("涨幅偏离",)]
+
+
+def test_provider_block_trade_batch_keeps_two_deals_and_dedupes_on_rerun(tmp_path):
+    """真库：同股同日两笔不同价/量的大宗交易均存活；重跑不膨胀。"""
+    import sqlite3
+
+    provider = _make_event_provider(tmp_path)
+    try:
+        assert provider.save_block_trade_batch(_block_records()) >= 2
+        provider.save_block_trade_batch(_block_records())
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT deal_price, volume FROM block_trade
+                   WHERE ts_code = '600000' AND trade_date = '2026-07-21'
+                   ORDER BY deal_price"""
+            ).fetchall()
+    finally:
+        provider.close()
+    assert rows == [(9.8, 200.0), (10.0, 100.0)]
