@@ -45,15 +45,17 @@ from tasks.core_chain import (
     compute_chip_record_for_refresh,
     compute_indicator_record_for_refresh,
 )
-from tasks.finance_flow import fetch_south_flow_records
+from tasks.finance_flow import _ETF_CODES, fetch_etf_daily_records, fetch_south_flow_records
 from tasks.index_chain import fetch_chip_em_record_for_refresh, fetch_index_daily_records
 from tasks.institution_survey import fetch_institution_survey_records
+from tasks.macro import fetch_limit_pool_records
 from tasks.market_flow import (
     _FUND_FLOW_NUMERIC_FIELDS,
     fetch_fund_flow_records,
     fetch_margin_trading_records,
 )
 from tasks.market_valuation import fetch_market_valuation_records
+from tasks.option_sentiment import fetch_option_sentiment_record
 from tasks.stock_pledge import fetch_stock_pledge_records
 from tasks.valuation_chain import (
     compute_sector_industry_rows_for_refresh,
@@ -1467,6 +1469,244 @@ class StockPledgeRefreshAdapter:
 
 
 # ===========================================================================
+# update_etf_daily（目标日精确，逐只 ETF）
+# ===========================================================================
+
+_ETF_DAILY_COLUMNS = (
+    "ts_code",
+    "name",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "data_source",
+)
+
+
+def _default_etf_codes() -> tuple[tuple[str, str], ...]:
+    return tuple(_ETF_CODES)
+
+
+@dataclass
+class EtfDailyRefreshAdapter:
+    """ETF 日线：逐只只抓目标日，失败 ETF 旧行保留，低覆盖率拒发。
+
+    用键控 upsert 而非分区替换：部分 ETF 失败时其目标日旧行必须存活，
+    覆盖率门槛由适配器按宇宙自行把关。
+    """
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str, str, str], list[dict]] = field(default=fetch_etf_daily_records)
+    codes: tuple[tuple[str, str], ...] = field(default_factory=_default_etf_codes)
+    minimum_coverage: float = 0.8
+
+    task_name = "update_etf_daily"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        universe = list(self.codes)
+        if context.symbols is not None:
+            requested = set(context.symbols)
+            universe = [(code, name) for code, name in universe if code in requested]
+        if not universe:
+            raise RefreshValidationError(
+                "no requested ETF codes found in the refresh universe"
+            )
+
+        rows: list[dict] = []
+        changed: list[str] = []
+        failed: list[str] = []
+        for code, name in universe:
+            try:
+                records = self.fetch_records(code, name, target)
+            except Exception:
+                failed.append(code)
+                continue
+            record = next(
+                (r for r in records if str(r.get("trade_date", ""))[:10] == target),
+                None,
+            )
+            if record is None:
+                failed.append(code)
+                continue
+            rows.append({column: record.get(column) for column in _ETF_DAILY_COLUMNS})
+            changed.append(code)
+
+        coverage = len(rows) / len(universe)
+        if coverage < self.minimum_coverage:
+            raise RefreshValidationError(
+                f"etf daily coverage {coverage:.3f} is below minimum "
+                f"{self.minimum_coverage:.3f}"
+            )
+
+        if rows:
+            self.store.upsert_keyed_snapshot(
+                KeyedUpsertReplacement(
+                    table="etf_daily",
+                    columns=_ETF_DAILY_COLUMNS,
+                    rows=_as_store_rows(rows, _ETF_DAILY_COLUMNS),
+                    natural_keys=("ts_code", "trade_date"),
+                    required_fields=("close",),
+                )
+            )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(universe),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=len(failed),
+            failed_symbols=tuple(failed),
+            changed_symbols=tuple(changed),
+            metadata={"coverage": coverage},
+        )
+
+
+# ===========================================================================
+# update_limit_up_down（目标日精确，权威空池合法）
+# ===========================================================================
+
+_LIMIT_COLUMNS = (
+    "trade_date",
+    "ts_code",
+    "name",
+    "pct_change",
+    "close_price",
+    "turnover_rate",
+    "limit_type",
+    "board_count",
+    "industry",
+    "data_source",
+)
+
+
+@dataclass
+class LimitUpDownRefreshAdapter:
+    """涨跌停池：目标日分区整体替换；权威空池发布空分区（空池 ≠ 源失败）。
+
+    helper 只在两池均权威空时返回 []，源异常直接上抛 —— 因此空列表
+    即权威空证明，才允许 allow_empty 清目标日残留。
+    """
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_limit_pool_records)
+
+    task_name = "update_limit_up_down"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for record in records:
+            code = str(record.get("ts_code", "")).strip()
+            if not code or code in seen:
+                continue
+            if str(record.get("trade_date", ""))[:10] != target:
+                continue
+            seen.add(code)
+            rows.append({column: record.get(column) for column in _LIMIT_COLUMNS})
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="limit_up_down",
+                columns=_LIMIT_COLUMNS,
+                rows=_as_store_rows(rows, _LIMIT_COLUMNS),
+                date_column="trade_date",
+                date_value=target,
+                natural_keys=("trade_date", "ts_code"),
+                allow_empty=not rows,
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=tuple(row["ts_code"] for row in rows),
+            metadata={"authoritative_empty": not rows},
+        )
+
+
+# ===========================================================================
+# update_option_sentiment（目标日精确，单行）
+# ===========================================================================
+
+_OPTION_SENTIMENT_COLUMNS = (
+    "trade_date",
+    "qvix",
+    "pcr",
+    "put_volume",
+    "call_volume",
+    "put_oi",
+    "call_oi",
+    "implied_vol_avg",
+)
+
+
+@dataclass
+class OptionSentimentRefreshAdapter:
+    """期权情绪：QVIX 无目标日行即源未就绪上抛；单行分区替换。"""
+
+    store: SQLiteRefreshStore
+    fetch_record: Callable[[str], dict | None] = field(default=fetch_option_sentiment_record)
+
+    task_name = "update_option_sentiment"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        record = self.fetch_record(target)
+        if record is None:
+            raise RefreshValidationError(
+                f"option sentiment source has no {target} row yet"
+            )
+
+        row = {column: record.get(column) for column in _OPTION_SENTIMENT_COLUMNS}
+        row["trade_date"] = target
+
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="option_sentiment",
+                columns=_OPTION_SENTIMENT_COLUMNS,
+                rows=_as_store_rows([row], _OPTION_SENTIMENT_COLUMNS),
+                date_column="trade_date",
+                date_value=target,
+                natural_keys=("trade_date",),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=1,
+            validated=1,
+            replaced=1,
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={},
+        )
+
+
+# ===========================================================================
 # 运行时适配器总注册表（覆盖测试要求与 refreshable_trading_tasks 一一对应）
 # ===========================================================================
 
@@ -1487,4 +1727,7 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_cb_index": CbIndexRefreshAdapter,
     "update_institution_survey": InstitutionSurveyRefreshAdapter,
     "update_stock_pledge": StockPledgeRefreshAdapter,
+    "update_etf_daily": EtfDailyRefreshAdapter,
+    "update_limit_up_down": LimitUpDownRefreshAdapter,
+    "update_option_sentiment": OptionSentimentRefreshAdapter,
 }
