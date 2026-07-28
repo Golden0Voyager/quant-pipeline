@@ -490,9 +490,11 @@ def run_close_refresh(
     """
     if orchestrator is None:
         orchestrator = _build_refresh_orchestrator(db_path)
+    # 单次读取上海时钟：闸门、started_at 与目标交易日共用同一时间基准
+    now = datetime.now(_SHANGHAI_TZ)
     context = RefreshContext(
-        target_date=get_expected_latest_trading_day(),
-        started_at=datetime.now(_SHANGHAI_TZ),
+        target_date=get_expected_latest_trading_day(now=now),
+        started_at=now,
         run_id=str(uuid4()),
         symbols=tuple(symbols) if symbols else None,
         allow_pre_close=force,
