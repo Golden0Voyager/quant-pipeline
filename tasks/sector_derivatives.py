@@ -485,3 +485,151 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
     results["saved"] = total_saved
     results["total"] = total_saved
     return results
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+_SECTOR_HIST_COL_MAP = {
+    "日期": "trade_date",
+    "开盘": "open",
+    "收盘": "close",
+    "最高": "high",
+    "最低": "low",
+    "成交量": "volume",
+    "成交额": "amount",
+    "涨跌幅": "pct_change",
+}
+
+_SECTOR_VALUATION_COL_MAP = {
+    "行业": "sector_name",
+    "行业名称": "sector_name",
+    "日期": "trade_date",
+    "变动日期": "trade_date",
+    "统计日期": "trade_date",
+    "平均市盈率": "pe",
+    "静态市盈率-加权平均": "pe",
+    "静态市盈率": "pe",
+    "市盈率": "pe",
+    "PE": "pe",
+    "平均市净率": "pb",
+    "市净率": "pb",
+    "PB": "pb",
+    "总市值": "total_mv",
+    "总市值(元)": "total_mv",
+    "总市值-静态": "total_mv",
+    "区间市值": "total_mv",
+}
+
+
+def fetch_sector_daily_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：目标日单日窗口抓取主要行业板块日线并归一化。
+
+    不做退避重试/同花顺回退，源异常直接上抛；单板块空日跳过，
+    三表是否可接受由复合适配器把关。
+    """
+    board_df = ak.stock_board_industry_name_em()
+    if board_df is None or board_df.empty:
+        return []
+    sector_names = board_df["板块名称"].tolist() if "板块名称" in board_df.columns else []
+    targets = [s for s in sector_names if s in MAJOR_SECTORS]
+    compact = trade_date.replace("-", "")
+    records: list[dict] = []
+    for sector in targets:
+        df = ak.stock_board_industry_hist_em(
+            symbol=sector, start_date=compact, end_date=compact
+        )
+        if df is None or df.empty:
+            continue
+        df = df.rename(columns=_SECTOR_HIST_COL_MAP)
+        records.extend(_records_from_hist_df(df, sector))
+    return records
+
+
+def fetch_sector_valuation_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：直传目标日抓取板块估值（PE/PB）并归一化。
+
+    权威空返回 []；源异常直接上抛。
+    """
+    df = ak.stock_industry_pe_ratio_cninfo(
+        symbol="证监会行业分类", date=trade_date.replace("-", "")
+    )
+    if df is None or df.empty:
+        return []
+    df = df.rename(columns=_SECTOR_VALUATION_COL_MAP)
+    keep = {"sector_name", "trade_date", "pe", "pb", "total_mv"}
+    available = [c for c in keep if c in df.columns]
+    if not available:
+        return []
+    df = df[available]
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "sector_name": str(row.get("sector_name", "")).strip(),
+                "trade_date": str(row.get("trade_date", ""))[:10],
+                "pe": _to_float(row.get("pe")),
+                "pb": _to_float(row.get("pb")),
+                "total_mv": _to_float(row.get("total_mv")),
+                "data_source": "akshare",
+            }
+        )
+    return records
+
+
+def fetch_index_futures_basis_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：拆历史型期货/指数源，只发目标日基差行。
+
+    合约空日跳过（是否可接受由复合适配器把关）；源异常直接上抛。
+    """
+    futures_col_map = {
+        "日期": "date",
+        "收盘价": "close",
+    }
+    records: list[dict] = []
+    for futures_code, (index_code, _index_name) in FUTURES_CONTRACTS.items():
+        futures_df = ak.futures_zh_daily_sina(symbol=futures_code)
+        if futures_df is None or futures_df.empty:
+            continue
+        futures_df = futures_df.rename(columns=futures_col_map)
+        if "date" not in futures_df.columns or "close" not in futures_df.columns:
+            continue
+
+        index_df = ak.stock_zh_index_daily_tx(symbol=index_code)
+        if index_df is None or index_df.empty:
+            continue
+        index_df = index_df.rename(columns={"close": "index_close"})
+        if "date" not in index_df.columns or "index_close" not in index_df.columns:
+            continue
+        index_close_map: dict[str, float] = {}
+        for _, row in index_df.iterrows():
+            d = str(row.get("date", ""))[:10]
+            c = _to_float(row.get("index_close"))
+            if d and c is not None:
+                index_close_map[d] = c
+
+        for _, row in futures_df.iterrows():
+            d = str(row.get("date", ""))[:10]
+            if d != trade_date:
+                continue
+            futures_price = _to_float(row.get("close"))
+            index_price = index_close_map.get(d)
+            if futures_price is None or index_price is None:
+                continue
+            basis = futures_price - index_price
+            basis_pct = (
+                round((futures_price / index_price - 1) * 100, 4) if index_price else None
+            )
+            records.append(
+                {
+                    "trade_date": d,
+                    "futures_code": futures_code,
+                    "futures_price": futures_price,
+                    "index_price": index_price,
+                    "basis": round(basis, 4),
+                    "basis_pct": basis_pct,
+                    "data_source": "akshare",
+                }
+            )
+    return records
