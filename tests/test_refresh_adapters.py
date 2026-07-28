@@ -42,6 +42,7 @@ from core.refresh_adapters import (
     MarginTradingRefreshAdapter,
     MarketSnapshotRefreshAdapter,
     MarketValuationRefreshAdapter,
+    NorthFlowRefreshAdapter,
     OptionSentimentRefreshAdapter,
     SectorFundFlowRefreshAdapter,
     SectorIndustryRefreshAdapter,
@@ -2485,3 +2486,43 @@ class TestStockRepurchaseRefreshAdapter:
 
         with pytest.raises(RefreshValidationError):
             adapter.refresh(_context())
+
+
+# ===========================================================================
+# 组6：死源（north_flow）
+# ===========================================================================
+
+
+class TestNorthFlowRefreshAdapter:
+    def test_reports_dead_source_and_preserves_rows(self, market_db_path, store):
+        """死源：不抓取、零替换，保留旧行并携 dead_source 元数据。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO north_flow (trade_date, market, net_buy_amount, data_source)"
+            " VALUES ('2026-07-24', '北向', 10.0, 'akshare')",
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO north_flow (trade_date, market, net_buy_amount, data_source)"
+            " VALUES ('2026-07-25', '北向', -5.0, 'akshare')",
+        )
+        adapter = NorthFlowRefreshAdapter(store=store, db_path=market_db_path)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date is None
+        assert (result.fetched, result.validated, result.replaced) == (0, 0, 0)
+        assert result.retained == 2
+        assert result.failed_symbols == ()
+        assert result.metadata["source_status"] == "dead_source"
+        assert str(result.metadata["reason"]).strip()
+        assert _query(market_db_path, "SELECT COUNT(*) FROM north_flow") == [(2,)]
+
+    def test_empty_table_reports_zero_retained(self, market_db_path, store):
+        """旧表为空时如实报 retained=0，不伪造保留量。"""
+        adapter = NorthFlowRefreshAdapter(store=store, db_path=market_db_path)
+
+        result = adapter.refresh(_context())
+
+        assert result.retained == 0
+        assert result.metadata["source_status"] == "dead_source"
