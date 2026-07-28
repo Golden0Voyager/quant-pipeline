@@ -241,33 +241,39 @@ def _run_registry_task(
     if task_name == "update_indicators":
         if force or symbols:
             return _dispatch_indicators_force(fn, db, engine, symbols)
-        return fn(db, engine)
+        return _safe_task(task_name, fn, db, engine)
 
     if task_name == "update_chip_distribution":
         if force or symbols:
             return _dispatch_chip_force(fn, db, symbols)
-        return fn(db)
+        return _safe_task(task_name, fn, db)
 
     if task_name in ("update_bars",):
-        return fn(db, loader, limit=limit, resume=resume, symbols=symbols, force=force)
+        return _safe_task(
+            task_name, fn, db, loader,
+            limit=limit, resume=resume, symbols=symbols, force=force,
+        )
 
     if task_name == "update_daily_core":
+        # 编排器：内部各任务已各自经过 safe_task，不再包一层
         return fn(db, loader, engine, resume=resume, force=force)
 
     if task_name in ("update_fundamentals", "update_fund_flow", "update_quarterly_financials"):
-        return fn(db, loader, symbols=symbols)
+        return _safe_task(task_name, fn, db, loader, symbols=symbols)
 
     if task_name in (
         "update_margin_trading", "update_dragon_tiger",
         "update_block_trade", "update_shareholder_count",
         "update_historical_valuation",
     ):
-        return fn(db, symbols=symbols)
+        return _safe_task(task_name, fn, db, symbols=symbols)
 
     if task_name == "retry":
-        return fn(db, loader)
+        return _safe_task(task_name, fn, db, loader)
 
-    return fn(db)
+    # safe_task 负责创建 ingestion_runs 审计父行并注入 _task_run_id，
+    # 使 PIT 表的 snapshot_run_id 外键在单任务模式下同样有父行可引用
+    return _safe_task(task_name, fn, db)
 
 
 def _dispatch_indicators_force(
