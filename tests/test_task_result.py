@@ -33,9 +33,15 @@ class TestTaskStatusContract:
 
     def test_degraded_exit_failure(self):
         result = TaskResult.degraded(
-            "x", ErrorKind.NETWORK, "partial fetch", saved=5, rejected=1
+            "x",
+            ErrorKind.NETWORK,
+            "partial fetch",
+            saved=5,
+            attempted=6,
+            rejected=1,
         )
         assert result.status is TaskStatus.DEGRADED
+        assert result.attempted == 6
         assert result.exit_failure is True
 
     def test_aborted_exit_failure(self):
@@ -105,6 +111,20 @@ class TestNormalizeTaskResult:
             "x", {"saved": 0, "status": "success", "skipped": True}
         )
         assert result.status is TaskStatus.SUCCESS
+
+    def test_keeps_explicit_degraded_attempted(self):
+        result = normalize_task_result(
+            "x",
+            {
+                "status": "degraded",
+                "saved": 2,
+                "attempted": 5,
+                "error": "3 failures",
+            },
+        )
+
+        assert result.status is TaskStatus.DEGRADED
+        assert result.attempted == 5
 
     def test_keeps_explicit_aborted_contract(self):
         result = normalize_task_result(
