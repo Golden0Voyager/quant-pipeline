@@ -21,9 +21,13 @@ import pytest
 from core.refresh import RefreshContext
 from core.refresh_adapters import (
     REFRESH_ADAPTERS,
+    AhPremiumRefreshAdapter,
     BarsRefreshAdapter,
     BlockTradeRefreshAdapter,
     CbIndexRefreshAdapter,
+    CbQuotationRefreshAdapter,
+    CbRedeemRefreshAdapter,
+    ConceptBoardRefreshAdapter,
     DragonTigerRefreshAdapter,
     EastmoneyChipRefreshAdapter,
     EtfDailyRefreshAdapter,
@@ -39,9 +43,11 @@ from core.refresh_adapters import (
     MarketSnapshotRefreshAdapter,
     MarketValuationRefreshAdapter,
     OptionSentimentRefreshAdapter,
+    SectorFundFlowRefreshAdapter,
     SectorIndustryRefreshAdapter,
     SouthFlowRefreshAdapter,
     StockPledgeRefreshAdapter,
+    StockRepurchaseRefreshAdapter,
     build_core_refresh_adapters,
     build_derived_refresh_adapters,
 )
@@ -2208,3 +2214,274 @@ class TestBlockTradeRefreshAdapter:
         assert (result.fetched, result.replaced) == (0, 0)
         assert result.as_of_date == TARGET
         assert _query(market_db_path, "SELECT COUNT(*) FROM block_trade") == [(1,)]
+
+
+# ===========================================================================
+# 组5：运行快照型（sector_fund_flow / ah_premium / concept_board /
+#        cb_quotation / cb_redeem / stock_repurchase）
+# ===========================================================================
+
+_STARTED_AT_ISO = "2026-07-27T16:30:00+08:00"
+
+
+def _sector_flow_record(sector: str, main: float = 1e8) -> dict:
+    return {
+        "sector_name": sector,
+        "trade_date": TARGET,
+        "main_net_inflow": main,
+        "main_net_inflow_pct": 1.2,
+        "super_large_net_inflow": None,
+        "large_net_inflow": 5e7,
+        "medium_net_inflow": 3e7,
+        "small_net_inflow": None,
+        "data_source": "ths",
+    }
+
+
+def _ah_record(code: str, h_code: str = "00001") -> dict:
+    return {
+        "trade_date": TARGET,
+        "ts_code": code,
+        "h_code": h_code,
+        "name": f"股票{code}",
+        "a_price": 10.0,
+        "h_price": 8.0,
+        "premium": 25.0,
+        "data_source": "akshare",
+    }
+
+
+def _concept_record(code: str, name: str) -> dict:
+    return {
+        "trade_date": TARGET,
+        "concept_code": code,
+        "concept_name": name,
+        "pct_change": 2.5,
+        "turnover": 1.0,
+        "up_count": 30,
+        "down_count": 5,
+        "data_source": "em",
+    }
+
+
+def _cb_quotation_record(code: str, price: float = 120.5) -> dict:
+    return {
+        "ts_code": code,
+        "bond_name": f"转债{code}",
+        "price": price,
+        "premium": 15.0,
+        "double_low": 135.5,
+        "expire_date": "2030-01-01",
+        "data_source": "akshare",
+        "updated_at": _STARTED_AT_ISO,
+    }
+
+
+def _cb_redeem_record(code: str, flag: str = "已公告强赎") -> dict:
+    return {
+        "ts_code": code,
+        "bond_name": f"转债{code}",
+        "redeem_flag": flag,
+        "redeem_price": 100.3,
+        "redeem_date": "2026-08-10",
+        "data_source": "akshare",
+        "updated_at": _STARTED_AT_ISO,
+    }
+
+
+def _repurchase_record(code: str, trade_date: str = "2026-07-25") -> dict:
+    return {
+        "trade_date": trade_date,
+        "stock_code": code,
+        "stock_name": f"股票{code}",
+        "repurchase_amount": 1e8,
+        "repurchase_price": 12.0,
+        "repurchase_price_lower": 10.0,
+        "repurchase_price_upper": 12.0,
+        "repurchase_quantity": 1000000,
+        "progress_status": "实施中",
+        "source_record_key": f"rep-{code}-{trade_date}",
+    }
+
+
+class TestSectorFundFlowRefreshAdapter:
+    def test_replaces_target_partition_with_run_metadata(self, market_db_path, store):
+        """含历史的运行快照表：只替目标日分区，历史保留，metadata 携 run_id。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_fund_flow (trade_date, sector_name, main_net_inflow, data_source)"
+            " VALUES (?, '盘中残留', 0.0, 'ths')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_fund_flow (trade_date, sector_name, main_net_inflow, data_source)"
+            " VALUES ('2026-07-24', '银行', 1.0, 'ths')",
+        )
+        fetch = FakeFetcher([
+            _sector_flow_record("银行"),
+            _sector_flow_record("证券", main=2e8),
+        ])
+        adapter = SectorFundFlowRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.as_of_date == TARGET
+        assert result.replaced == 2
+        assert result.metadata["run_id"] == "run-test"
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, sector_name FROM sector_fund_flow ORDER BY trade_date, sector_name",
+        )
+        assert rows == [
+            ("2026-07-24", "银行"),
+            (TARGET, "证券"),
+            (TARGET, "银行"),
+        ]
+
+    def test_empty_snapshot_raises_and_keeps_old(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO sector_fund_flow (trade_date, sector_name, main_net_inflow, data_source)"
+            " VALUES (?, '银行', 1.0, 'ths')",
+            (TARGET,),
+        )
+        adapter = SectorFundFlowRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM sector_fund_flow") == [(1,)]
+
+
+class TestAhPremiumRefreshAdapter:
+    def test_replaces_target_partition_with_run_metadata(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO ah_premium (trade_date, ts_code, name, premium, data_source)"
+            " VALUES ('2026-07-24', '600000', '历史行', 20.0, 'akshare')",
+        )
+        fetch = FakeFetcher([_ah_record("600000"), _ah_record("600036", "03968")])
+        adapter = AhPremiumRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == TARGET
+        assert result.replaced == 2
+        assert result.metadata["run_id"] == "run-test"
+        assert _query(market_db_path, "SELECT COUNT(*) FROM ah_premium") == [(3,)]
+
+    def test_empty_snapshot_raises(self, market_db_path, store):
+        adapter = AhPremiumRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+
+class TestConceptBoardRefreshAdapter:
+    def test_replaces_target_partition_with_run_metadata(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO concept_board (trade_date, concept_code, concept_name, data_source)"
+            " VALUES (?, 'BK9999', '盘中残留', 'em')",
+            (TARGET,),
+        )
+        fetch = FakeFetcher([
+            _concept_record("BK0001", "人工智能"),
+            _concept_record("BK0002", "固态电池"),
+        ])
+        adapter = ConceptBoardRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.replaced == 2
+        assert result.metadata["run_id"] == "run-test"
+        rows = _query(
+            market_db_path,
+            "SELECT concept_code FROM concept_board ORDER BY concept_code",
+        )
+        assert rows == [("BK0001",), ("BK0002",)]
+
+
+class TestCbQuotationRefreshAdapter:
+    def test_replaces_entire_snapshot(self, market_db_path, store):
+        """表即当前快照：整表替换，不在新快照的旧转债行移除。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO cb_quotation (ts_code, bond_name, price, data_source, updated_at)"
+            " VALUES ('113001', '退市转债', 99.0, 'akshare', '2026-07-24T16:30:00+08:00')",
+        )
+        fetch = FakeFetcher([
+            _cb_quotation_record("113002"),
+            _cb_quotation_record("113003", price=115.0),
+        ])
+        adapter = CbQuotationRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(_STARTED_AT_ISO,)]
+        assert result.replaced == 2
+        assert result.metadata["run_id"] == "run-test"
+        rows = _query(market_db_path, "SELECT ts_code FROM cb_quotation ORDER BY ts_code")
+        assert rows == [("113002",), ("113003",)]
+
+    def test_empty_snapshot_raises_and_keeps_old(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO cb_quotation (ts_code, bond_name, price, data_source, updated_at)"
+            " VALUES ('113001', '转债', 99.0, 'akshare', '2026-07-24T16:30:00+08:00')",
+        )
+        adapter = CbQuotationRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM cb_quotation") == [(1,)]
+
+
+class TestCbRedeemRefreshAdapter:
+    def test_replaces_entire_snapshot(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO cb_redeem (ts_code, bond_name, redeem_flag, data_source, updated_at)"
+            " VALUES ('113001', '旧转债', '已解除', 'akshare', '2026-07-24T16:30:00+08:00')",
+        )
+        fetch = FakeFetcher([_cb_redeem_record("113002")])
+        adapter = CbRedeemRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(_STARTED_AT_ISO,)]
+        assert result.replaced == 1
+        assert result.metadata["run_id"] == "run-test"
+        assert _query(market_db_path, "SELECT ts_code FROM cb_redeem") == [("113002",)]
+
+
+class TestStockRepurchaseRefreshAdapter:
+    def test_upserts_by_key_and_keeps_history(self, market_db_path, store):
+        """键控 upsert + run_id metadata：快照外旧回购事件保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO stock_repurchase (trade_date, stock_code, stock_name, source_record_key)"
+            " VALUES ('2026-06-01', '000009', '旧股', 'rep-000009-2026-06-01')",
+        )
+        fetch = FakeFetcher([
+            _repurchase_record("000001"),
+            _repurchase_record("000002", trade_date="2026-07-24"),
+        ])
+        adapter = StockRepurchaseRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [()]
+        assert result.replaced == 2
+        assert result.metadata["run_id"] == "run-test"
+        assert _query(market_db_path, "SELECT COUNT(*) FROM stock_repurchase") == [(3,)]
+
+    def test_empty_snapshot_raises(self, market_db_path, store):
+        adapter = StockRepurchaseRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
