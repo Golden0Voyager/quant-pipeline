@@ -21,10 +21,16 @@ import pytest
 from core.refresh import RefreshContext
 from core.refresh_adapters import (
     BarsRefreshAdapter,
+    EastmoneyChipRefreshAdapter,
     FundamentalsRefreshAdapter,
     FundFlowRefreshAdapter,
+    HistoricalValuationRefreshAdapter,
+    IndicatorsRefreshAdapter,
+    LocalChipRefreshAdapter,
     MarketSnapshotRefreshAdapter,
+    SectorIndustryRefreshAdapter,
     build_core_refresh_adapters,
+    build_derived_refresh_adapters,
 )
 from core.refresh_store import RefreshValidationError, SQLiteRefreshStore
 
@@ -685,3 +691,581 @@ def test_build_core_refresh_adapters_registry(db_path, store):
         assert callable(adapter.refresh)
     assert adapters["update_bars"].loader is loader
     assert adapters["update_fund_flow"].loader is loader
+
+
+# ===========================================================================
+# 派生适配器（Task 7）公共 fixture / fake
+# ===========================================================================
+
+
+def _create_derived_tables(db_path: str) -> None:
+    """补建派生任务正式表（带 UNIQUE 约束，供 upsert 使用）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE indicators (
+            ts_code TEXT NOT NULL, trade_date TEXT NOT NULL,
+            close REAL, volume REAL,
+            ma5 REAL, ma10 REAL, ma20 REAL, ma60 REAL, ma120 REAL, ma250 REAL,
+            vol_ma5 REAL, vol_ma50 REAL, vol_ma60 REAL,
+            boll_upper REAL, boll_mid REAL, boll_lower REAL, boll_bandwidth REAL,
+            cyc60 REAL, chip_concentration REAL,
+            macd_dif REAL, macd_dea REAL, macd_hist REAL,
+            kdj_k REAL, kdj_d REAL, kdj_j REAL,
+            rsi6 REAL, rsi12 REAL, rsi24 REAL, cci REAL,
+            UNIQUE(ts_code, trade_date))"""
+    )
+    for table in ("chip_distribution", "chip_distribution_em"):
+        conn.execute(
+            f"""CREATE TABLE {table} (
+                ts_code TEXT NOT NULL, trade_date TEXT NOT NULL,
+                profit_ratio REAL, avg_cost REAL,
+                cost_90_low REAL, cost_90_high REAL, concentration_90 REAL,
+                cost_70_low REAL, cost_70_high REAL, concentration_70 REAL,
+                chip_concentration REAL,
+                UNIQUE(ts_code, trade_date))"""
+        )
+    conn.execute(
+        """CREATE TABLE historical_valuation (
+            ts_code TEXT NOT NULL, trade_date TEXT NOT NULL,
+            pe_ttm REAL, pb REAL, ps_ttm REAL, dividend_yield REAL,
+            UNIQUE(ts_code, trade_date))"""
+    )
+    conn.execute(
+        """CREATE TABLE sector_industry (
+            industry_name TEXT NOT NULL, trade_date TEXT NOT NULL,
+            avg_pe REAL, avg_pb REAL, avg_ps REAL, avg_roe REAL,
+            avg_revenue_growth REAL, avg_profit_growth REAL,
+            total_market_cap REAL, fund_inflow_rank INTEGER, data_source TEXT,
+            UNIQUE(industry_name, trade_date))"""
+    )
+    conn.execute("ALTER TABLE stock_list ADD COLUMN industry TEXT")
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def derived_db_path(db_path: str) -> str:
+    _create_derived_tables(db_path)
+    return db_path
+
+
+def _history_frame(n_days: int, end: str = TARGET) -> pd.DataFrame:
+    """构造以 end 为最后一个交易日的确定性日线历史。"""
+    dates = pd.date_range(end=end, periods=n_days, freq="B")
+    closes = [10.0 + 0.01 * i for i in range(n_days)]
+    return pd.DataFrame({
+        "trade_date": [d.strftime("%Y-%m-%d") for d in dates],
+        "open": [c - 0.05 for c in closes],
+        "high": [c + 0.1 for c in closes],
+        "low": [c - 0.1 for c in closes],
+        "close": closes,
+        "volume": [1000.0] * n_days,
+        "turnover_rate": [0.02] * n_days,
+    })
+
+
+class FakeHistoryDb:
+    """db_path + 按股票返回预设日线历史的手写 db fake。"""
+
+    def __init__(self, db_path: str, frames: dict[str, pd.DataFrame | Exception]):
+        self.db_path = db_path
+        self.frames = frames
+        self.calls: list[str] = []
+
+    def get_daily_bars(self, symbol: str) -> pd.DataFrame:
+        self.calls.append(symbol)
+        item = self.frames[symbol]
+        if isinstance(item, Exception):
+            raise item
+        return item.copy()
+
+
+class FakeIndicatorEngine:
+    """回显 date/close 并附确定性 ma5 的手写 engine fake。"""
+
+    def calculate_all_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({
+            "date": df["date"],
+            "close": df["close"],
+            "ma5": df["close"].rolling(5).mean(),
+        })
+
+
+def _seed_indicator(db_path: str, code: str, trade_date: str, close: float = 1.0) -> None:
+    _execute(
+        db_path,
+        "INSERT INTO indicators (ts_code, trade_date, close, ma5) VALUES (?, ?, ?, 9.9)",
+        (code, trade_date, close),
+    )
+
+
+def _seed_chip(db_path: str, table: str, code: str, trade_date: str,
+               avg_cost: float = 8.8) -> None:
+    _execute(
+        db_path,
+        f"INSERT INTO {table} (ts_code, trade_date, profit_ratio, avg_cost)"
+        " VALUES (?, ?, 0.5, ?)",
+        (code, trade_date, avg_cost),
+    )
+
+
+def _chip_em_record(code: str, trade_date: str = TARGET) -> dict:
+    return {
+        "ts_code": code,
+        "trade_date": trade_date,
+        "profit_ratio": 0.6,
+        "avg_cost": 10.0,
+        "cost_90_low": 9.0,
+        "cost_90_high": 11.0,
+        "concentration_90": 0.2,
+        "cost_70_low": 9.5,
+        "cost_70_high": 10.5,
+        "concentration_70": 0.1,
+    }
+
+
+class FakeChipEmFetch:
+    """按股票返回预设 (record, reason) 的手写 EM 抓取 fake。"""
+
+    def __init__(self, outcomes: dict[str, tuple[dict | None, str | None]]):
+        self.outcomes = outcomes
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, symbol: str, target_date: str) -> tuple[dict | None, str | None]:
+        self.calls.append((symbol, target_date))
+        return self.outcomes[symbol]
+
+
+# ===========================================================================
+# IndicatorsRefreshAdapter
+# ===========================================================================
+
+
+class TestIndicatorsRefreshAdapter:
+    def test_publishes_only_target_date_row(self, derived_db_path, store):
+        """由全历史计算但只提交目标日；历史指标行绝不重写。"""
+        _seed_indicator(derived_db_path, "000001", "2026-07-24", close=7.7)
+        db = FakeHistoryDb(derived_db_path, {"000001": _history_frame(120)})
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.task_name == "update_indicators"
+        assert result.as_of_date == TARGET
+        assert result.changed_symbols == ("000001",)
+        assert result.failed_symbols == ()
+        rows = _query(
+            derived_db_path,
+            "SELECT trade_date, close FROM indicators WHERE ts_code = '000001'"
+            " ORDER BY trade_date",
+        )
+        # 历史行原样保留，新增仅目标日一行
+        assert rows[0] == ("2026-07-24", 7.7)
+        assert len(rows) == 2
+        assert rows[1][0] == TARGET
+
+    def test_failed_symbol_keeps_old_row_and_enters_queue(self, derived_db_path, store):
+        """计算失败 → 目标日旧行保留，股票进入失败队列。"""
+        _seed_indicator(derived_db_path, "000002", TARGET, close=6.6)
+        db = FakeHistoryDb(derived_db_path, {
+            "000001": _history_frame(120),
+            "000002": RuntimeError("db error"),
+        })
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        result = adapter.refresh(_context(symbols=("000001", "000002")))
+
+        assert result.failed_symbols == ("000002",)
+        assert result.changed_symbols == ("000001",)
+        rows = _query(
+            derived_db_path,
+            "SELECT close FROM indicators WHERE ts_code = '000002' AND trade_date = ?",
+            (TARGET,),
+        )
+        assert rows == [(6.6,)]
+
+    def test_insufficient_history_is_not_failure(self, derived_db_path, store):
+        """历史不足 60 天（新股）不算失败，不发布任何行。"""
+        db = FakeHistoryDb(derived_db_path, {"000001": _history_frame(30)})
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.failed_symbols == ()
+        assert result.changed_symbols == ()
+        assert result.metadata.get("insufficient") == 1
+        assert _query(derived_db_path, "SELECT COUNT(*) FROM indicators") == [(0,)]
+
+    def test_processes_exactly_context_symbols(self, derived_db_path, store):
+        """只处理编排器收窄后的 scope，不自行扩大范围。"""
+        db = FakeHistoryDb(derived_db_path, {
+            "000001": _history_frame(120),
+            "600000": _history_frame(120),
+        })
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        adapter.refresh(_context(symbols=("000001",)))
+
+        assert db.calls == ["000001"]
+
+    def test_none_symbols_uses_target_bar_partition(self, derived_db_path, store):
+        """symbols=None → 以目标日 daily_bars 分区为全市场范围。"""
+        _seed_bar(derived_db_path, "000001")
+        _seed_bar(derived_db_path, "600000")
+        db = FakeHistoryDb(derived_db_path, {
+            "000001": _history_frame(120),
+            "600000": _history_frame(120),
+        })
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        result = adapter.refresh(_context())
+
+        assert sorted(db.calls) == ["000001", "600000"]
+        assert sorted(result.changed_symbols) == ["000001", "600000"]
+
+    def test_empty_symbols_tuple_is_noop(self, derived_db_path, store):
+        db = FakeHistoryDb(derived_db_path, {})
+        adapter = IndicatorsRefreshAdapter(
+            store=store, db=db, engine=FakeIndicatorEngine()
+        )
+
+        result = adapter.refresh(_context(symbols=()))
+
+        assert db.calls == []
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+# ===========================================================================
+# LocalChipRefreshAdapter
+# ===========================================================================
+
+
+class TestLocalChipRefreshAdapter:
+    def test_publishes_only_target_date_row(self, derived_db_path, store):
+        """由全历史计算但只提交目标日；历史筹码行绝不重写。"""
+        _seed_chip(derived_db_path, "chip_distribution", "000001", "2026-07-24")
+        db = FakeHistoryDb(derived_db_path, {"000001": _history_frame(120)})
+        adapter = LocalChipRefreshAdapter(store=store, db=db)
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.task_name == "update_chip_distribution"
+        assert result.changed_symbols == ("000001",)
+        rows = _query(
+            derived_db_path,
+            "SELECT trade_date, avg_cost FROM chip_distribution"
+            " WHERE ts_code = '000001' ORDER BY trade_date",
+        )
+        assert rows[0] == ("2026-07-24", 8.8)
+        assert len(rows) == 2
+        assert rows[1][0] == TARGET
+        assert rows[1][1] != 8.8
+
+    def test_failed_symbol_keeps_old_rows(self, derived_db_path, store):
+        """单股失败不删其他股票数据，失败股旧行保留。"""
+        _seed_chip(derived_db_path, "chip_distribution", "000002", TARGET, avg_cost=7.7)
+        db = FakeHistoryDb(derived_db_path, {
+            "000001": _history_frame(120),
+            "000002": RuntimeError("db error"),
+        })
+        adapter = LocalChipRefreshAdapter(store=store, db=db)
+
+        result = adapter.refresh(_context(symbols=("000001", "000002")))
+
+        assert result.failed_symbols == ("000002",)
+        rows = _query(
+            derived_db_path,
+            "SELECT avg_cost FROM chip_distribution"
+            " WHERE ts_code = '000002' AND trade_date = ?",
+            (TARGET,),
+        )
+        assert rows == [(7.7,)]
+
+    def test_empty_symbols_tuple_is_noop(self, derived_db_path, store):
+        db = FakeHistoryDb(derived_db_path, {})
+        adapter = LocalChipRefreshAdapter(store=store, db=db)
+
+        result = adapter.refresh(_context(symbols=()))
+
+        assert db.calls == []
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+# ===========================================================================
+# HistoricalValuationRefreshAdapter
+# ===========================================================================
+
+
+class TestHistoricalValuationRefreshAdapter:
+    def test_snapshots_target_partition_only(self, derived_db_path, store):
+        """只把 fundamentals 目标日分区快照过去；历史估值行保留。"""
+        _seed_fundamental(derived_db_path, "000001", pe=10.0, dividend_yield=1.5)
+        _seed_fundamental(derived_db_path, "600000", pe=20.0)
+        _execute(
+            derived_db_path,
+            "INSERT INTO historical_valuation (ts_code, trade_date, pe_ttm)"
+            " VALUES ('000001', '2026-07-24', 99.0)",
+        )
+        adapter = HistoricalValuationRefreshAdapter(store=store, db_path=derived_db_path)
+
+        result = adapter.refresh(_context())
+
+        assert result.task_name == "update_historical_valuation"
+        assert sorted(result.changed_symbols) == ["000001", "600000"]
+        rows = _query(
+            derived_db_path,
+            "SELECT ts_code, trade_date, pe_ttm FROM historical_valuation"
+            " ORDER BY trade_date, ts_code",
+        )
+        assert rows == [
+            ("000001", "2026-07-24", 99.0),
+            ("000001", TARGET, 10.0),
+            ("600000", TARGET, 20.0),
+        ]
+
+    def test_symbols_scope_filters_partition(self, derived_db_path, store):
+        _seed_fundamental(derived_db_path, "000001", pe=10.0)
+        _seed_fundamental(derived_db_path, "600000", pe=20.0)
+        adapter = HistoricalValuationRefreshAdapter(store=store, db_path=derived_db_path)
+
+        result = adapter.refresh(_context(symbols=("600000",)))
+
+        assert result.changed_symbols == ("600000",)
+        codes = _query(derived_db_path, "SELECT ts_code FROM historical_valuation")
+        assert codes == [("600000",)]
+
+    def test_empty_partition_raises_and_retains(self, derived_db_path, store):
+        """fundamentals 无目标日分区 → 报错，旧快照保留。"""
+        _execute(
+            derived_db_path,
+            "INSERT INTO historical_valuation (ts_code, trade_date, pe_ttm)"
+            " VALUES ('000001', '2026-07-24', 99.0)",
+        )
+        adapter = HistoricalValuationRefreshAdapter(store=store, db_path=derived_db_path)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(
+            derived_db_path, "SELECT COUNT(*) FROM historical_valuation"
+        ) == [(1,)]
+
+    def test_empty_symbols_tuple_is_noop(self, derived_db_path, store):
+        adapter = HistoricalValuationRefreshAdapter(store=store, db_path=derived_db_path)
+        result = adapter.refresh(_context(symbols=()))
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+# ===========================================================================
+# SectorIndustryRefreshAdapter
+# ===========================================================================
+
+
+class TestSectorIndustryRefreshAdapter:
+    def _seed_industry(self, db_path: str, code: str, industry: str) -> None:
+        _execute(
+            db_path,
+            "INSERT INTO stock_list (code, name, market, industry) VALUES (?, '', 'sz', ?)",
+            (code, industry),
+        )
+
+    def test_replaces_only_target_partition(self, derived_db_path, store):
+        """目标日分区整体替换（盘中残留清理），历史分区保留。"""
+        _seed_fundamental(derived_db_path, "000001", pe=10.0)
+        _seed_fundamental(derived_db_path, "600000", pe=20.0)
+        self._seed_industry(derived_db_path, "000001", "银行")
+        self._seed_industry(derived_db_path, "600000", "银行")
+        # 盘中残留（应被替换）+ 历史分区（应保留）
+        _execute(
+            derived_db_path,
+            "INSERT INTO sector_industry (industry_name, trade_date, avg_pe)"
+            " VALUES ('旧行业', ?, 1.0)",
+            (TARGET,),
+        )
+        _execute(
+            derived_db_path,
+            "INSERT INTO sector_industry (industry_name, trade_date, avg_pe)"
+            " VALUES ('银行', '2026-07-24', 5.0)",
+        )
+        adapter = SectorIndustryRefreshAdapter(store=store, db_path=derived_db_path)
+
+        result = adapter.refresh(_context())
+
+        assert result.task_name == "update_sector_industry"
+        assert result.as_of_date == TARGET
+        rows = _query(
+            derived_db_path,
+            "SELECT industry_name, trade_date, avg_pe, fund_inflow_rank, data_source"
+            " FROM sector_industry ORDER BY trade_date, industry_name",
+        )
+        assert rows == [
+            ("银行", "2026-07-24", 5.0, None, None),
+            ("银行", TARGET, 15.0, None, "derived"),
+        ]
+
+    def test_empty_partition_raises_and_retains(self, derived_db_path, store):
+        _execute(
+            derived_db_path,
+            "INSERT INTO sector_industry (industry_name, trade_date, avg_pe)"
+            " VALUES ('银行', ?, 5.0)",
+            (TARGET,),
+        )
+        adapter = SectorIndustryRefreshAdapter(store=store, db_path=derived_db_path)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(
+            derived_db_path, "SELECT COUNT(*) FROM sector_industry"
+        ) == [(1,)]
+
+    def test_empty_symbols_tuple_is_noop(self, derived_db_path, store):
+        adapter = SectorIndustryRefreshAdapter(store=store, db_path=derived_db_path)
+        result = adapter.refresh(_context(symbols=()))
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+# ===========================================================================
+# EastmoneyChipRefreshAdapter
+# ===========================================================================
+
+
+class TestEastmoneyChipRefreshAdapter:
+    def test_none_symbols_raises_instead_of_random_selector(self, derived_db_path, store):
+        """刷新模式必须显式 scope；symbols=None 拒绝而非随机选股。"""
+        fetch = FakeChipEmFetch({})
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert fetch.calls == []
+
+    def test_publishes_only_target_rows_and_keeps_history(self, derived_db_path, store):
+        """成功股票只 upsert 目标日一行；历史行与未涉及股票保留。"""
+        _seed_chip(derived_db_path, "chip_distribution_em", "000001", "2026-07-24")
+        fetch = FakeChipEmFetch({
+            "000001": (_chip_em_record("000001"), None),
+            "600000": (None, "missing_target"),
+        })
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        result = adapter.refresh(_context(symbols=("000001", "600000")))
+
+        assert result.task_name == "update_chip_distribution_em"
+        assert result.changed_symbols == ("000001",)
+        assert result.failed_symbols == ("600000",)
+        assert result.metadata.get("aborted") is False
+        rows = _query(
+            derived_db_path,
+            "SELECT trade_date, avg_cost FROM chip_distribution_em"
+            " WHERE ts_code = '000001' ORDER BY trade_date",
+        )
+        assert rows == [("2026-07-24", 8.8), (TARGET, 10.0)]
+
+    def test_aborts_after_nine_consecutive_failures(self, derived_db_path, store):
+        """九连败 → aborted，未处理股票全部进入失败队列，旧筹码不删。"""
+        symbols = tuple(f"0000{i:02d}" for i in range(1, 13))
+        _seed_chip(derived_db_path, "chip_distribution_em", "000001", "2026-07-24")
+        fetch = FakeChipEmFetch(dict.fromkeys(symbols, (None, "fetch_failed")))
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        result = adapter.refresh(_context(symbols=symbols))
+
+        assert len(fetch.calls) == 9
+        assert result.metadata.get("aborted") is True
+        assert result.metadata.get("abort_reason") == "consecutive_failures"
+        # 已失败 9 只 + 未处理 3 只全部进入失败队列
+        assert result.failed_symbols == symbols
+        assert result.changed_symbols == ()
+        # 旧筹码行不得被删除
+        assert _query(
+            derived_db_path, "SELECT COUNT(*) FROM chip_distribution_em"
+        ) == [(1,)]
+
+    def test_success_resets_consecutive_counter(self, derived_db_path, store):
+        """成功一次即重置计数器：8 败 + 1 成 + 8 败不触发熔断。"""
+        fails_a = tuple(f"1000{i:02d}" for i in range(8))
+        fails_b = tuple(f"2000{i:02d}" for i in range(8))
+        symbols = fails_a + ("000001",) + fails_b
+        outcomes: dict[str, tuple[dict | None, str | None]] = dict.fromkeys(
+            fails_a + fails_b, (None, "fetch_failed")
+        )
+        outcomes["000001"] = (_chip_em_record("000001"), None)
+        fetch = FakeChipEmFetch(outcomes)
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        result = adapter.refresh(_context(symbols=symbols))
+
+        assert len(fetch.calls) == 17
+        assert result.metadata.get("aborted") is False
+        assert result.changed_symbols == ("000001",)
+
+    def test_non_fetch_failures_do_not_trip_breaker(self, derived_db_path, store):
+        """missing_target/invalid 不计入连续失败熔断计数。"""
+        symbols = tuple(f"3000{i:02d}" for i in range(10))
+        fetch = FakeChipEmFetch(dict.fromkeys(symbols, (None, "missing_target")))
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        result = adapter.refresh(_context(symbols=symbols))
+
+        assert len(fetch.calls) == 10
+        assert result.metadata.get("aborted") is False
+        assert result.failed_symbols == symbols
+
+    def test_empty_symbols_tuple_is_noop(self, derived_db_path, store):
+        fetch = FakeChipEmFetch({})
+        adapter = EastmoneyChipRefreshAdapter(
+            store=store, fetch_record=fetch, throttle=lambda: None
+        )
+
+        result = adapter.refresh(_context(symbols=()))
+
+        assert fetch.calls == []
+        assert (result.fetched, result.replaced) == (0, 0)
+
+
+# ===========================================================================
+# build_derived_refresh_adapters
+# ===========================================================================
+
+
+def test_build_derived_refresh_adapters_registry(derived_db_path, store):
+    """显式注册五个派生任务，键为注册表任务名。"""
+    db = FakeHistoryDb(derived_db_path, {})
+    engine = FakeIndicatorEngine()
+
+    adapters = build_derived_refresh_adapters(db=db, engine=engine, store=store)
+
+    assert set(adapters) == {
+        "update_indicators",
+        "update_chip_distribution",
+        "update_chip_distribution_em",
+        "update_historical_valuation",
+        "update_sector_industry",
+    }
+    for adapter in adapters.values():
+        assert callable(adapter.refresh)
+    assert adapters["update_indicators"].engine is engine
+    assert adapters["update_indicators"].db is db
+    assert adapters["update_chip_distribution"].db is db
