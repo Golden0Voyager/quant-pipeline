@@ -149,3 +149,43 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
     saved = db.save_stock_pledge_batch(validated_records)
     logger.info(f"✅ 股权质押数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_stock_pledge_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取单日质押汇总并归一化，附 64 位稳定源键。
+
+    空日返回 []（是否可接受由适配器按日探测把关）；源异常直接上抛。
+    """
+    df = ak.stock_gpzy_pledge_ratio_em(date=trade_date.replace("-", ""))
+    if df is None or df.empty:
+        return []
+
+    df = df.rename(columns=_COLUMN_MAP)
+    keep = {"trade_date", "stock_code", "stock_name", "pledger",
+            "pledge_amount", "pledge_ratio", "pledge_org"}
+    available = [c for c in keep if c in df.columns]
+    df = df[available].drop_duplicates()
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        df = df[df["trade_date"].notna()]
+        df["trade_date"] = df["trade_date"].dt.strftime("%Y-%m-%d")
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        record = {
+            "trade_date": row.get("trade_date"),
+            "stock_code": str(row.get("stock_code") or "").strip(),
+            "stock_name": str(row.get("stock_name") or "").strip(),
+            "pledger": str(row.get("pledger", "")).strip() or None,
+            "pledge_amount": _to_float(row.get("pledge_amount")),
+            "pledge_ratio": _to_float(row.get("pledge_ratio")),
+            "pledge_org": str(row.get("pledge_org", "")).strip() or None,
+        }
+        record["source_record_key"] = stock_pledge_source_key(record)
+        records.append(record)
+    return records
