@@ -249,6 +249,126 @@ def update_indicators(
     }
 
 
+# ===========================================================================
+# 收盘刷新 helpers（Task 7）：由全量历史计算，只返回目标日一条记录，不写库
+# ===========================================================================
+
+_INDICATOR_VALUE_COLUMNS = (
+    "close", "volume",
+    "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+    "vol_ma5", "vol_ma50", "vol_ma60",
+    "boll_upper", "boll_mid", "boll_lower", "boll_bandwidth",
+    "cyc60", "chip_concentration",
+    "macd_dif", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "rsi6", "rsi12", "rsi24",
+    "cci",
+)
+
+_CHIP_VALUE_COLUMNS = (
+    "profit_ratio", "avg_cost",
+    "cost_90_low", "cost_90_high", "concentration_90",
+    "cost_70_low", "cost_70_high", "concentration_70",
+    "chip_concentration",
+)
+
+
+def _refresh_scalar_or_none(value: Any) -> float | None:
+    """NaN / NaT / None → None，其余转 float（SQLite 不接受 NaN）。"""
+    if value is None or (hasattr(value, "_is_nat") and value._is_nat) or value != value:
+        return None
+    return float(value)
+
+
+def _refresh_date_str(value: Any) -> str:
+    """pandas Timestamp / 字符串统一为 'YYYY-MM-DD'。"""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def compute_indicator_record_for_refresh(
+    db: DatabaseInterface,
+    engine: IndicatorEngineInterface,
+    symbol: str,
+    target_date: str,
+) -> tuple[dict | None, str | None]:
+    """收盘刷新专用：由全量历史计算指标，仅返回目标日一条记录，不写库。
+
+    Returns:
+        (record, None) 成功；(None, reason) 未产出记录，reason 取值：
+        "insufficient"（历史 < 60 天，新股不算失败）、
+        "missing_target"（历史里没有目标日，如停牌）、
+        "failed"（读库 / engine 计算异常）。
+    """
+    try:
+        df = db.get_daily_bars(symbol)
+        if df is None or df.empty or len(df) < 60:
+            return None, "insufficient"
+
+        if "trade_date" in df.columns and "date" not in df.columns:
+            df = df.rename(columns={"trade_date": "date"})
+        if target_date not in {_refresh_date_str(d) for d in df["date"]}:
+            return None, "missing_target"
+
+        df_ind = engine.calculate_all_indicators(df)
+        if df_ind is None or df_ind.empty:
+            return None, "failed"
+
+        date_col = "date" if "date" in df_ind.columns else "trade_date"
+        mask = df_ind[date_col].map(_refresh_date_str) == target_date
+        matches = df_ind[mask]
+        if matches.empty:
+            return None, "missing_target"
+
+        row = matches.iloc[-1]
+        record: dict[str, Any] = {"ts_code": symbol, "trade_date": target_date}
+        for col in _INDICATOR_VALUE_COLUMNS:
+            record[col] = _refresh_scalar_or_none(row.get(col))
+        return record, None
+    except Exception as e:
+        logger.warning(f"  {symbol} 收盘刷新指标计算失败: {e}")
+        return None, "failed"
+
+
+def compute_chip_record_for_refresh(
+    db: DatabaseInterface,
+    symbol: str,
+    target_date: str,
+    n_bins: int = CHIP_BINS,
+) -> tuple[dict | None, str | None]:
+    """收盘刷新专用：由全量历史计算筹码分布，仅返回目标日一条记录，不写库。
+
+    Returns:
+        (record, None) 成功；(None, reason) 未产出记录，reason 语义同
+        compute_indicator_record_for_refresh。
+    """
+    try:
+        df = db.get_daily_bars(symbol)
+        if df is None or df.empty or len(df) < MIN_CHIP_DAYS:
+            return None, "insufficient"
+        if "date" in df.columns and "trade_date" not in df.columns:
+            df = df.rename(columns={"date": "trade_date"})
+
+        df_chip = _calculate_chip_distribution_for_symbol(df, n_bins=n_bins)
+        if df_chip.empty:
+            return None, "failed"
+
+        mask = df_chip["trade_date"].map(_refresh_date_str) == target_date
+        matches = df_chip[mask]
+        if matches.empty:
+            return None, "missing_target"
+
+        row = matches.iloc[-1]
+        record: dict[str, Any] = {"ts_code": symbol, "trade_date": target_date}
+        for col in _CHIP_VALUE_COLUMNS:
+            record[col] = _refresh_scalar_or_none(row.get(col))
+        return record, None
+    except Exception as e:
+        logger.warning(f"  {symbol} 收盘刷新筹码计算失败: {e}")
+        return None, "failed"
+
+
 def _calculate_chip_distribution_for_symbol(
     df: pd.DataFrame, n_bins: int = 100
 ) -> pd.DataFrame:
