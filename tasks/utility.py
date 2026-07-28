@@ -50,8 +50,22 @@ def retry_failed(
 ) -> dict:
     """重试之前失败的股票。"""
     data = ProgressTracker.load()
+    if data is not None and data.get("task") != "retry":
+        logger.info("ℹ️  当前进度不是 retry checkpoint，保留原断点")
+        return {
+            "status": "no_data",
+            "reason": "progress is not a retry checkpoint",
+            "saved": 0,
+            "attempted": 0,
+            "success": 0,
+            "failed": 0,
+            "total": 0,
+        }
+
     symbols: list[str] = data.get("failed_queue", []) if data else []
-    symbols = [s for s in symbols if not should_skip_beijing(s)]
+    symbols = list(dict.fromkeys(
+        s for s in symbols if not should_skip_beijing(s)
+    ))
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
@@ -84,7 +98,7 @@ def retry_failed(
         ProgressTracker.save(
             task="retry",
             last_symbol=symbols[-1],
-            processed=success,
+            processed=len(symbols),
             total=len(symbols),
             failed_queue=still_failed,
         )
