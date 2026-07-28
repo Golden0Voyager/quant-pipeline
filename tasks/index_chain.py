@@ -446,3 +446,47 @@ def fetch_chip_em_record_for_refresh(
     if profit_ratio == 0.0 and avg_cost == 0.0:
         return None, "invalid"
     return record, None
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+_INDEX_DAILY_REFRESH_INDICES = {
+    "sh000001": "上证指数",
+    "sz399001": "深证成指",
+    "sz399006": "创业板指",
+    "sh000688": "科创50",
+}
+
+
+def fetch_index_daily_records() -> list[dict]:
+    """收盘刷新专用：抓取四大指数全历史日线并归一化（历史型源）。
+
+    与 legacy ``_fetch_index_daily`` 不同：返回全部历史行而非仅最后
+    一行，由适配器挑选回看窗口内可接受的目标分区；任一指数源异常
+    直接上抛（部分指数缺失会造成不完整分区，视为源失败）。
+    """
+    records: list[dict] = []
+    for index_code, index_name in _INDEX_DAILY_REFRESH_INDICES.items():
+        df = ak.stock_zh_index_daily_tx(symbol=index_code)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            trade_date = str(row.get("date", ""))[:10]
+            if not trade_date:
+                continue
+            records.append(
+                {
+                    "index_code": index_code,
+                    "index_name": index_name,
+                    "trade_date": trade_date,
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "close": float(row.get("close", 0)),
+                    "volume": float(row.get("volume", 0)),
+                    "data_source": "akshare",
+                }
+            )
+    return records
