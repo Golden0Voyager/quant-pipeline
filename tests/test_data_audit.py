@@ -167,13 +167,14 @@ class TestCheckTable:
 
     def test_populated_table_healthy(self, tmp_path: Path):
         db_path = tmp_path / "ok.db"
-        _build_db(str(db_path), stale_tables={"ok_tbl": "2026-07-23"})
-        conn = sqlite3.connect(str(db_path))
         spec = _spec("ok_tbl")
+        expected_date = _expected_date_for(spec)
+        _build_db(str(db_path), stale_tables={"ok_tbl": expected_date})
+        conn = sqlite3.connect(str(db_path))
         h = _check_table("ok_tbl", conn, spec, set())
         conn.close()
         assert h.row_count == 1
-        assert h.status in ("healthy", "degraded")  # may be stale depending on today
+        assert h.status == "healthy"
 
     def test_stale_table_critical(self, tmp_path: Path):
         db_path = tmp_path / "stale.db"
@@ -236,19 +237,21 @@ class TestAuditDatabase:
 
     def test_mixed_health(self, tmp_path: Path):
         db_path = tmp_path / "mixed.db"
+        spec = _spec("ok_tbl", cadence=Cadence.DAILY, grace=30)
+        expected_date = _expected_date_for(spec)
         conn = sqlite3.connect(str(db_path))
         conn.execute("CREATE TABLE ok_tbl (id INTEGER, ts_code TEXT, trade_date TEXT)")
-        conn.execute("INSERT INTO ok_tbl VALUES (1, '000001', '2026-07-23')")
+        conn.execute("INSERT INTO ok_tbl VALUES (1, '000001', ?)", (expected_date,))
         conn.execute("CREATE TABLE empty_tbl (id INTEGER, ts_code TEXT, trade_date TEXT)")
         conn.commit()
         conn.close()
         registry = {
-            "update_ok": _spec("ok_tbl", cadence=Cadence.DAILY, grace=30),
+            "update_ok": spec,
         }
         report = audit_database(str(db_path), registry=registry)
         ok_health = [h for h in report.tables if h.table == "ok_tbl"][0]
         empty_health = [h for h in report.tables if h.table == "empty_tbl"][0]
-        assert ok_health.status == "healthy"  # within grace
+        assert ok_health.status == "healthy"
         assert empty_health.status == "critical"
 
     def test_json_output(self, tmp_path: Path):

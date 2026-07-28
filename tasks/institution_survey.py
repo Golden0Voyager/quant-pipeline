@@ -84,7 +84,7 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
     df = df.rename(columns=_COLUMN_MAP)
     keep = {"trade_date", "stock_code", "stock_name", "survey_org", "survey_type", "survey_count"}
     available = [c for c in keep if c in df.columns]
-    df = df[available]
+    df = df[available].drop_duplicates()
 
     if "trade_date" in df.columns:
         df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")

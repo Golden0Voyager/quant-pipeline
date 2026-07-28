@@ -24,6 +24,7 @@ MagicMock*
 .omo/
 .mimocode/
 .superpowers/
+.worktrees/
 
 # Environment config (may contain secrets)
 .env
@@ -32,3 +33,4 @@ MagicMock*
 *.db
 *.db-wal
 *.db-shm
+scripts/.backfill_turnover_progress.txt

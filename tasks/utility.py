@@ -50,13 +50,35 @@ def retry_failed(
 ) -> dict:
     """重试之前失败的股票。"""
     data = ProgressTracker.load()
+    if data is not None and data.get("task") != "retry":
+        logger.info("ℹ️  当前进度不是 retry checkpoint，保留原断点")
+        return {
+            "status": "no_data",
+            "reason": "progress is not a retry checkpoint",
+            "saved": 0,
+            "attempted": 0,
+            "success": 0,
+            "failed": 0,
+            "total": 0,
+        }
+
     symbols: list[str] = data.get("failed_queue", []) if data else []
-    symbols = [s for s in symbols if not should_skip_beijing(s)]
+    symbols = list(dict.fromkeys(
+        s for s in symbols if not should_skip_beijing(s)
+    ))
 
     if not symbols:
         logger.info("ℹ️  retry 队列为空")
         ProgressTracker.clear()
-        return {"success": 0, "failed": 0, "total": 0}
+        return {
+            "status": "no_data",
+            "reason": "retry queue empty",
+            "saved": 0,
+            "attempted": 0,
+            "success": 0,
+            "failed": 0,
+            "total": 0,
+        }
 
     logger.info("\n" + "=" * 60)
     logger.info(f"🔄 任务: 重试失败队列 ({len(symbols)} 只)")
@@ -69,14 +91,14 @@ def retry_failed(
         result = _update_single_bar(db, loader, symbol)
         if result == "success":
             success += 1
-        else:
+        elif result != "skipped":
             still_failed.append(symbol)
 
     if still_failed:
         ProgressTracker.save(
             task="retry",
             last_symbol=symbols[-1],
-            processed=success,
+            processed=len(symbols),
             total=len(symbols),
             failed_queue=still_failed,
         )
@@ -85,7 +107,17 @@ def retry_failed(
         ProgressTracker.clear()
         logger.info(f"✅ 重试完成: {success}/{len(symbols)} 只成功")
 
-    return {"success": success, "failed": len(still_failed), "total": len(symbols)}
+    result = {
+        "status": "degraded" if still_failed else "success",
+        "saved": success,
+        "attempted": len(symbols),
+        "success": success,
+        "failed": len(still_failed),
+        "total": len(symbols),
+    }
+    if still_failed:
+        result["error"] = f"{len(still_failed)} failures"
+    return result
 
 
 def health_check(db: DatabaseInterface) -> dict:
@@ -187,6 +219,52 @@ def health_check(db: DatabaseInterface) -> dict:
         report_lines.append(f"\n  技术指标完整率: {valid_ind}/{total_ind} ({100-null_pct:.1f}%)")
         if null_pct > 20:
             issues.append(f"技术指标空值率过高: {null_pct:.1f}%")
+
+    # ── 字段级质量断言（2026-07 筹码全零/股息率全 NULL 事故后新增） ──
+    # 这三个字段曾静默损坏且连续多日无人察觉，任何一项异常都必须显式告警。
+    # 部分环境（测试 fixture / 旧库）可能缺表缺列，缺失时跳过对应断言。
+    try:
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN turnover_rate IS NOT NULL AND turnover_rate > 0
+                          THEN 1 ELSE 0 END)
+               FROM daily_bars
+               WHERE trade_date = (SELECT MAX(trade_date) FROM daily_bars)"""
+        )
+        tr_total, tr_valid = cursor.fetchone()
+        if tr_total:
+            tr_pct = 100 * (tr_valid or 0) / tr_total
+            report_lines.append(f"  当日换手率非空率: {tr_valid}/{tr_total} ({tr_pct:.1f}%)")
+            if tr_pct < 60:
+                issues.append(f"daily_bars.turnover_rate 当日非空率过低: {tr_pct:.1f}% (< 60%)")
+
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN profit_ratio = 0 AND avg_cost = 0 THEN 1 ELSE 0 END)
+               FROM chip_distribution_em
+               WHERE trade_date = (SELECT MAX(trade_date) FROM chip_distribution_em)"""
+        )
+        chip_total, chip_zero = cursor.fetchone()
+        if chip_total:
+            zero_pct = 100 * (chip_zero or 0) / chip_total
+            report_lines.append(f"  当日筹码全零率: {chip_zero}/{chip_total} ({zero_pct:.1f}%)")
+            if zero_pct > 5:
+                issues.append(f"chip_distribution_em 当日全零行占比过高: {zero_pct:.1f}% (> 5%)")
+
+        cursor.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN dividend_yield IS NOT NULL THEN 1 ELSE 0 END)
+               FROM fundamentals
+               WHERE trade_date = (SELECT MAX(trade_date) FROM fundamentals)"""
+        )
+        dy_total, dy_valid = cursor.fetchone()
+        if dy_total:
+            dy_pct = 100 * (dy_valid or 0) / dy_total
+            report_lines.append(f"  当日股息率非空率: {dy_valid}/{dy_total} ({dy_pct:.1f}%)")
+            if dy_pct < 40:
+                issues.append(f"fundamentals.dividend_yield 当日非空率过低: {dy_pct:.1f}% (< 40%)")
+    except sqlite3.OperationalError as exc:
+        report_lines.append(f"  字段级质量断言跳过（表/列缺失）: {exc}")
     # ── 碎片空间检查 ──
     try:
         cursor.execute("PRAGMA page_count")

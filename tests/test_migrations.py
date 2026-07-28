@@ -14,6 +14,18 @@ from core.migrations import (
     MigrationScript,
     run_migrations,
 )
+from core.source_record_key import (
+    INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
+    STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+    source_record_key,
+)
+
+_PUBLISHED_006_CHECKSUM = (
+    "a783c28347a05f415f4f6b4dd15f068cde964194657cea3c1573523085af65e0"
+)
+_TRANSITIONAL_006_CHECKSUM = (
+    "8273ec2643335baacddcd6478d4fab032348e7cfd2346d03669dadf12a6e78b2"
+)
 
 # ── fixtures ───────────────────────────────────────────────────────────
 
@@ -34,6 +46,80 @@ def tmp_migrations_dir(tmp_path: Path) -> Path:
     d = tmp_path / "migrations"
     d.mkdir()
     return d
+
+
+def _real_migrations_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _prepare_version_7_db(
+    db_path: str,
+    recorded_checksum: str,
+    *,
+    orphan_run_id: str | None = None,
+) -> MigrationEngine:
+    engine = MigrationEngine(
+        db_path=str(db_path),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=7)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = 6",
+            (recorded_checksum,),
+        )
+        if orphan_run_id is not None:
+            conn.execute(
+                """INSERT INTO index_member_history
+                   (index_code, index_name, ts_code, weight, valid_from,
+                    valid_to, source, snapshot_run_id)
+                   VALUES ('000300', '沪深300', '000001.SZ', 1.0,
+                           '2026-07-25', NULL, 'test', ?)""",
+                (orphan_run_id,),
+            )
+        conn.commit()
+    return engine
+
+
+def _create_legacy_source_record_tables(db_path: str) -> None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("""
+            CREATE TABLE stock_repurchase (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                repurchase_amount REAL,
+                repurchase_price REAL,
+                repurchase_quantity INTEGER,
+                progress_status TEXT,
+                UNIQUE(trade_date, stock_code)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO stock_repurchase
+                (trade_date, stock_code, stock_name, repurchase_amount,
+                 repurchase_price, repurchase_quantity, progress_status)
+            VALUES ('2026-07-21', '000001', 'Ping An Bank', 100.0, 12.0, 10, 'planned')
+        """)
+        conn.execute("""
+            CREATE TABLE institution_survey (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                survey_org TEXT,
+                survey_type TEXT,
+                survey_count INTEGER,
+                UNIQUE(trade_date, stock_code)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO institution_survey
+                (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count)
+            VALUES ('2026-07-21', '000001', 'Ping An Bank', NULL, 'call', 3)
+        """)
+        conn.commit()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -311,6 +397,308 @@ class TestMigrationEngineErrors:
         assert len(results) == 1
         assert results[0]["version"] == 1
 
+    def test_sql_migration_rolls_back_partial_script(self, tmp_db, tmp_migrations_dir):
+        (tmp_migrations_dir / "001_partial.sql").write_text(
+            "CREATE TABLE sql_partial (value TEXT);\n"
+            "INSERT INTO missing_table VALUES ('boom');\n"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="migration 1 .* failed"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sql_partial'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_python_migration_executescript_rolls_back_partial_script(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_partial.py").write_text(
+            """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE python_partial (value TEXT);
+        INSERT INTO python_partial VALUES ('written');
+    \"\"\")
+    raise RuntimeError('injected failure')
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="migration 1 .* failed"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'python_partial'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_python_migration_executescript_preserves_semicolons_and_trigger_body(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_script.py").write_text(
+            """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE messages (value TEXT NOT NULL);
+        CREATE TABLE events (value TEXT NOT NULL);
+        CREATE TRIGGER record_message AFTER INSERT ON messages
+        BEGIN
+            INSERT INTO events (value) VALUES ('trigger; value');
+        END;
+        INSERT INTO messages (value) VALUES ('payload; value');
+    \"\"\")
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            messages = conn.execute("SELECT value FROM messages").fetchall()
+            events = conn.execute("SELECT value FROM events").fetchall()
+        assert messages == [("payload; value",)]
+        assert events == [("trigger; value",)]
+
+    def test_python_migration_acquires_immediate_write_lock(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        observer_path = repr(str(tmp_db))
+        (tmp_migrations_dir / "001_immediate.py").write_text(
+            f"""import sqlite3
+
+def apply(conn):
+    observer = sqlite3.connect({observer_path}, timeout=0)
+    try:
+        observer.execute('BEGIN IMMEDIATE')
+    except sqlite3.OperationalError as exc:
+        assert 'locked' in str(exc).lower() or 'busy' in str(exc).lower()
+    else:
+        observer.rollback()
+        raise RuntimeError('migration did not acquire an immediate write lock')
+    finally:
+        observer.close()
+    conn.execute('CREATE TABLE lock_proof (value TEXT)')
+"""
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lock_proof'"
+            ).fetchone()
+        assert table == ("lock_proof",)
+
+    @pytest.mark.parametrize(
+        ("filename", "content", "table_name"),
+        [
+            (
+                "001_python_execute.py",
+                """def apply(conn):
+    conn.execute('CREATE TABLE python_execute_control (value TEXT)')
+    conn.execute('COMMIT')
+""",
+                "python_execute_control",
+            ),
+            (
+                "001_python_script.py",
+                """def apply(conn):
+    conn.executescript(\"\"\"
+        CREATE TABLE python_script_control (value TEXT);
+        -- an explicit transaction escape
+        COMMIT;
+    \"\"\")
+""",
+                "python_script_control",
+            ),
+            (
+                "001_python_bom_control.py",
+                """def apply(conn):
+    conn.execute('CREATE TABLE python_bom_control (value TEXT)')
+    conn.execute('\\ufeffCOMMIT')
+""",
+                "python_bom_control",
+            ),
+            (
+                "001_sql_control.sql",
+                """CREATE TABLE sql_control (value TEXT);
+-- an explicit transaction escape
+COMMIT;
+""",
+                "sql_control",
+            ),
+            (
+                "001_sql_block_comment_control.sql",
+                """CREATE TABLE sql_block_comment_control (value TEXT);
+/* an explicit transaction escape */ COMMIT;
+""",
+                "sql_block_comment_control",
+            ),
+            (
+                "001_sql_bom_control.sql",
+                """CREATE TABLE sql_bom_control (value TEXT);
+\ufeffCOMMIT;
+""",
+                "sql_bom_control",
+            ),
+        ],
+    )
+    def test_migration_rejects_transaction_control_statements(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+        filename,
+        content,
+        table_name,
+    ):
+        (tmp_migrations_dir / filename).write_text(content)
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        with pytest.raises(MigrationError, match="must not control transactions"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_sql_migration_executes_semicolon_free_trailing_statement(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+    ):
+        (tmp_migrations_dir / "001_trailing.sql").write_text(
+            "CREATE TABLE semicolon_free_trailing (value TEXT)"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'semicolon_free_trailing'"
+            ).fetchone()
+        assert table == ("semicolon_free_trailing",)
+
+    def test_success_tracking_failure_rolls_back_migration(self, tmp_db, tmp_migrations_dir):
+        (tmp_migrations_dir / "001_tracking.sql").write_text(
+            "CREATE TABLE tracking_rollback (value TEXT);"
+        )
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+        engine.plan()
+        with sqlite3.connect(str(tmp_db)) as conn:
+            conn.execute(
+                """CREATE TRIGGER fail_success_tracking
+                   BEFORE INSERT ON schema_migrations
+                   WHEN NEW.version = 1 AND NEW.success = 1
+                   BEGIN
+                       SELECT RAISE(ABORT, 'injected success tracking failure');
+                   END"""
+            )
+            conn.commit()
+
+        with pytest.raises(MigrationError, match="injected success tracking failure"):
+            engine.apply_pending()
+
+        with sqlite3.connect(str(tmp_db)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tracking_rollback'"
+            ).fetchone()
+            failure = conn.execute(
+                "SELECT success FROM schema_migrations WHERE version = 1"
+            ).fetchone()
+        assert table is None
+        assert failure == (0,)
+
+    def test_sql_migration_acquires_immediate_write_lock(
+        self,
+        tmp_db,
+        tmp_migrations_dir,
+        monkeypatch,
+    ):
+        (tmp_migrations_dir / "001_sql_lock.sql").write_text(
+            "CREATE TABLE sql_lock_proof (value TEXT);"
+        )
+        original_connect = sqlite3.connect
+        observed_locks: list[bool] = []
+
+        class LockCheckingConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                result = super().execute(sql, *args, **kwargs)
+                if sql.strip().upper() == "BEGIN IMMEDIATE":
+                    observer = original_connect(str(tmp_db), timeout=0)
+                    try:
+                        with pytest.raises(sqlite3.OperationalError, match="locked|busy"):
+                            observer.execute("BEGIN IMMEDIATE")
+                    finally:
+                        observer.close()
+                    observed_locks.append(True)
+                return result
+
+        def connect(*args, **kwargs):
+            kwargs["factory"] = LockCheckingConnection
+            return original_connect(*args, **kwargs)
+
+        monkeypatch.setattr("core.migrations.sqlite3.connect", connect)
+        engine = MigrationEngine(
+            db_path=str(tmp_db),
+            migrations_dir=str(tmp_migrations_dir),
+        )
+
+        result = engine.apply_pending()
+
+        assert [item["version"] for item in result] == [1]
+        assert observed_locks == [True]
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # run_migrations convenience
@@ -545,3 +933,233 @@ class TestMigration007:
                 assert expected in tables, f"missing table {expected}"
             for legacy in ("task_run_log", "financial_history_pt", "concept_member_pt", "index_member_pt"):
                 assert legacy not in tables, f"legacy table {legacy} should have been dropped"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 008 (orphan reconciliation and 006 checksum bridge)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "recorded_checksum",
+    [_PUBLISHED_006_CHECKSUM, _TRANSITIONAL_006_CHECKSUM],
+)
+def test_migration_008_bridges_known_006_checksums_and_seeds_orphan(
+    tmp_db,
+    recorded_checksum,
+):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        recorded_checksum,
+        orphan_run_id="orphan-run",
+    )
+
+    result = engine.apply_pending(target_version=8)
+
+    assert [item["version"] for item in result] == [8]
+    with sqlite3.connect(str(tmp_db)) as conn:
+        parent = conn.execute(
+            "SELECT status FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()
+        stored = conn.execute(
+            "SELECT checksum FROM schema_migrations WHERE version = 6"
+        ).fetchone()[0]
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    assert parent == ("reconciled",)
+    assert stored == _PUBLISHED_006_CHECKSUM
+    assert violations == []
+
+
+def test_migration_008_is_idempotent(tmp_db):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        _PUBLISHED_006_CHECKSUM,
+        orphan_run_id="orphan-run",
+    )
+
+    first = engine.apply_pending(target_version=8)
+    second = engine.apply_pending(target_version=8)
+
+    assert [item["version"] for item in first] == [8]
+    assert second == []
+    with sqlite3.connect(str(tmp_db)) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_migration_008_rejects_unknown_006_checksum(tmp_db):
+    engine = _prepare_version_7_db(str(tmp_db), "unknown")
+
+    with pytest.raises(MigrationError, match="unknown migration 006 checksum"):
+        engine.apply_pending()
+
+
+@pytest.mark.parametrize(
+    "recorded_checksum",
+    [_PUBLISHED_006_CHECKSUM, _TRANSITIONAL_006_CHECKSUM],
+)
+def test_migration_008_rolls_back_orphan_seed_when_reconcile_fails(
+    tmp_db,
+    recorded_checksum,
+):
+    engine = _prepare_version_7_db(
+        str(tmp_db),
+        recorded_checksum,
+        orphan_run_id="orphan-run",
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            """CREATE TRIGGER fail_008_checksum_reconcile
+               BEFORE UPDATE OF checksum ON schema_migrations
+               WHEN OLD.version = 6
+               BEGIN
+                   SELECT RAISE(ABORT, 'injected checksum reconcile failure');
+               END"""
+        )
+        conn.commit()
+
+    with pytest.raises(MigrationError, match="injected checksum reconcile failure"):
+        engine.apply_pending()
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        parent_count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_runs WHERE run_id = 'orphan-run'"
+        ).fetchone()[0]
+        stored = conn.execute(
+            "SELECT checksum FROM schema_migrations WHERE version = 6"
+        ).fetchone()[0]
+        version_8 = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 8"
+        ).fetchone()
+    assert parent_count == 0
+    assert stored == recorded_checksum
+    assert version_8 == (0,)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 009 (source record storage keys)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_migration_009_rebuilds_source_record_tables_and_removes_old_unique_key(tmp_db):
+    engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
+    engine.apply_pending(target_version=8)
+    _create_legacy_source_record_tables(str(tmp_db))
+
+    result = engine.apply_pending()
+
+    assert [item["version"] for item in result] == [9]
+    repurchase_second = {
+        "trade_date": "2026-07-21",
+        "stock_code": "000001",
+        "stock_name": "Ping An Bank",
+        "repurchase_amount": 120.0,
+        "repurchase_price": 12.0,
+        "repurchase_price_lower": None,
+        "repurchase_price_upper": None,
+        "repurchase_quantity": 10,
+        "progress_status": "planned",
+    }
+    survey_second = {
+        "trade_date": "2026-07-21",
+        "stock_code": "000001",
+        "stock_name": "Ping An Bank",
+        "survey_org": None,
+        "survey_type": "call",
+        "survey_count": 4,
+    }
+    with sqlite3.connect(str(tmp_db)) as conn:
+        repurchase_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
+        }
+        survey_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(institution_survey)")
+        }
+        conn.execute(
+            """INSERT INTO stock_repurchase
+               (source_record_key, trade_date, stock_code, stock_name,
+                repurchase_amount, repurchase_price, repurchase_price_lower,
+                repurchase_price_upper, repurchase_quantity, progress_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_record_key(repurchase_second, STOCK_REPURCHASE_SOURCE_KEY_FIELDS),
+                repurchase_second["trade_date"],
+                repurchase_second["stock_code"],
+                repurchase_second["stock_name"],
+                repurchase_second["repurchase_amount"],
+                repurchase_second["repurchase_price"],
+                repurchase_second["repurchase_price_lower"],
+                repurchase_second["repurchase_price_upper"],
+                repurchase_second["repurchase_quantity"],
+                repurchase_second["progress_status"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO institution_survey
+               (source_record_key, trade_date, stock_code, stock_name,
+                survey_org, survey_type, survey_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_record_key(survey_second, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS),
+                survey_second["trade_date"],
+                survey_second["stock_code"],
+                survey_second["stock_name"],
+                survey_second["survey_org"],
+                survey_second["survey_type"],
+                survey_second["survey_count"],
+            ),
+        )
+        repurchase_count = conn.execute(
+            "SELECT COUNT(*) FROM stock_repurchase"
+        ).fetchone()[0]
+        survey_count = conn.execute(
+            "SELECT COUNT(*) FROM institution_survey"
+        ).fetchone()[0]
+
+    assert "source_record_key" in repurchase_columns
+    assert "repurchase_price_lower" in repurchase_columns
+    assert "repurchase_price_upper" in repurchase_columns
+    assert "source_record_key" in survey_columns
+    assert repurchase_count == 2
+    assert survey_count == 2
+
+
+def test_migration_009_rolls_back_table_rebuild_when_key_generation_fails(
+    tmp_db,
+    monkeypatch,
+):
+    import core.source_record_key as key_module
+
+    engine = _prepare_version_7_db(str(tmp_db), _PUBLISHED_006_CHECKSUM)
+    engine.apply_pending(target_version=8)
+    _create_legacy_source_record_tables(str(tmp_db))
+
+    def fail_key(record, fields):
+        raise RuntimeError("injected source key failure")
+
+    monkeypatch.setattr(key_module, "source_record_key", fail_key)
+
+    with pytest.raises(MigrationError, match="injected source key failure"):
+        engine.apply_pending()
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        temp_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('stock_repurchase__v9', 'institution_survey__v9')"
+        ).fetchone()
+        repurchase_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
+        }
+        repurchase_count = conn.execute(
+            "SELECT COUNT(*) FROM stock_repurchase"
+        ).fetchone()[0]
+        version_9 = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 9"
+        ).fetchone()
+
+    assert temp_table is None
+    assert "source_record_key" not in repurchase_columns
+    assert repurchase_count == 1
+    assert version_9 == (0,)

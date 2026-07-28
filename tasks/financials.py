@@ -225,7 +225,14 @@ def update_industry(db: DatabaseInterface) -> dict:
     logger.info(f"📊 共 {total} 只股票需要更新行业")
 
     # 2. 市场前缀映射
-    exchange_map = {"sz": "SZ", "sh": "SH", "unknown": "BJ"}
+    exchange_map = {
+        "sz": "SZ",
+        "gem": "SZ",
+        "sh": "SH",
+        "star": "SH",
+        "unknown": "BJ",
+        "bj": "BJ",
+    }
 
     # 3. 网络请求策略（依次降级）
     # F10 限流探测标志：连续限流时整轮跳过 F10 API，避免浪费时间
@@ -282,6 +289,7 @@ def update_industry(db: DatabaseInterface) -> dict:
             except Exception:
                 pass
 
+        session = None
         try:
             sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
             session = get_default_client().get_session("sina")
@@ -295,7 +303,7 @@ def update_industry(db: DatabaseInterface) -> dict:
                 import re
 
                 m = re.search(
-                    r"所属行业板块</td>\s*</tr>\s*<tr>.*?<td[^>]*>([^<]+)",
+                    r"所属行业板块[^<]*</td>(?:\s*</tr>\s*<tr>)?\s*<td[^>]*>\s*([^<]+?)\s*</td>",
                     resp.text,
                     re.DOTALL,
                 )
@@ -306,7 +314,8 @@ def update_industry(db: DatabaseInterface) -> dict:
         except Exception:
             pass
         finally:
-            session.close()
+            if session is not None:
+                session.close()
 
         return code, None
 

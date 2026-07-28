@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from core.source_record_key import source_record_key
 from providers import SmartMoneyDBProvider
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -31,7 +32,229 @@ def provider(tmp_path: Path) -> SmartMoneyDBProvider:
 
     ``_ensure_tables()`` 会在 __init__ 中自动创建所有必要表。
     """
-    return SmartMoneyDBProvider(db_path=str(tmp_path / "quant_core_test.db"))
+    db_path = tmp_path / "quant_core_test.db"
+    instance = SmartMoneyDBProvider(db_path=str(db_path))
+    # conftest mocks DatabaseManager and ignores db_path; bind this fixture to
+    # its own SQLite file so source-record preserving tests stay isolated.
+    instance._db.db_path = str(db_path)
+    instance._ensure_wal_mode()
+    instance._ensure_tables()
+    instance._run_versioned_migrations()
+    return instance
+
+
+def _audit_payload(run_id: str, status: str, saved: int) -> dict[str, Any]:
+    return {
+        "task_name": "pit_task",
+        "status": status,
+        "saved": saved,
+        "metadata": {
+            "run_id": run_id,
+            "started_at": "2026-07-25T00:00:00+00:00",
+            "finished_at": "2026-07-25T00:00:01+00:00",
+        },
+    }
+
+
+def test_record_ingestion_run_upserts_same_parent(provider):
+    provider.record_ingestion_run(_audit_payload("run-1", "running", 0))
+    provider.record_ingestion_run(_audit_payload("run-1", "success", 3))
+
+    with sqlite3.connect(provider.db_path) as conn:
+        rows = conn.execute(
+            "SELECT run_id, status, saved_rows FROM ingestion_runs WHERE run_id = ?",
+            ("run-1",),
+        ).fetchall()
+
+    assert rows == [("run-1", "success", 3)]
+
+
+def test_shared_write_connection_enables_foreign_keys(provider):
+    conn = provider._get_write_conn()
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_pit_write_without_audit_parent_is_rejected(provider):
+    saved = provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000001.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-parent",
+        valid_from="2026-07-25",
+    )
+
+    assert saved == 0
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM index_member_history "
+            "WHERE snapshot_run_id = 'missing-parent'"
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_source_record_key_trims_strings_and_hashes_to_sha256():
+    key1 = source_record_key(
+        {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": " Ping An Bank ",
+        },
+        ("trade_date", "stock_code", "stock_name"),
+    )
+    key2 = source_record_key(
+        {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+        },
+        ("trade_date", "stock_code", "stock_name"),
+    )
+
+    assert key1 == key2
+    assert len(key1) == 64
+
+
+def test_source_record_key_treats_missing_values_as_null():
+    assert source_record_key({"survey_org": None}, ("survey_org",)) == source_record_key(
+        {},
+        ("survey_org",),
+    )
+
+
+def test_index_history_failed_write_rolls_back_active_interval(provider):
+    provider.record_ingestion_run(_audit_payload("index-old", "success", 1))
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000001.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="index-old",
+        valid_from="2026-07-20",
+    ) == 1
+    provider.record_ingestion_run(_audit_payload("index-new", "success", 1))
+
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000002.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-index-parent",
+        valid_from="2026-07-21",
+    ) == 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM index_member_history WHERE snapshot_run_id = ?",
+            ("index-old",),
+        ).fetchall() == [(None,)]
+
+    assert provider.save_index_member_history_batch(
+        [
+            {
+                "index_code": "000300",
+                "index_name": "沪深300",
+                "ts_code": "000002.SZ",
+                "weight": 1.0,
+                "source": "akshare",
+            }
+        ],
+        run_id="index-new",
+        valid_from="2026-07-25",
+    ) == 2
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM index_member_history WHERE snapshot_run_id = ?",
+            ("index-old",),
+        ).fetchall() == [("2026-07-24",)]
+
+
+def test_concept_history_failed_write_rolls_back_active_interval(provider):
+    provider.record_ingestion_run(_audit_payload("concept-old", "success", 1))
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000001.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="concept-old",
+        valid_from="2026-07-20",
+    ) == 1
+    provider.record_ingestion_run(_audit_payload("concept-new", "success", 1))
+
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000002.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="missing-concept-parent",
+        valid_from="2026-07-21",
+    ) == 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM concept_member_history WHERE snapshot_run_id = ?",
+            ("concept-old",),
+        ).fetchall() == [(None,)]
+
+    assert provider.save_concept_member_history_batch(
+        [
+            {
+                "concept_code": "BK0001",
+                "concept_name": "测试概念",
+                "ts_code": "000002.SZ",
+                "source": "akshare",
+            }
+        ],
+        run_id="concept-new",
+        valid_from="2026-07-25",
+    ) == 2
+
+    with sqlite3.connect(provider.db_path) as conn:
+        assert conn.execute(
+            "SELECT valid_to FROM concept_member_history WHERE snapshot_run_id = ?",
+            ("concept-old",),
+        ).fetchall() == [("2026-07-24",)]
+
+
+def test_ingestion_rejection_without_parent_is_rejected(provider):
+    with pytest.raises(sqlite3.IntegrityError):
+        provider.record_ingestion_rejection(
+            "missing-rejection-parent",
+            row_number=1,
+            reason="invalid row",
+            payload={"value": "bad"},
+        )
+
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingestion_rejections WHERE run_id = ?",
+            ("missing-rejection-parent",),
+        ).fetchone()[0]
+    assert count == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,9 +352,108 @@ class TestConnectionEdgeCases:
                     "SELECT survey_count FROM institution_survey WHERE trade_date = ? AND stock_code = ?",
                     ("2026-07-21", "000001"),
                 ).fetchall()
-            assert rows == [(4,)]
+            assert rows == [(3,), (4,)]
         finally:
             migrated.close()
+
+
+class TestSourceRecordStorage:
+    """Repurchase and survey storage preserves distinct source records."""
+
+    def test_stock_repurchase_keeps_distinct_same_day_records(self, provider):
+        records = [
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "repurchase_amount": 100.0,
+                "repurchase_price": 12.0,
+                "repurchase_price_lower": 11.0,
+                "repurchase_price_upper": 13.0,
+                "repurchase_quantity": 10,
+                "progress_status": "planned",
+            },
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "repurchase_amount": 120.0,
+                "repurchase_price": 12.0,
+                "repurchase_price_lower": 11.0,
+                "repurchase_price_upper": 13.0,
+                "repurchase_quantity": 10,
+                "progress_status": "planned",
+            },
+        ]
+
+        assert provider.save_stock_repurchase_batch(records) >= 2
+
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT trade_date, stock_code, repurchase_amount, progress_status
+                   FROM stock_repurchase
+                   ORDER BY repurchase_amount"""
+            ).fetchall()
+
+        assert rows == [
+            ("2026-07-21", "000001", 100.0, "planned"),
+            ("2026-07-21", "000001", 120.0, "planned"),
+        ]
+
+    def test_stock_repurchase_repeated_identical_batch_is_idempotent(self, provider):
+        record = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+            "repurchase_amount": 100.0,
+            "repurchase_price": 12.0,
+            "repurchase_price_lower": 11.0,
+            "repurchase_price_upper": 13.0,
+            "repurchase_quantity": 10,
+            "progress_status": "planned",
+        }
+
+        assert provider.save_stock_repurchase_batch([record]) >= 1
+        assert provider.save_stock_repurchase_batch([record]) >= 0
+
+        with sqlite3.connect(provider.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM stock_repurchase").fetchone()[0]
+
+        assert count == 1
+
+    def test_institution_survey_keeps_distinct_nullable_org_records(self, provider):
+        records = [
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "survey_org": None,
+                "survey_type": "call",
+                "survey_count": 3,
+            },
+            {
+                "trade_date": "2026-07-21",
+                "stock_code": "000001",
+                "stock_name": "Ping An Bank",
+                "survey_org": None,
+                "survey_type": "call",
+                "survey_count": 4,
+            },
+        ]
+
+        assert provider.save_institution_survey_batch(records) >= 2
+
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                """SELECT trade_date, stock_code, survey_org, survey_type, survey_count
+                   FROM institution_survey
+                   ORDER BY survey_count"""
+            ).fetchall()
+
+        assert rows == [
+            ("2026-07-21", "000001", None, "call", 3),
+            ("2026-07-21", "000001", None, "call", 4),
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

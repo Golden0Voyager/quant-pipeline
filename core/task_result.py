@@ -120,6 +120,7 @@ class TaskResult:
         error: str,
         *,
         saved: int = 0,
+        attempted: int = 0,
         fetched: int = 0,
         accepted: int = 0,
         rejected: int = 0,
@@ -128,6 +129,7 @@ class TaskResult:
         return cls(
             task_name=task_name,
             status=TaskStatus.DEGRADED,
+            attempted=attempted,
             fetched=fetched,
             accepted=accepted,
             rejected=rejected,
@@ -154,6 +156,35 @@ class TaskResult:
             fetched=fetched,
             rejected=rejected,
             source=source,
+            error_kind=error_kind,
+            error=error,
+        )
+
+    @classmethod
+    def aborted(
+        cls,
+        task_name: str,
+        *,
+        error: str,
+        saved: int = 0,
+        attempted: int = 0,
+        fetched: int = 0,
+        accepted: int = 0,
+        rejected: int = 0,
+        error_kind: ErrorKind = ErrorKind.INTERNAL,
+        source: str | None = None,
+        data_date: str | None = None,
+    ) -> TaskResult:
+        return cls(
+            task_name=task_name,
+            status=TaskStatus.ABORTED,
+            attempted=attempted,
+            fetched=fetched,
+            accepted=accepted,
+            rejected=rejected,
+            saved=saved,
+            source=source,
+            data_date=data_date,
             error_kind=error_kind,
             error=error,
         )
@@ -240,10 +271,24 @@ def normalize_task_result(
                     error_kind=_parse_error_kind(value),
                     error=value.get("error", "partial"),
                     saved=value.get("saved", 0),
+                    attempted=value.get("attempted", 0),
                     fetched=value.get("fetched", 0),
                     accepted=value.get("accepted", 0),
                     rejected=value.get("rejected", 0),
                     source=value.get("source"),
+                )
+            if status is TaskStatus.ABORTED:
+                return TaskResult.aborted(
+                    task_name,
+                    error=value.get("error", "unspecified"),
+                    saved=saved if isinstance(saved, int) else 0,
+                    attempted=value.get("attempted", 0),
+                    fetched=value.get("fetched", 0),
+                    accepted=value.get("accepted", 0),
+                    rejected=value.get("rejected", 0),
+                    error_kind=_parse_error_kind(value),
+                    source=value.get("source"),
+                    data_date=value.get("data_date"),
                 )
         except ValueError:
             pass  # unknown status string → fall through to heuristics
@@ -268,6 +313,7 @@ def normalize_task_result(
             error_kind=_parse_error_kind(value),
             error=value.get("error", f"{failed_count} failures"),
             saved=int(saved) if isinstance(saved, (int, float)) else 0,
+            attempted=value.get("attempted", 0),
             fetched=value.get("fetched", 0),
             accepted=value.get("accepted", 0),
             rejected=value.get("rejected", 0),

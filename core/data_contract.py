@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from core.source_record_key import (
+    INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
+    STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+)
+
 
 @dataclass(frozen=True)
 class FieldRule:
@@ -353,7 +358,7 @@ STOCK_REPURCHASE_CONTRACT = DataContract(
         FieldRule("repurchase_quantity"),
         FieldRule("progress_status"),
     ),
-    unique_by=("trade_date", "stock_code"),
+    unique_by=STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
     min_rows=1,
 )
 
@@ -367,7 +372,7 @@ INSTITUTION_SURVEY_CONTRACT = DataContract(
         FieldRule("survey_type"),
         FieldRule("survey_count"),
     ),
-    unique_by=("trade_date", "stock_code"),
+    unique_by=INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
     min_rows=1,
 )
 

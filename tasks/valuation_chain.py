@@ -178,11 +178,36 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     conn.close()
     target_date = row[0] if (row and row[0]) else today
 
-    # 增量检测：如果本 target_date 已经跑过 market_snapshot，直接跳过
+    # 增量检测：以数据实态为准 —— target_date 当天 dividend_yield 实际非空行数
+    # 达到阈值才跳过。仅凭 task_runs 判断会在数据事后被覆盖为 NULL 时永久漏补
+    # （2026-07-24 全表 NULL 事故根因之一）。
+    conn = sqlite3.connect(str(db.db_path))
+    try:
+        total_rows, filled = conn.execute(
+            "SELECT COUNT(*),"
+            " SUM(CASE WHEN dividend_yield IS NOT NULL THEN 1 ELSE 0 END)"
+            " FROM fundamentals WHERE trade_date = ?",
+            (target_date,),
+        ).fetchone()
+        filled = filled or 0
+        # 非空率 >= 40% 视为已补充（雪球对全市场的覆盖率约 60-70%）
+        min_filled = max(1, int((total_rows or 0) * 0.4))
+    except sqlite3.OperationalError:
+        # 旧库/测试 fixture 可能缺 dividend_yield 列，退回旧行为（视为已补充）
+        filled = min_filled = 0
+    finally:
+        conn.close()
     last_run = db.get_last_task_run("update_market_snapshot")
+    if last_run == target_date and filled >= min_filled:
+        logger.info(
+            f"  跳过：target_date={target_date} 的 dividend_yield 已补充过 ({filled} 行非空)"
+        )
+        return {"status": "success", "saved": 0, "total": 0, "updated": 0, "skipped": True}
     if last_run == target_date:
-        logger.info(f"  跳过：target_date={target_date} 的 dividend_yield 已补充过")
-        return {"saved": 0, "total": 0, "updated": 0, "skipped": True}
+        logger.warning(
+            f"  ⚠️ target_date={target_date} 曾标记完成，但 dividend_yield 非空仅 {filled} 行"
+            f" (< {min_filled})，重新补充"
+        )
 
     # 1. 读取全量股票
     conn = sqlite3.connect(str(db.db_path))
@@ -254,7 +279,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     else:
         logger.warning("⚠️  雪球行情未获取到数据")
 
-    return {"saved": len(all_quotes), "total": total, "updated": updated}
+    return {"status": "success", "saved": len(all_quotes), "total": total, "updated": updated}
 
 
 # ===========================================================================

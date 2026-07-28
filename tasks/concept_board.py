@@ -185,33 +185,54 @@ def update_concept_board(db: DatabaseInterface) -> dict:
 
     resp = get_default_client().call("eastmoney", _fetch_em_spot)
     if not resp.success:
-        logger.warning(f"⚠️ 概念板块行情获取失败: {resp.metadata.error}")
-        saved_board = 0
-    else:
-        spot = resp.data
-        if not spot:
-            saved_board = 0
-            logger.warning("⚠️ 概念板块行情无数据")
-        else:
-            try:
-                # 补充 trade_date 字段（实时行情接口不返回日期）
-                today_str = date.today().isoformat()
-                for r in spot:
-                    r.setdefault("trade_date", today_str)
-                validated_spot, violations = validate_records(spot, CONCEPT_BOARD_CONTRACT, logger)
-                if violations and not validated_spot:
-                    saved_board = 0
-                    logger.error(f"🚫 概念板块行情数据合约校验失败: {violations}")
-                else:
-                    if violations:
-                        logger.warning(f"⚠️ 概念板块行情合约校验过滤 {len(spot) - len(validated_spot)} 条")
-                    saved_board = db.save_concept_board_batch(validated_spot)
-                    logger.info(f"✅ 概念板块行情保存完成: {saved_board} 条")
-            except Exception as e:
-                saved_board = 0
-                logger.warning(f"⚠️ 概念板块行情保存失败: {e}")
+        error_msg = str(resp.metadata.error) if resp.metadata.error else "network error"
+        logger.warning(f"⚠️ 概念板块行情获取失败: {error_msg}")
+        return {
+            "status": "failed",
+            "error_kind": "network",
+            "error": error_msg,
+            "board_saved": 0,
+            "saved": 0,
+        }
+
+    spot = resp.data
+    if not spot:
+        logger.warning("⚠️ 概念板块行情无数据")
+        return {"status": "no_data", "board_saved": 0, "saved": 0}
+
+    try:
+        # 补充 trade_date 字段（实时行情接口不返回日期）
+        today_str = date.today().isoformat()
+        for r in spot:
+            r.setdefault("trade_date", today_str)
+        validated_spot, violations = validate_records(spot, CONCEPT_BOARD_CONTRACT, logger)
+        if violations and not validated_spot:
+            logger.error(f"🚫 概念板块行情数据合约校验失败: {violations}")
+            return {
+                "status": "failed",
+                "error_kind": "data_quality",
+                "error": f"contract validation failed: {violations}",
+                "board_saved": 0,
+                "saved": 0,
+            }
+
+        if violations:
+            logger.warning(f"⚠️ 概念板块行情合约校验过滤 {len(spot) - len(validated_spot)} 条")
+        saved_board = db.save_concept_board_batch(validated_spot)
+        logger.info(f"✅ 概念板块行情保存完成: {saved_board} 条")
+    except Exception as e:
+        logger.warning(f"⚠️ 概念板块行情保存失败: {e}")
+        return {
+            "status": "failed",
+            "error_kind": "internal",
+            "error": str(e),
+            "board_saved": 0,
+            "saved": 0,
+        }
+
     results["board_saved"] = saved_board
     results["saved"] = saved_board
+    results["status"] = "success" if saved_board > 0 else "no_data"
 
     return dict(results)
 
@@ -260,8 +281,17 @@ def update_concept_member(
         saved_member = 0
         pit_saved = 0
         logger.warning(f"⚠️ 概念板块成分股获取失败: {e}")
+        return {
+            "status": "failed",
+            "error_kind": "network",
+            "error": str(e),
+            "member_saved": 0,
+            "pit_saved": 0,
+            "saved": 0,
+        }
     results["member_saved"] = saved_member
     results["pit_saved"] = pit_saved
     results["saved"] = saved_member + pit_saved
+    results["status"] = "success" if (saved_member + pit_saved) > 0 else "no_data"
 
     return dict(results)

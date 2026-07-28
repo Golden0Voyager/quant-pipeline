@@ -2,6 +2,10 @@
 资金流向与行情数据任务模块
 ─────────────────────────
 南向资金、AH 股溢价、ETF 日线行情。
+
+fallback 策略（东财被限流/封禁时）：
+- ETF 日线：东财 → 雪球 kline
+- A/H 溢价：东财现成溢价表 → 腾讯 H 股现价 + 中行汇率 + 库内 A 股收盘价合成
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
-from core.utils import warn_if_all_empty
+from core.utils import is_real_db_path, warn_if_all_empty
 from interface import DatabaseInterface
 
 try:
@@ -91,11 +95,11 @@ def update_south_flow(db: DatabaseInterface) -> dict:
         records = _fetch_south_flow()
         if not records:
             logger.warning("⚠️ 南向资金无数据")
-            return {"saved": 0, "total": 0}
+            return {"status": "no_data", "saved": 0, "total": 0, "reason": "empty response"}
         warn_if_all_empty(records, ["net_buy_amount", "buy_amount"], "south_flow")
         saved = db.save_south_flow_batch(records)
         logger.info(f"✅ 南向资金保存完成: {saved} 条")
-        return {"saved": saved, "total": len(records)}
+        return {"status": "success", "saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 南向资金更新失败: {e}")
         return {"saved": 0, "error": str(e)}
@@ -110,8 +114,13 @@ def _fetch_ah_premium() -> list[dict]:
     if ak is None:
         return []
     try:
-        df = ak.stock_zh_ah_spot_em()
-        if df is None or df.empty:
+        from core.source_client import get_default_client
+
+        resp = get_default_client().call("eastmoney", lambda: ak.stock_zh_ah_spot_em())
+        df = resp.data if resp.success else None
+        if df is None or getattr(df, "empty", True):
+            err = resp.metadata.error if resp and not resp.success else "empty result"
+            logger.warning(f"⚠️ A/H 溢价获取失败: {err}")
             return []
         trade_date = get_expected_latest_trading_day()
         col_map = {
@@ -148,6 +157,98 @@ def _fetch_ah_premium() -> list[dict]:
         return []
 
 
+def _fetch_ah_premium_fallback(db_path: str | None) -> list[dict]:
+    """A/H 溢价 fallback：腾讯 H 股现价 + 中行汇率 + 库内 A 股收盘价合成。
+
+    东财 stock_zh_ah_spot_em 被封时使用：
+    - H 股价（HKD）：ak.stock_zh_ah_spot（腾讯源）
+    - A/H 代码映射：库内 ah_premium 历史记录
+    - A 股价（CNY）：库内 daily_bars 最新收盘价
+    - 汇率：ak.currency_boc_sina 中行折算价（100 港币兑人民币）
+    - 溢价率 = (A价 / (H价 × 汇率) - 1) × 100
+    """
+    if ak is None or not is_real_db_path(db_path):
+        return []
+    try:
+        h_spot = ak.stock_zh_ah_spot()
+        if h_spot is None or h_spot.empty:
+            return []
+    except Exception as e:
+        logger.warning(f"⚠️ A/H fallback：腾讯 H 股行情获取失败: {e}")
+        return []
+
+    # 汇率：中行折算价是 100 港币兑人民币
+    try:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+        fx = ak.currency_boc_sina(symbol="港币", start_date=start, end_date=end)
+        rate_col = next((c for c in fx.columns if "折" in str(c)), None)
+        hkd_cny = float(fx[rate_col].dropna().iloc[-1]) / 100.0
+    except Exception as e:
+        logger.warning(f"⚠️ A/H fallback：港币汇率获取失败: {e}")
+        return []
+
+    try:
+        with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+            # A/H 代码映射：取库内最近一个有数据日期的全量对照表
+            mapping = conn.execute(
+                "SELECT ts_code, h_code, name FROM ah_premium"
+                " WHERE trade_date = (SELECT MAX(trade_date) FROM ah_premium)"
+                " AND ts_code != '' AND h_code != ''"
+            ).fetchall()
+            if not mapping:
+                logger.warning("⚠️ A/H fallback：库内无历史 A/H 代码映射，无法合成")
+                return []
+            # A 股最新收盘价
+            latest_bar_date = conn.execute(
+                "SELECT MAX(trade_date) FROM daily_bars"
+            ).fetchone()[0]
+            a_close_rows = conn.execute(
+                "SELECT ts_code, close FROM daily_bars WHERE trade_date = ?",
+                (latest_bar_date,),
+            ).fetchall()
+    except Exception as e:
+        logger.warning(f"⚠️ A/H fallback：读取库内映射/收盘价失败: {e}")
+        return []
+
+    # daily_bars 的 ts_code 带市场后缀（如 000002.SZ），按 6 位码归一
+    a_close = {str(c)[:6]: v for c, v in a_close_rows if v is not None}
+    h_price_map: dict[str, float] = {}
+    for _, row in h_spot.iterrows():
+        code = str(row.get("代码", "")).strip().zfill(5)
+        price = _to_float(row.get("最新价"))
+        if code and price:
+            h_price_map[code] = price
+
+    trade_date = latest_bar_date or get_expected_latest_trading_day()
+    records: list[dict] = []
+    for ts_code, h_code, name in mapping:
+        h_price = h_price_map.get(str(h_code).zfill(5))
+        a_price = a_close.get(str(ts_code)[:6])
+        if not h_price or not a_price:
+            continue
+        h_in_cny = h_price * hkd_cny
+        premium = round((a_price / h_in_cny - 1) * 100, 2) if h_in_cny else None
+        records.append(
+            {
+                "trade_date": trade_date,
+                "ts_code": ts_code,
+                "h_code": h_code,
+                "name": name,
+                "h_price": h_price,
+                "a_price": a_price,
+                "premium": premium,
+                "data_source": "tencent_synth",
+            }
+        )
+    if records:
+        logger.info(
+            f"  🔄 A/H fallback 合成成功: {len(records)} 对"
+            f"（H价=腾讯, A价=库内 {trade_date}, 汇率={hkd_cny:.4f}）"
+        )
+    return records
+
+
 def update_ah_premium(db: DatabaseInterface) -> dict:
     logger.info("\n" + "=" * 60)
     logger.info("🔗 任务: 更新 A/H 股溢价")
@@ -157,11 +258,14 @@ def update_ah_premium(db: DatabaseInterface) -> dict:
     try:
         records = _fetch_ah_premium()
         if not records:
-            logger.warning("⚠️ A/H 溢价无数据")
-            return {"saved": 0, "total": 0}
+            logger.warning("⚠️ 东财 A/H 溢价无数据，尝试 fallback 合成")
+            records = _fetch_ah_premium_fallback(getattr(db, "db_path", None))
+        if not records:
+            logger.warning("⚠️ A/H 溢价无数据（含 fallback）")
+            return {"status": "no_data", "saved": 0, "total": 0, "reason": "empty response"}
         saved = db.save_ah_premium_batch(records)
         logger.info(f"✅ A/H 溢价保存完成: {saved} 条")
-        return {"saved": saved, "total": len(records)}
+        return {"status": "success", "saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ A/H 溢价更新失败: {e}")
         return {"saved": 0, "error": str(e)}
@@ -206,7 +310,7 @@ def _get_etf_update_range(db: DatabaseInterface) -> tuple[str, str, str | None]:
     end_date = today.replace("-", "")
     db_path = getattr(db, "db_path", None)
     latest_date: str | None = None
-    if db_path:
+    if is_real_db_path(db_path):
         try:
             with sqlite3.connect(str(db_path), timeout=5.0) as conn:
                 cur = conn.cursor()
@@ -225,8 +329,45 @@ def _get_etf_update_range(db: DatabaseInterface) -> tuple[str, str, str | None]:
     return start_date, end_date, latest_date
 
 
+def _fetch_single_etf_xueqiu(code: str, name: str, start_date: str, end_date: str) -> list[dict]:
+    """ETF 日线 fallback：雪球 kline（东财被封时使用）。
+
+    口径对齐：雪球成交量单位是股，东财是手，需 ÷100；成交额均为元。
+    """
+    try:
+        from smartmoney_hunter import xueqiu as xq
+    except ImportError:
+        return []
+    try:
+        df = xq.get_daily_bars(code, start_date=start_date, end_date=end_date, adjust="qfq")
+    except Exception as e:
+        logger.warning(f"⚠️ ETF {name}({code}) 雪球 fallback 失败: {e}")
+        return []
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        volume = _to_float(row.get("volume"))
+        records.append(
+            {
+                "trade_date": str(row.get("date", ""))[:10],
+                "ts_code": code,
+                "name": name,
+                "open": _to_float(row.get("open")),
+                "high": _to_float(row.get("high")),
+                "low": _to_float(row.get("low")),
+                "close": _to_float(row.get("close")),
+                "volume": volume / 100.0 if volume is not None else None,  # 股 → 手
+                "amount": _to_float(row.get("amount")),
+                "data_source": "xueqiu",
+            }
+        )
+    logger.info(f"  🔄 {name}({code}): {len(df)} 条 (雪球 fallback)")
+    return records
+
+
 def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> list[dict]:
-    """获取单只 ETF 日线，通过 SourceClient.call() 获得重试+熔断保护。"""
+    """获取单只 ETF 日线，通过 SourceClient.call() 获得重试+熔断保护；东财失败时 fallback 雪球。"""
     if ak is None:
         return []
     from core.source_client import get_default_client
@@ -243,8 +384,8 @@ def _fetch_single_etf(code: str, name: str, start_date: str, end_date: str) -> l
     )
     df = resp.data if resp.success else None
     if df is None or (hasattr(df, "empty") and df.empty):
-        logger.warning(f"⚠️ ETF {name}({code}) 获取失败（{resp.metadata.error}）")
-        return []
+        logger.warning(f"⚠️ ETF {name}({code}) 东财获取失败（{resp.metadata.error}），尝试雪球 fallback")
+        return _fetch_single_etf_xueqiu(code, name, start_date, end_date)
     col_map = {
         "日期": "trade_date",
         "开盘": "open",
@@ -351,9 +492,13 @@ def update_finance_flow(db: DatabaseInterface) -> dict:
     results: dict[str, object] = {}
 
     etf_start, etf_end, _ = _get_etf_update_range(db)
+
+    def _fetch_ah_with_fallback() -> list[dict]:
+        return _fetch_ah_premium() or _fetch_ah_premium_fallback(getattr(db, "db_path", None))
+
     sub_tasks = [
         ("south_flow", _fetch_south_flow, db.save_south_flow_batch, None),
-        ("ah_premium", _fetch_ah_premium, db.save_ah_premium_batch, None),
+        ("ah_premium", _fetch_ah_with_fallback, db.save_ah_premium_batch, None),
         ("etf_daily", _fetch_etf_daily, db.save_etf_daily_batch, (etf_start, etf_end)),
     ]
 

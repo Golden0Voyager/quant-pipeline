@@ -653,6 +653,17 @@ def stock_cyq_em(
 
     logger.debug("%s → %s (%d 条)", symbol, src, len(kline_clean))
 
+    # ── 换手率有效性防线：换手率全缺失时任何算法都只会产出全零伪数据 ──
+    # (2026-07-21 起 chip_distribution_em 全零事故根因：EM 封禁后降级到
+    #  daily_bars，其 turnover_rate 全 NULL → JS 路径静默输出全 0 行)
+    _recent = kline_clean[-_RANGE:]
+    _tr_valid = sum(1 for r in _recent if (r.get("turnover_rate") or 0) > 0)
+    if _tr_valid < max(1, len(_recent) // 2):
+        raise ValueError(
+            f"{symbol}: 换手率有效数据仅 {_tr_valid}/{len(_recent)} 条 (源: {src})，"
+            "拒绝计算筹码分布以免产出全零伪数据"
+        )
+
     # ── 计算筹码分布 ────────────────────────────────────────
     result_df: pd.DataFrame | None = None
 
@@ -661,9 +672,12 @@ def stock_cyq_em(
         result_df = _calculate_chip_numpy(kline_clean)
         valid_cnt = result_df["获利比例"].notna().sum()
         if valid_cnt < 10:
-            # numpy 失败（turnover_rate 全 0），回退到 JS 计算同批数据
-            logger.debug("%s numpy 结果无效 (valid=%d)，降级到 JS", symbol, valid_cnt)
-            src = "DB_JS"
+            # numpy 输出无效说明这批 K 线数据本身不可用（换手率缺失/数据不足），
+            # 同批数据交给 JS 只会静默输出全零行，直接报错而非降级
+            raise ValueError(
+                f"{symbol}: numpy 筹码计算无有效输出 (valid={valid_cnt})，"
+                "K 线数据不足或换手率缺失"
+            )
 
     # JS 路径（EM / 雪球 / 新浪 / DB_JS 降级）
     if src in ("EM", "Xueqiu", "Sina", "DB_JS"):
@@ -709,6 +723,13 @@ def stock_cyq_em(
 
     for col in result_df.columns[1:]:
         result_df[col] = pd.to_numeric(result_df[col], errors="coerce")
+
+    # 全零行（JS 在筹码 total==0 时输出 bp=0/ac=0）视为无效数据，置 NaN。
+    # 真实市场中获利比例可为 0，但平均成本必然 > 0，组合判断不会误伤。
+    _zero_mask = (result_df["获利比例"] == 0) & (result_df["平均成本"] == 0)
+    if _zero_mask.any():
+        logger.debug("%s: %d 行全零筹码输出置为 NaN", symbol, int(_zero_mask.sum()))
+        result_df.loc[_zero_mask, result_df.columns[1:]] = np.nan
 
     result_df["日期"] = pd.to_datetime(result_df["日期"], errors="coerce").dt.date
     result_df = result_df.iloc[-90:, :].copy()

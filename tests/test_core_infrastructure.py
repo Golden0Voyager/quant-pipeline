@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+from functools import wraps
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 from core.runner import _task_result_has_errors, safe_task, task_timer
 
@@ -117,6 +119,160 @@ class TestSafeTask:
         result = safe_task("timed", lambda **kw: {"saved": 1})
         assert isinstance(result["metadata"]["elapsed_seconds"], float)
         assert result["metadata"]["elapsed_seconds"] >= 0
+
+    def test_fixed_signature_callback_does_not_receive_internal_run_id(self):
+        """A callback with a fixed signature must remain callable."""
+
+        def fixed() -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("fixed", fixed)
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_explicit_run_id_parameter_receives_generated_uuid(self):
+        """A callback that declares _task_run_id receives the scheduler UUID."""
+        captured: dict[str, str | None] = {}
+
+        def supported(_task_run_id: str | None = None) -> dict[str, int]:
+            captured["run_id"] = _task_run_id
+            return {"saved": 1}
+
+        result = safe_task("supported", supported)
+
+        assert result["status"] == "success"
+        assert UUID(captured["run_id"] or "").version == 4
+
+    def test_var_keyword_callback_receives_generated_run_id(self):
+        """A generic **kwargs callback keeps the existing injection behavior."""
+        captured: dict[str, object] = {}
+
+        def generic(**kwargs: object) -> dict[str, int]:
+            captured.update(kwargs)
+            return {"saved": 1}
+
+        result = safe_task("generic", generic)
+
+        assert result["status"] == "success"
+        assert UUID(str(captured["_task_run_id"])).version == 4
+
+    def test_wrapped_fixed_signature_callback_does_not_receive_run_id(self):
+        """Signature inspection follows functools.wraps to the original task."""
+
+        def fixed() -> dict[str, int]:
+            return {"saved": 1}
+
+        @wraps(fixed)
+        def wrapped(*args: object, **kwargs: object) -> dict[str, int]:
+            return fixed(*args, **kwargs)
+
+        result = safe_task("wrapped", wrapped)
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_caller_provided_run_id_is_preserved(self):
+        """safe_task must not overwrite a supported caller-provided run ID."""
+        captured: dict[str, str | None] = {}
+        db = MagicMock()
+
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
+            captured["run_id"] = _task_run_id
+            return {"saved": 1}
+
+        result = safe_task(
+            "provided", supported, db, _task_run_id="provided-run-id"
+        )
+
+        assert result["status"] == "success"
+        assert captured["run_id"] == "provided-run-id"
+        recorded = db.record_ingestion_run.call_args.args[0]
+        assert recorded["metadata"]["run_id"] == captured["run_id"]
+
+    def test_lock_decorated_fixed_signature_callback_does_not_receive_run_id(self):
+        """@skip_if_task_locked wrapped fixed-signature callback must not get _task_run_id."""
+        from core.lock import skip_if_task_locked
+
+        @skip_if_task_locked("decorated")
+        def fixed(db: object) -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("decorated", fixed, object())
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
+
+    def test_var_positional_run_id_name_does_not_accept_keyword(self):
+        def positional(*_task_run_id: object) -> dict[str, int]:
+            return {"saved": 1}
+
+        result = safe_task("positional", positional)
+
+        assert result["status"] == "success"
+
+    def test_pit_capable_callback_records_parent_before_execution(self):
+        db = MagicMock()
+        observed: dict[str, object] = {}
+
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
+            observed["run_id"] = _task_run_id
+            observed["calls_before_callback"] = db.record_ingestion_run.call_count
+            observed["first_status"] = (
+                db.record_ingestion_run.call_args_list[0].args[0]["status"]
+            )
+            return {"saved": 1}
+
+        result = safe_task("pit", supported, db)
+
+        assert result["status"] == "success"
+        assert observed["calls_before_callback"] == 1
+        assert observed["first_status"] == "running"
+        assert db.record_ingestion_run.call_count == 2
+        first = db.record_ingestion_run.call_args_list[0].args[0]
+        final = db.record_ingestion_run.call_args_list[1].args[0]
+        assert first["metadata"]["run_id"] == observed["run_id"]
+        assert final["metadata"]["run_id"] == observed["run_id"]
+
+    def test_failed_parent_write_prevents_pit_callback(self):
+        db = MagicMock()
+        db.record_ingestion_run.side_effect = RuntimeError("audit locked")
+        called = False
+
+        def supported(
+            db: object,
+            _task_run_id: str | None = None,
+        ) -> dict[str, int]:
+            nonlocal called
+            called = True
+            return {"saved": 1}
+
+        result = safe_task("pit", supported, db)
+
+        assert called is False
+        assert result["status"] == "failed"
+        assert result["error_kind"] == "database"
+        assert "audit parent" in result["error"]
+
+    def test_uninspectable_callback_runs_without_internal_run_id(self):
+        """Optional metadata injection must not block an uninspectable callback."""
+
+        class UninspectableCallable:
+            __signature__ = "invalid"
+
+            def __call__(self) -> dict[str, int]:
+                return {"saved": 1}
+
+        result = safe_task("uninspectable", UninspectableCallable())
+
+        assert result["status"] == "success"
+        assert result["saved"] == 1
 
 
 class TestTaskResultHasErrors:

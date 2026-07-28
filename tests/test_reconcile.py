@@ -396,6 +396,8 @@ class TestMain:
         conn.commit()
         conn.close()
         with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch("scripts.reconcile_with_akshare.logger"):
             rwa.main()
 
@@ -409,6 +411,8 @@ class TestMain:
         retry_file = tmp_path / "reconcile_retry.txt"
         retry_file.write_text("000001.SZ\n")
         with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch.object(rwa, "RETRY_FILE", retry_file), \
              patch.object(rwa, "ReconcileProgress"), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
@@ -430,6 +434,8 @@ class TestMain:
             "reconcile.py", "--symbols", "000001.SZ,600000.SH,BADCODE",
             "--db-path", str(db_path),
         ]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
              patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
@@ -448,6 +454,8 @@ class TestMain:
         with patch.object(sys, "argv", [
             "reconcile.py", "--resume", "--db-path", str(db_path),
         ]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch.object(rwa, "ReconcileProgress") as mock_prog, \
              patch.object(rwa, "compare_and_repair") as mock_car, \
              patch("scripts.reconcile_with_akshare.logger"):
@@ -467,6 +475,8 @@ class TestMain:
         with patch.object(sys, "argv", [
             "reconcile.py", "--limit", "3", "--db-path", str(db_path),
         ]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
              patch("scripts.reconcile_with_akshare.logger"):
             mock_car.return_value = {"total": 1, "matched": 1, "diff": 0, "fixed": 0,
@@ -484,6 +494,8 @@ class TestMain:
         with patch.object(sys, "argv", [
             "reconcile.py", "--update-indicators", "--db-path", str(db_path),
         ]), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch.object(rwa, "compare_and_repair") as mock_car, \
              patch.object(rwa, "update_indicators_for_symbols") as mock_ind, \
              patch("scripts.reconcile_with_akshare.logger"):

@@ -772,6 +772,50 @@ class TestRunAll:
             r = daily_pipeline.run_all(db, loader, engine)
         assert r == {"status": "skipped", "reason": "非交易日"}
 
+    def test_target_cadences_skip_monthly_and_quarterly(self, tmp_path: Path, weekday_mock):
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=True), \
+             patch("daily_pipeline.logger"), \
+             patch("daily_pipeline._safe_task", return_value={"status": "ok"}) as safe_task:
+            r = daily_pipeline.run_all(db, loader, engine, target_cadences={daily_pipeline.Cadence.TRADING_DAY, daily_pipeline.Cadence.DAILY})
+        # 股票列表是月度任务，应被跳过
+        assert r["stock_list"]["status"] == "skipped"
+        # 季度财务是季度任务，也应被跳过
+        assert r["quarterly_financials"]["status"] == "skipped"
+        # 日线行情是交易日任务，应该执行
+        assert safe_task.call_args_list[0].args[0] == "update_bars"
+
+    def test_trading_day_cadence_runs_market_snapshot_with_canonical_name(
+        self, tmp_path: Path, weekday_mock
+    ):
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+
+        with patch(
+            "daily_pipeline._should_update", return_value=True
+        ), patch(
+            "daily_pipeline.logger"
+        ), patch(
+            "daily_pipeline._safe_task", return_value={"status": "ok"}
+        ) as safe_task:
+            daily_pipeline.run_all(
+                db,
+                loader,
+                engine,
+                target_cadences={daily_pipeline.Cadence.TRADING_DAY},
+            )
+
+        safe_task.assert_any_call(
+            "update_market_snapshot",
+            daily_pipeline.update_market_snapshot,
+            db,
+        )
+
     def test_normal_run(self, tmp_path: Path, weekday_mock):
         db = MagicMock()
         db.db_path = str(tmp_path / "quant_core.db")
@@ -819,14 +863,65 @@ class TestRunAll:
 
         assert task_names.index("update_chip_distribution") > task_names.index("update_sector_derivatives")
         assert task_names.index("update_chip_distribution_em") > task_names.index("update_chip_distribution")
-        assert task_names.index("retry_failed") > task_names.index("update_chip_distribution_em")
-        assert task_names.index("health_check") > task_names.index("retry_failed")
+        assert task_names.index("retry") > task_names.index("update_chip_distribution_em")
+        assert task_names.index("health_check") > task_names.index("retry")
 
 
 # ===========================================================================
 # main() / CLI
 # ===========================================================================
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _passthrough_safe_task(self):
+        # 单任务模式现经 _safe_task 包装（注入 _task_run_id / 写审计父行）；
+        # CLI 分发测试只关心路由与参数，这里透传以保持断言语义
+        with patch(
+            "daily_pipeline._safe_task",
+            side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+        ):
+            yield
+
+    @pytest.mark.parametrize("status", ["success", "no_data"])
+    def test_direct_task_success_status_does_not_exit(self, weekday_mock, status):
+        mock_fn = MagicMock(
+            return_value={"status": status, "saved": 0, "reason": "current"}
+        )
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
+        ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
+            "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+        ):
+            factory.get_db.return_value = db = MagicMock()
+            factory.get_loader.return_value = loader = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        mock_fn.assert_called_once_with(
+            db, loader, limit=None, resume=False, symbols=None, force=False
+        )
+
+    def test_direct_task_degraded_status_exits_one(self, weekday_mock):
+        mock_fn = MagicMock(
+            return_value={
+                "status": "degraded",
+                "saved": 0,
+                "error": "1 failures",
+            }
+        )
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
+        ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
+            "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+        ):
+            factory.get_db.return_value = db = MagicMock()
+            factory.get_loader.return_value = loader = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            with pytest.raises(SystemExit) as exc_info:
+                daily_pipeline.main()
+        assert exc_info.value.code == 1
+        mock_fn.assert_called_once_with(
+            db, loader, limit=None, resume=False, symbols=None, force=False
+        )
+
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
@@ -1916,6 +2011,14 @@ def test_update_dividend_summary_empty(mock_ak: MagicMock):
 # ===========================================================================
 
 class TestGlobalMacroCli:
+    @pytest.fixture(autouse=True)
+    def _passthrough_safe_task(self):
+        with patch(
+            "daily_pipeline._safe_task",
+            side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+        ):
+            yield
+
     @pytest.mark.parametrize(
         "task_name,func_name",
         [
@@ -2318,6 +2421,21 @@ class TestAkShareMonitor:
         m = daily_pipeline.AkShareMonitor()
         m.records = [{"success": False} for _ in range(25)]
         m.current_run_attempts = 20
+        # 中止判定使用本轮滑动窗口（ABORT_WINDOW 次），非整轮累计均值
+        for _ in range(m.ABORT_WINDOW):
+            m.current_run_recent.append(False)
+        abort, _ = m.should_abort()
+        assert abort
+
+    def test_should_abort_late_run_failures_not_diluted(self):
+        """前期大量成功不应摊薄后期的全面故障。"""
+        m = daily_pipeline.AkShareMonitor()
+        for i in range(3000):
+            m.record(True, f"{i:06d}")
+        m.current_run_consecutive_failures = 0
+        for i in range(m.ABORT_WINDOW):
+            m.record(False, f"fail{i:04d}")
+            m.current_run_consecutive_failures = 0  # 模拟哨兵化解连续失败规则
         abort, _ = m.should_abort()
         assert abort
 
@@ -2481,7 +2599,36 @@ class TestUpdateIndustry:
 # ===========================================================================
 # CLI: additional main() task branches
 # ===========================================================================
+class TestRunRegistryTaskSafeTaskWrap:
+    def test_single_task_routes_through_safe_task(self):
+        """单任务模式必须经 safe_task：审计父行 + _task_run_id 注入。"""
+        mock_fn = MagicMock(return_value={"status": "success", "saved": 1})
+        db = MagicMock()
+        with patch("daily_pipeline._safe_task") as safe_task, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_concept_member": mock_fn}):
+            daily_pipeline._run_registry_task("update_concept_member", db)
+            safe_task.assert_called_once_with("update_concept_member", mock_fn, db)
+
+    def test_daily_core_not_double_wrapped(self):
+        """编排器 update_daily_core 内部任务已各自经 safe_task，本身不再包一层。"""
+        mock_fn = MagicMock(return_value={})
+        db, loader, engine = MagicMock(), MagicMock(), MagicMock()
+        with patch("daily_pipeline._safe_task") as safe_task, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_daily_core": mock_fn}):
+            daily_pipeline._run_registry_task("update_daily_core", db, loader, engine)
+            safe_task.assert_not_called()
+            mock_fn.assert_called_once_with(db, loader, engine, resume=False, force=False)
+
+
 class TestMainMoreTasks:
+    @pytest.fixture(autouse=True)
+    def _passthrough_safe_task(self):
+        with patch(
+            "daily_pipeline._safe_task",
+            side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+        ):
+            yield
+
     def test_task_update_stock_list(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_stock_list"]), \
              patch("daily_pipeline.ProviderFactory") as f, \

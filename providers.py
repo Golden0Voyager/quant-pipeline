@@ -22,6 +22,12 @@ from smartmoney_hunter.data_loader import DataLoader
 from smartmoney_hunter.database import DatabaseManager
 from smartmoney_hunter.indicators import IndicatorCalculator
 
+from core.source_record_key import (
+    INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
+    STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+    source_record_key,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,8 +90,15 @@ class SmartMoneyDBProvider:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA foreign_keys=ON")
             self._write_conn = conn
         return self._write_conn
+
+    def _connect_for_audit(self) -> sqlite3.Connection:
+        """Create an audit connection with SQLite foreign keys enabled."""
+        conn = sqlite3.connect(str(self._db.db_path), timeout=10.0)
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
     @staticmethod
     def _commit_delta(conn: sqlite3.Connection, before_changes: int) -> int:
@@ -496,7 +509,7 @@ class SmartMoneyDBProvider:
                         repurchase_price_upper REAL,
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 # ==================== Phase 2: 增减持 ====================
@@ -524,7 +537,7 @@ class SmartMoneyDBProvider:
                         survey_org TEXT,
                         survey_type TEXT,
                         survey_count INTEGER,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 # ==================== Phase 2: 股权质押 ====================
@@ -560,7 +573,7 @@ class SmartMoneyDBProvider:
                         repurchase_price_upper REAL,
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 conn.execute("""
@@ -572,7 +585,7 @@ class SmartMoneyDBProvider:
                         survey_org TEXT,
                         survey_type TEXT,
                         survey_count INTEGER,
-                        UNIQUE(trade_date, stock_code)
+                        source_record_key TEXT NOT NULL UNIQUE
                     )
                 """)
                 conn.execute("""
@@ -608,16 +621,6 @@ class SmartMoneyDBProvider:
                     WHERE trade_date IS NULL OR TRIM(trade_date) = ''
                        OR stock_code IS NULL OR TRIM(stock_code) = ''
                 """)
-                conn.execute("""
-                    DELETE FROM institution_survey
-                    WHERE id NOT IN (
-                        SELECT MAX(id) FROM institution_survey GROUP BY trade_date, stock_code
-                    )
-                """)
-                conn.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS ux_institution_survey_date_code
-                    ON institution_survey(trade_date, stock_code)
-                """)
                 conn.commit()
                 conn.execute("""
                     DELETE FROM stock_pledge
@@ -627,6 +630,9 @@ class SmartMoneyDBProvider:
                 conn.commit()
         except Exception as e:
             logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
+        # 版本化迁移放在兜底 DDL 的吞异常范围之外：
+        # MigrationError 必须硬失败上抛，不能被当作 Phase 2 兼容问题吞掉
+        self._run_versioned_migrations()
 
     @property
     def db_path(self) -> str:
@@ -660,11 +666,18 @@ class SmartMoneyDBProvider:
         else:
             metadata_json = str(metadata)
 
-        run_id = result.get("run_id") or str(uuid.uuid4())
-        finished_at = result.get("finished_at") or datetime.utcnow().isoformat(timespec="seconds")
-        started_at = result.get("started_at") or finished_at
+        # safe_task 把 run_id/started_at/finished_at 放在 metadata 中，
+        # 同时兼容顶层 key 的调用方。
+        meta = metadata if isinstance(metadata, dict) else {}
+        run_id = result.get("run_id") or meta.get("run_id") or str(uuid.uuid4())
+        finished_at = (
+            result.get("finished_at")
+            or meta.get("finished_at")
+            or datetime.utcnow().isoformat(timespec="seconds")
+        )
+        started_at = result.get("started_at") or meta.get("started_at") or finished_at
 
-        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+        with self._connect_for_audit() as conn:
             conn.execute(
                 """
                 INSERT INTO ingestion_runs (
@@ -673,6 +686,23 @@ class SmartMoneyDBProvider:
                     rejected_rows, saved_rows, schema_fingerprint, error_kind,
                     error_message, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    task_name = excluded.task_name,
+                    source = excluded.source,
+                    status = excluded.status,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    requested_date = excluded.requested_date,
+                    data_date = excluded.data_date,
+                    attempts = excluded.attempts,
+                    fetched_rows = excluded.fetched_rows,
+                    accepted_rows = excluded.accepted_rows,
+                    rejected_rows = excluded.rejected_rows,
+                    saved_rows = excluded.saved_rows,
+                    schema_fingerprint = excluded.schema_fingerprint,
+                    error_kind = excluded.error_kind,
+                    error_message = excluded.error_message,
+                    metadata_json = excluded.metadata_json
                 """,
                 (
                     run_id,
@@ -705,7 +735,7 @@ class SmartMoneyDBProvider:
     ) -> None:
         """把被拒绝的单行数据写入 ``ingestion_rejections`` 审计表。"""
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        with sqlite3.connect(str(self._db.db_path), timeout=10.0) as conn:
+        with self._connect_for_audit() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO ingestion_rejections
@@ -1377,23 +1407,27 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                # close previous active records
-                conn.execute(
-                    "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                    (valid_to,),
-                )
-                # insert new snapshot
-                conn.executemany(
-                    """INSERT INTO concept_member_history
-                       (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
-                       VALUES (?, ?, ?, ?, NULL, ?, ?)""",
-                    [
-                        (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
-                         valid_from, r.get("source", "akshare"), run_id)
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
+                try:
+                    # close previous active records
+                    conn.execute(
+                        "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                        (valid_to,),
+                    )
+                    # insert new snapshot
+                    conn.executemany(
+                        """INSERT INTO concept_member_history
+                           (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
+                           VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                        [
+                            (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
+                             valid_from, r.get("source", "akshare"), run_id)
+                            for r in records
+                        ],
+                    )
+                    return self._commit_delta(conn, before_changes)
+                except Exception:
+                    conn.rollback()
+                    raise
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 概念板块成分股 PIT 历史保存失败: {e}")
@@ -1413,23 +1447,27 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                # close previous active records
-                conn.execute(
-                    "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                    (valid_to,),
-                )
-                # insert new snapshot
-                conn.executemany(
-                    """INSERT INTO index_member_history
-                       (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
-                       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
-                    [
-                        (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
-                         r.get("weight"), valid_from, r.get("source", "akshare"), run_id)
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
+                try:
+                    # close previous active records
+                    conn.execute(
+                        "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
+                        (valid_to,),
+                    )
+                    # insert new snapshot
+                    conn.executemany(
+                        """INSERT INTO index_member_history
+                           (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
+                           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
+                        [
+                            (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
+                             r.get("weight"), valid_from, r.get("source", "akshare"), run_id)
+                            for r in records
+                        ],
+                    )
+                    return self._commit_delta(conn, before_changes)
+                except Exception:
+                    conn.rollback()
+                    raise
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 指数成分股 PIT 历史保存失败: {e}")
@@ -1887,9 +1925,18 @@ class SmartMoneyDBProvider:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 conn.executemany(
-                    "INSERT OR REPLACE INTO stock_repurchase (trade_date, stock_code, stock_name, repurchase_amount, repurchase_price, repurchase_price_lower, repurchase_price_upper, repurchase_quantity, progress_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO stock_repurchase
+                        (source_record_key, trade_date, stock_code, stock_name,
+                         repurchase_amount, repurchase_price,
+                         repurchase_price_lower, repurchase_price_upper,
+                         repurchase_quantity, progress_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO NOTHING
+                    """,
                     [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                        (source_record_key(r, STOCK_REPURCHASE_SOURCE_KEY_FIELDS),
+                         r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("repurchase_amount"), r.get("repurchase_price"),
                          r.get("repurchase_price_lower"), r.get("repurchase_price_upper"),
                          r.get("repurchase_quantity"), r.get("progress_status"))
@@ -1938,16 +1985,14 @@ class SmartMoneyDBProvider:
                 conn.executemany(
                     """
                     INSERT INTO institution_survey
-                        (trade_date, stock_code, stock_name, survey_org, survey_type, survey_count)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(trade_date, stock_code) DO UPDATE SET
-                        stock_name = excluded.stock_name,
-                        survey_org = excluded.survey_org,
-                        survey_type = excluded.survey_type,
-                        survey_count = excluded.survey_count
+                        (source_record_key, trade_date, stock_code, stock_name,
+                         survey_org, survey_type, survey_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO NOTHING
                     """,
                     [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                        (source_record_key(r, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS),
+                         r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("survey_org"), r.get("survey_type"), r.get("survey_count"))
                         for r in valid_records
                     ],

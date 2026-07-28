@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 import uuid
@@ -33,6 +34,25 @@ def task_timer(name: str):
     yield {"name": name, "start": start, "elapsed": lambda: time.time() - start}
 
 
+def _accepts_task_run_id(fn: Callable[..., Any]) -> bool:
+    """Return whether *fn* safely accepts ``_task_run_id`` as a keyword."""
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+    run_id_parameter = parameters.get("_task_run_id")
+    if run_id_parameter is not None and run_id_parameter.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, Any]:
     """
     安全执行单个任务，异常时记录日志不影响后续任务。
@@ -41,29 +61,64 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     并把结果写入 ``ingestion_runs`` 审计表（如果第一个参数提供 ``record_ingestion_run``）。
     """
     task_start = time.time()
-    run_id = str(uuid.uuid4())
+    started_at = datetime.now(UTC)
+    fallback_run_id = str(uuid.uuid4())
+    effective_run_id = fallback_run_id
     db = args[0] if args and hasattr(args[0], "record_ingestion_run") else None
 
-    def _record(result: TaskResult) -> None:
+    def _write_audit(payload: dict[str, Any]) -> bool:
         if db is None:
-            return
+            return True
         try:
-            elapsed = result.metadata.get("elapsed_seconds", 0)
-            finished_at = datetime.now(UTC)
-            started_at = datetime.fromtimestamp(
-                time.time() - elapsed, tz=UTC
-            )
-            result.metadata["run_id"] = run_id
-            result.metadata["started_at"] = started_at.isoformat(timespec="seconds")
-            result.metadata["finished_at"] = finished_at.isoformat(timespec="seconds")
-            db.record_ingestion_run(result.to_dict())
+            db.record_ingestion_run(payload)
         except Exception as exc:
             logger.warning("⚠️ 写入 ingestion_runs 审计表失败: %s", exc)
+            return False
+        return True
 
-    # Inject the run_id so that task functions that accept ``_task_run_id``
-    # (e.g. ``def update_concept_member(db, _task_run_id=None)``) can use
-    # the same id for PIT / audit writes instead of generating their own.
-    kwargs.setdefault("_task_run_id", run_id)
+    def _record(result: TaskResult) -> None:
+        result.metadata["run_id"] = effective_run_id
+        result.metadata["started_at"] = started_at.isoformat(timespec="seconds")
+        result.metadata["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        _write_audit(result.to_dict())
+
+    # Fixed-signature legacy tasks intentionally run without this internal
+    # keyword; compatible callbacks share the ID for PIT / audit writes.
+    accepts_run_id = _accepts_task_run_id(fn)
+    if accepts_run_id:
+        caller_run_id = kwargs.get("_task_run_id")
+        if isinstance(caller_run_id, str) and caller_run_id:
+            effective_run_id = caller_run_id
+        else:
+            kwargs["_task_run_id"] = fallback_run_id
+
+    if accepts_run_id and db is not None:
+        running = TaskResult.success(name, saved=0)
+        running_payload = running.to_dict()
+        running_payload["status"] = "running"
+        running_payload["metadata"] = {
+            "run_id": effective_run_id,
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "finished_at": started_at.isoformat(timespec="seconds"),
+        }
+        # 父行是 PIT 表 snapshot_run_id 外键的引用目标，写入失败只能放弃任务；
+        # 但审计连接可能因主管道持写锁而瞬时 busy，先重试再放弃
+        parent_written = False
+        for attempt in range(3):
+            if _write_audit(running_payload):
+                parent_written = True
+                break
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+        if not parent_written:
+            failure = TaskResult.failed(
+                name,
+                ErrorKind.DATABASE,
+                "failed to create ingestion audit parent",
+            )
+            failure.metadata["run_id"] = effective_run_id
+            failure.metadata["elapsed_seconds"] = round(time.time() - task_start, 3)
+            return failure.to_dict()
 
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")

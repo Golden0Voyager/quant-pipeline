@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd  # noqa: F401  # DataFrame types used via db/loader returns
 
@@ -28,7 +29,7 @@ _HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
 if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
     sys.path.insert(0, _HUNTER_SRC)
 
-from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: F401
+from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import (
@@ -71,6 +72,93 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 熔断哨兵：连续失败触发熔断前，先拉取一只必然有数据的高流动性标的，
+# 区分「网络彻底不可用」与「个别掉队股源端缺数」（如停牌股），避免误熔断。
+CANARY_SYMBOL = "000001"
+MAX_CANARY_PROBES = 3  # 每次运行最多哨兵验证次数，超出后直接信任熔断判定
+
+# 停牌预检：落后股数量在该阈值内才逐只查雪球行情状态
+#（正常交易日开盘前全市场都“落后”，此时预检无意义且请求量大，直接跳过）
+_SUSPEND_PRECHECK_MAX = 50
+
+
+def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None) -> set[str]:
+    """运行前停牌预检：返回停牌股票的 6 位代码集合。
+
+    只检查「日线落后于最新交易日」的少量股票：
+    - 主源：雪球 batch/quote 的 status 字段（status==2 停牌；东财被封时仍可用）
+    - 辅源：东财停复牌名单 stock_tfp_em（覆盖雪球不支持的北交所）
+    任一源失败均静默降级，返回部分或空集合，不影响主流程。
+    """
+    if not _has_real_db_path(db) or not expected_latest:
+        return set()
+
+    # 1. 落后股集合（一次聚合查询，本地 SQL 无网络开销）
+    import sqlite3
+    try:
+        with sqlite3.connect(str(db.db_path), timeout=5.0) as conn:
+            rows = conn.execute(
+                "SELECT ts_code, MAX(trade_date) FROM daily_bars GROUP BY ts_code"
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.debug(f"停牌预检：落后股查询失败: {e}")
+        return set()
+    lagging = {
+        str(c)[:6]
+        for c, d in rows
+        if not d or (_normalize_trade_date(d) or "") < expected_latest
+    }
+    if not lagging or len(lagging) > _SUSPEND_PRECHECK_MAX:
+        return set()
+
+    suspended: set[str] = set()
+
+    # 2. 辅源：东财停复牌名单（一次请求，覆盖北交所）
+    if ak is not None:
+        try:
+            tfp = ak.stock_tfp_em(date=datetime.now().strftime("%Y%m%d"))
+            if tfp is not None and not tfp.empty and "代码" in tfp.columns:
+                tfp_codes = {str(c).split(".")[0].zfill(6) for c in tfp["代码"].tolist()}
+                suspended |= tfp_codes & lagging
+        except Exception as e:
+            logger.debug(f"停牌预检：东财停复牌名单获取失败: {e}")
+
+    # 3. 主源：雪球行情状态确认（不支持北交所）
+    remaining = [c for c in sorted(lagging - suspended) if not is_beijing_stock(c)]
+    if remaining:
+        try:
+            from smartmoney_hunter import xueqiu as xq
+            for quote in xq.get_batch_quotes(remaining):
+                if quote.get("status") == 2 and quote.get("code"):
+                    # 雪球 code 实测为裸 6 位码；取末 6 位防御带 SH/SZ 前缀的变体
+                    suspended.add(str(quote["code"])[-6:])
+        except Exception as e:
+            logger.debug(f"停牌预检：雪球状态查询失败: {e}")
+    return suspended
+
+
+def _canary_probe(loader: DataLoaderInterface) -> bool:
+    """熔断前哨兵验证：拉取哨兵股票近期日线，确认数据源是否真的不可用。
+
+    Returns:
+        True 表示哨兵拉取成功（网络正常，连续失败是个股问题）；
+        False 表示哨兵也失败（网络确实不可用，应当熔断）。
+    """
+    try:
+        start = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
+        df = loader.get_daily_bars(CANARY_SYMBOL, start_date=start)
+        if df is None or df.empty:
+            return False
+        # 纯 yfinance fallback 数据不能证明 AkShare 可用
+        if "data_source" in df.columns:
+            src_values = df["data_source"].dropna().unique()
+            if len(src_values) == 1 and src_values[0] == "yfinance":
+                return False
+        return True
+    except Exception as e:
+        logger.debug(f"哨兵请求失败: {e}")
+        return False
+
 
 def _normalize_trade_date(value: object) -> str | None:
     """Normalize common trade date forms to YYYY-MM-DD for lexical comparison."""
@@ -95,6 +183,63 @@ def _has_real_db_path(db: DatabaseInterface) -> bool:
     return is_real_db_path(getattr(db, "db_path", None))
 
 
+def _bars_result(
+    *,
+    success: int,
+    failed: int,
+    skipped: int,
+    total: int,
+    attempted: int,
+    failed_symbols: list[str],
+) -> dict[str, Any]:
+    """构造兼容旧计数器的日线任务结果。"""
+    status = "degraded" if failed else "success"
+    result = {
+        "status": status,
+        "saved": success,
+        "attempted": attempted,
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+        "total": total,
+        "failed_symbols": failed_symbols,
+    }
+    if failed:
+        result["error"] = f"{failed} failures"
+    return result
+
+
+def _bars_no_data_result(*, reason: str) -> dict[str, Any]:
+    """构造合法零工作量的日线任务结果。"""
+    result = _bars_result(
+        success=0,
+        failed=0,
+        skipped=0,
+        total=0,
+        attempted=0,
+        failed_symbols=[],
+    )
+    result["status"] = "no_data"
+    result["reason"] = reason
+    return result
+
+
+def _bars_failed_result(*, error: str) -> dict[str, Any]:
+    """构造参数/契约错误的日线任务结果。"""
+    result = _bars_result(
+        success=0,
+        failed=0,
+        skipped=0,
+        total=0,
+        attempted=0,
+        failed_symbols=[],
+    )
+    result["status"] = "failed"
+    result["error_kind"] = "data_quality"
+    result["error"] = error
+    return result
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -107,6 +252,11 @@ def update_bars(
     logger.info("=" * 60)
     logger.info("📈 任务: 更新日线数据")
     logger.info("=" * 60)
+
+    if resume and (limit is not None or symbols is not None):
+        return _bars_failed_result(
+            error="resume cannot be combined with limit or symbols"
+        )
 
     now = datetime.now()
     if now.hour == 15:
@@ -122,7 +272,7 @@ def update_bars(
         stocks = db.get_stock_list()
         if stocks.empty:
             logger.error("❌ 股票列表为空")
-            return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+            return _bars_no_data_result(reason="stock list is empty")
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
         bj_count = len(stocks) - len(stock_codes)
     if limit:
@@ -134,6 +284,9 @@ def update_bars(
         logger.info(f"📊 共 {total} 只股票待更新（已跳过 {bj_count} 只北交所）")
     else:
         logger.info(f"📊 共 {total} 只股票待更新（已包含北交所）")
+
+    if total == 0:
+        return _bars_no_data_result(reason="no eligible symbols")
 
     # ── 智能探测：快速 SQL 检查是否全部已是最新 ──
     if not resume and not force and not limit and not symbols and _has_real_db_path(db):
@@ -158,10 +311,16 @@ def update_bars(
                         f"✅ 智能探测：全部 {_total_stocks} 只股票数据已是最新"
                         f"（截至 {_latest_bar}），跳过批次扫描"
                     )
-                    return {
-                        "success": 0, "failed": 0, "skipped": _total_stocks,
-                        "total": _total_stocks, "probe_skipped": True,
-                    }
+                    result = _bars_result(
+                        success=0,
+                        failed=0,
+                        skipped=_total_stocks,
+                        total=_total_stocks,
+                        attempted=0,
+                        failed_symbols=[],
+                    )
+                    result["probe_skipped"] = True
+                    return result
                 logger.info(
                     f"💡 智能探测：数据截至 {_latest_bar}，最新交易日为 {_expected}，继续更新"
                 )
@@ -179,23 +338,50 @@ def update_bars(
     # ── 断点续传检测 ──
     progress = None
     start_idx = 0
+    retry_mode = False
+    retry_unresolved: list[str] = []
     if resume:
         progress = ProgressTracker.load()
         if progress:
             if progress.get("date") == datetime.now().strftime("%Y-%m-%d"):
-                last_symbol = progress.get("last_symbol", "")
-                start_idx = ProgressTracker.find_resume_index(stock_codes, last_symbol)
-                if start_idx > 0:
+                progress_task = progress.get("task")
+                if progress_task == "retry":
+                    stock_code_set = set(stock_codes)
+                    stock_codes = [
+                        code for code in dict.fromkeys(progress.get("failed_queue", []))
+                        if code in stock_code_set
+                    ]
+                    retry_mode = True
+                    retry_unresolved = stock_codes.copy()
+                    total = len(stock_codes)
+                    progress = None
+                    logger.info("🔄 断点续传：仅重试失败队列 (%d 只)", total)
+                    if total == 0:
+                        ProgressTracker.clear()
+                        return _bars_no_data_result(
+                            reason="retry queue has no eligible symbols"
+                        )
+                elif progress_task in (None, "update_bars"):
+                    last_symbol = progress.get("last_symbol", "")
+                    start_idx = ProgressTracker.find_resume_index(stock_codes, last_symbol)
+                    if start_idx > 0:
+                        logger.info(
+                            f"🔄 断点续传：上次处理到 {last_symbol} "
+                            f"({start_idx}/{total})，继续处理..."
+                        )
+                else:
                     logger.info(
-                        f"🔄 断点续传：上次处理到 {last_symbol} "
-                        f"({start_idx}/{total})，继续处理..."
+                        "ℹ️  忽略未知进度任务 %s 的扫描断点",
+                        progress_task,
                     )
+                    progress = None
             else:
                 logger.info(
                     f"ℹ️  进度文件是昨天的 ({progress.get('date')})，"
                     "今日从头开始"
                 )
                 ProgressTracker.clear()
+                progress = None
         else:
             logger.info("ℹ️  未发现进度文件，从头开始")
     else:
@@ -214,9 +400,64 @@ def update_bars(
     remaining_codes = stock_codes[start_idx:]
     remaining_total = len(remaining_codes)
 
+    def _mark_retry_resolved(symbol: str, result: str) -> None:
+        if retry_mode and result in {"success", "skipped"}:
+            with contextlib.suppress(ValueError):
+                retry_unresolved.remove(symbol)
+
+    def _save_checkpoint(last: str, processed: int) -> None:
+        failed_queue = (
+            retry_unresolved.copy()
+            if retry_mode
+            else list(dict.fromkeys(failed_symbols))
+        )
+        ProgressTracker.save(
+            task="retry" if retry_mode else "update_bars",
+            last_symbol=last,
+            processed=processed,
+            total=total,
+            failed_queue=failed_queue,
+        )
+
     # 初始化 AkShare 稳定性监控
     monitor = AkShareMonitor()
     expected_latest = get_expected_latest_trading_day()
+
+    # ── 停牌预检：停牌股直接跳过抓取，不计失败、不触发重试 ──
+    suspended_symbols: set[str] = set()
+    try:
+        suspended_symbols = _detect_suspended_symbols(db, _normalize_trade_date(expected_latest))
+        if suspended_symbols:
+            logger.info(
+                f"⏸️ 停牌预检：{len(suspended_symbols)} 只停牌股本次跳过抓取: {sorted(suspended_symbols)}"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ 停牌预检失败（不影响主流程）: {e}")
+
+    # ── 熔断检查（带哨兵验证）──
+    canary_probes_used = 0
+
+    def _check_abort() -> tuple[bool, str]:
+        """熔断检查：连续失败触发时先做哨兵验证，避免个股数据问题误熔断。"""
+        nonlocal canary_probes_used
+        should_abort, abort_msg = monitor.should_abort()
+        if (
+            should_abort
+            and monitor.current_run_consecutive_failures >= 3
+            and canary_probes_used < MAX_CANARY_PROBES
+        ):
+            canary_probes_used += 1
+            if _canary_probe(loader):
+                logger.warning(
+                    f"⚠️ 连续 {monitor.current_run_consecutive_failures} 次失败触发熔断条件，"
+                    f"但哨兵 {CANARY_SYMBOL} 拉取正常 → 判定为个股数据问题，继续运行"
+                    f"（哨兵验证 {canary_probes_used}/{MAX_CANARY_PROBES}）"
+                )
+                # 只化解连续失败规则：不经 record() 写伪造成功，
+                # 避免污染持久化监控历史与限流节奏；窗口成功率规则不受哨兵豁免
+                monitor.current_run_consecutive_failures = 0
+                should_abort, abort_msg = monitor.should_abort()
+        return should_abort, abort_msg
 
     # ── 自选股全量拉取初始化 ──
     watchlist_symbols = set()
@@ -233,6 +474,7 @@ def update_bars(
         logger.warning(f"⚠️ 初始化自选股拉取逻辑失败: {e}")
 
     for batch_idx in range(0, remaining_total, BATCH_SIZE):
+        attempts_before_batch = monitor.current_run_attempts
         batch = remaining_codes[batch_idx : batch_idx + BATCH_SIZE]
         batch_num = batch_idx // BATCH_SIZE + 1
         total_batches = (remaining_total + BATCH_SIZE - 1) // BATCH_SIZE
@@ -255,6 +497,7 @@ def update_bars(
                         backfill_file=backfill_file,
                         db_lock=db_write_lock,
                         expected_latest_date=expected_latest,
+                        suspended_symbols=suspended_symbols,
                     ): symbol
                     for symbol in batch
                 }
@@ -276,6 +519,7 @@ def update_bars(
                         if symbol not in failed_symbols:
                             failed_symbols.append(symbol)
                     processed_count += 1
+                    _mark_retry_resolved(symbol, result)
 
                     if result != "skipped":
                         monitor.record(result == "success", symbol)
@@ -285,37 +529,29 @@ def update_bars(
 
             # 并行批次结束后：使用批次原始顺序的最后一只股票作为断点
             last_symbol = batch[-1]
-            ProgressTracker.save(
-                task="update_bars",
-                last_symbol=last_symbol,
-                processed=processed_count,
-                total=total,
-                failed_queue=failed_symbols,
-            )
+            _save_checkpoint(last_symbol, processed_count)
             logger.info(
                 f"  📥 批次完成: {processed_count}/{total} "
                 f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
             )
 
             # 并行批次结束后检查是否需要中止
-            should_abort, abort_msg = monitor.should_abort()
+            should_abort, abort_msg = _check_abort()
             if should_abort:
                 logger.warning(f"⛔ {abort_msg}")
                 monitor.flush()
-                ProgressTracker.save(
-                    task="update_bars",
-                    last_symbol=last_symbol,
-                    processed=processed_count,
+                _save_checkpoint(last_symbol, processed_count)
+                result = _bars_result(
+                    success=success_count,
+                    failed=failed_count,
+                    skipped=skipped_count,
                     total=total,
-                    failed_queue=failed_symbols,
+                    attempted=success_count + failed_count + skipped_count,
+                    failed_symbols=failed_symbols,
                 )
-                return {
-                    "success": success_count,
-                    "failed": failed_count,
-                    "skipped": skipped_count,
-                    "total": total,
-                    "failed_symbols": failed_symbols,
-                }
+                result["status"] = "aborted"
+                result["error"] = abort_msg
+                return result
         else:
             for symbol in batch:
                 result = _update_single_bar(
@@ -326,6 +562,7 @@ def update_bars(
                     backfilled_symbols=backfilled_symbols,
                     backfill_file=backfill_file,
                     expected_latest_date=expected_latest,
+                    suspended_symbols=suspended_symbols,
                 )
                 if result == "success":
                     success_count += 1
@@ -336,6 +573,7 @@ def update_bars(
                     if symbol not in failed_symbols:
                         failed_symbols.append(symbol)
                 processed_count += 1
+                _mark_retry_resolved(symbol, result)
 
                 # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
                 if result != "skipped":
@@ -354,13 +592,7 @@ def update_bars(
                         f"  📥 进度: {current_processed}/{total} "
                         f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
                     )
-                    ProgressTracker.save(
-                        task="update_bars",
-                        last_symbol=last_symbol,
-                        processed=current_processed,
-                        total=total,
-                        failed_queue=failed_symbols,
-                    )
+                    _save_checkpoint(last_symbol, current_processed)
 
                 # 动态调整限流：成功率低时增加休息时间
                 if result != "skipped":
@@ -369,46 +601,46 @@ def update_bars(
                     time.sleep(sleep_time)
 
                 # 检查是否需要中止（AkShare 极度不稳定时）
-                should_abort, abort_msg = monitor.should_abort()
+                should_abort, abort_msg = _check_abort()
                 if should_abort:
                     logger.warning(f"⛔ {abort_msg}")
-                    ProgressTracker.save(
-                        task="update_bars",
-                        last_symbol=last_symbol,
-                        processed=current_processed,
+                    _save_checkpoint(last_symbol, current_processed)
+                    result = _bars_result(
+                        success=success_count,
+                        failed=failed_count,
+                        skipped=skipped_count,
                         total=total,
-                        failed_queue=failed_symbols,
+                        attempted=success_count + failed_count + skipped_count,
+                        failed_symbols=failed_symbols,
                     )
-                    return {
-                        "success": success_count,
-                        "failed": failed_count,
-                        "skipped": skipped_count,
-                        "total": total,
-                        "failed_symbols": failed_symbols,
-                    }
+                    result["status"] = "aborted"
+                    result["error"] = abort_msg
+                    return result
 
         # 每批次结束也刷新进度
         current_processed = processed_count
-        ProgressTracker.save(
-            task="update_bars",
-            last_symbol=last_symbol,
-            processed=current_processed,
-            total=total,
-            failed_queue=failed_symbols,
-        )
+        _save_checkpoint(last_symbol, current_processed)
 
         # 批次结束时汇报监控状态
         monitor.log_status()
 
         if batch_idx + BATCH_SIZE < remaining_total:
-            # 动态调整批次休息：成功率低时增加休息
-            multiplier = monitor.get_recommended_sleep_multiplier()
-            batch_sleep = BATCH_SLEEP * multiplier
-            logger.info(f"⏳ 批次间休息 {batch_sleep:.1f}s... (倍率 {multiplier}x)")
-            time.sleep(batch_sleep)
+            if monitor.current_run_attempts == attempts_before_batch:
+                # 本批次全部跳过（零网络请求），无需限流休息
+                logger.debug("  本批次无网络请求，跳过批次间休息")
+            else:
+                # 动态调整批次休息：成功率低时增加休息
+                multiplier = monitor.get_recommended_sleep_multiplier()
+                batch_sleep = BATCH_SLEEP * multiplier
+                logger.info(f"⏳ 批次间休息 {batch_sleep:.1f}s... (倍率 {multiplier}x)")
+                time.sleep(batch_sleep)
 
     # 处理完成：去重并保存失败队列
-    unique_failed = list(dict.fromkeys(failed_symbols))  # 保持顺序去重
+    unique_failed = (
+        retry_unresolved.copy()
+        if retry_mode
+        else list(dict.fromkeys(failed_symbols))
+    )
     if unique_failed:
         # 保留进度文件，记录失败队列供 retry_failed 任务使用
         ProgressTracker.save(
@@ -427,17 +659,20 @@ def update_bars(
     logger.info("📈 日线数据更新完成")
     logger.info(f"  ✅ 成功: {success_count} 只")
     logger.info(f"  ⏭️  跳过(已最新): {skipped_count} 只")
-    logger.info(f"  ❌ 失败: {failed_count} 只")
+    logger.info(f"  ❌ 失败: {len(unique_failed)} 只")
     logger.info("=" * 60)
 
     monitor.flush()
-    return {
-        "success": success_count,
-        "failed": failed_count,
-        "skipped": skipped_count,
-        "total": total,
-        "failed_symbols": failed_symbols,
-    }
+    return _bars_result(
+        success=success_count,
+        failed=len(unique_failed),
+        skipped=skipped_count,
+        total=total,
+        # attempted 只计本轮实际检查数；failed 含续传继承的未解决失败，
+        # 两者允许不相等（见 bars-resume-result-contract 设计）
+        attempted=success_count + failed_count + skipped_count,
+        failed_symbols=unique_failed,
+    )
 
 
 def _update_single_bar(
@@ -449,6 +684,7 @@ def _update_single_bar(
     backfill_file: Path | None = None,
     db_lock: threading.Lock | None = None,
     expected_latest_date: str | None = None,
+    suspended_symbols: set[str] | None = None,
 ) -> str:
     """更新单只股票的日线数据，带重试。
 
@@ -534,6 +770,11 @@ def _update_single_bar(
             # 轻量查询：先检查 MAX(trade_date)，避免全表扫描（约 5500 次全表读 → 1 次聚合查询）
             latest_date = _normalize_trade_date(db.get_latest_bar_date(symbol))
             if latest_date and expected_latest and latest_date >= expected_latest:
+                return "skipped"
+            # 停牌预检命中：源端不会有新数据，直接跳过避免徒劳重试与失败计数
+            #（例外：上方自选股首次全量回填分支不受此限制——停牌股的历史 K 线依然可拉）
+            if suspended_symbols and symbol[:6] in suspended_symbols:
+                logger.info(f"  ⏸️ {symbol} 停牌中，跳过抓取")
                 return "skipped"
             # 非最新时才读取全量数据做增量更新
             if db_lock:

@@ -184,6 +184,25 @@ class TestStockRepurchase:
             "progress_status": "完成实施",
         }
 
+    def test_distinct_same_day_records_are_saved(self):
+        db = MagicMock()
+        db.save_stock_repurchase_batch.return_value = 2
+        frame = pd.concat(
+            [
+                _repurchase_df(),
+                _repurchase_df().assign(已回购金额=6e8),
+            ],
+            ignore_index=True,
+        )
+
+        with patch.object(stock_repurchase, "ak", _ak_with(frame)):
+            result = stock_repurchase.update_stock_repurchase(db)
+
+        records = db.save_stock_repurchase_batch.call_args.args[0]
+        assert result["saved"] == 2
+        assert len(records) == 2
+        assert {record["repurchase_amount"] for record in records} == {5e8, 6e8}
+
     def test_invalid_key_fields_are_not_saved(self):
         db = MagicMock()
         frame = _repurchase_df().assign(最新公告日期=None)
@@ -255,6 +274,29 @@ class TestInstitutionSurvey:
             "survey_type": "实地调研",
             "survey_count": 5,
         }
+
+    def test_distinct_same_day_records_are_saved(self):
+        db = MagicMock()
+        db.save_institution_survey_batch.return_value = 2
+        frame = pd.concat(
+            [
+                _survey_df(),
+                _survey_df().assign(接待机构数量=6),
+            ],
+            ignore_index=True,
+        )
+        ak = _ak_with(frame)
+
+        with (
+            patch.object(institution_survey, "ak", ak),
+            patch.object(institution_survey, "get_expected_latest_trading_day", return_value="2024-01-31", create=True),
+        ):
+            result = institution_survey.update_institution_survey(db)
+
+        records = db.save_institution_survey_batch.call_args.args[0]
+        assert result["saved"] == 2
+        assert len(records) == 2
+        assert {record["survey_count"] for record in records} == {5, 6}
 
     def test_invalid_key_fields_are_not_saved(self):
         db = MagicMock()

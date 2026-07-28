@@ -135,7 +135,7 @@ class TestStrategyA:
 
         f10_err = _mock_resp(500)
         sina_ok = _mock_resp(
-            200, text="<html>所属行业板块</td></tr><tr><td>保险</td></html>"
+            200, text="<html>所属行业板块</td><td>保险</td></html>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -167,7 +167,7 @@ class TestStrategyA:
 
         f10_bad = _mock_resp(200, {"jbzl": {"other": "value"}})
         sina_ok = _mock_resp(
-            200, text="所属行业板块</td></tr><tr><td>证券</td>"
+            200, text="所属行业板块</td><td>证券</td>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -190,7 +190,7 @@ class TestStrategyA:
         _create_db(str(db_path), [("000001", "sz", None)])
 
         sina_ok = _mock_resp(
-            200, text="所属行业板块</td></tr><tr><td>银行</td>"
+            200, text="所属行业板块</td><td>银行</td>"
         )
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
@@ -285,8 +285,7 @@ class TestStrategyCFallback:
         html = """
         <html>
         <table>
-        <tr><td>所属行业板块</td></tr>
-        <tr><td>银行</td></tr>
+        <tr><td>所属行业板块</td><td>银行</td></tr>
         </table>
         </html>
         """
@@ -353,7 +352,7 @@ class TestF10Blocked:
         f10_429 = _mock_resp(429)
         # Stock 1 Sina success, Stock 2 Sina success (since _f10_blocked
         # causes both to fall through to Sina after their respective F10 phases)
-        sina_ok = _mock_resp(200, text="所属行业板块</td></tr><tr><td>银行</td>")
+        sina_ok = _mock_resp(200, text="所属行业板块</td><td>银行</td>")
 
         # Track which URLs get called
         call_log: list[str] = []
@@ -625,3 +624,45 @@ class TestExchangePrefix:
         assert result["saved"] == 1
         call_url = mock_session.get.call_args[0][0]
         assert "BJ830000" in call_url
+
+    def test_star_market_prefix(self, tmp_path):
+        """star market → SH prefix."""
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        _create_db(str(db_path), [("688000", "star", None)])
+
+        f10_ok = _mock_resp(200, {"jbzl": {"sshy": "半导体"}})
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_session = MagicMock()
+            mock_gc.return_value.get_session.return_value = mock_session
+            mock_session.get.return_value = f10_ok
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 1
+        call_url = mock_session.get.call_args[0][0]
+        assert "SH688000" in call_url
+
+    def test_beijing_market_prefix(self, tmp_path):
+        """bj market → BJ prefix."""
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        _create_db(str(db_path), [("920000", "bj", None)])
+
+        f10_ok = _mock_resp(200, {"jbzl": {"sshy": "专用设备"}})
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_session = MagicMock()
+            mock_gc.return_value.get_session.return_value = mock_session
+            mock_session.get.return_value = f10_ok
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 1
+        call_url = mock_session.get.call_args[0][0]
+        assert "BJ920000" in call_url

@@ -98,7 +98,7 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
             "repurchase_price_upper",
             "repurchase_quantity", "progress_status"}
     available = [c for c in keep if c in df.columns]
-    df = df[available]
+    df = df[available].drop_duplicates()
 
     # 统一日期格式
     if "trade_date" in df.columns:

@@ -143,6 +143,153 @@ def test_update_etf_daily_paths():
         assert finance_flow.update_etf_daily(MagicMock())["saved"] == 0
 
 
+# ===========================================================================
+# finance_flow — 雪球 ETF fallback
+# ===========================================================================
+
+
+def _xueqiu_etf_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-07-23", "2026-07-24"]),
+            "open": [4.75, 4.75],
+            "high": [4.80, 4.76],
+            "low": [4.74, 4.69],
+            "close": [4.787, 4.701],
+            "volume": [1024763152.0, 1500000000.0],  # 雪球单位：股
+            "amount": [4.9e9, 7.1e9],
+            "data_source": ["xueqiu", "xueqiu"],
+        }
+    )
+
+
+def _stub_xueqiu_modules(mock_xq):
+    """构造可注入 sys.modules 的 smartmoney_hunter stub。"""
+    import types
+
+    pkg = types.ModuleType("smartmoney_hunter")
+    pkg.xueqiu = mock_xq
+    return {"smartmoney_hunter": pkg, "smartmoney_hunter.xueqiu": mock_xq}
+
+
+def test_etf_xueqiu_fallback_converts_volume_to_lots():
+    """雪球 fallback：volume 股→手 (÷100)，data_source 标记 xueqiu。"""
+    import sys
+
+    mock_xq = MagicMock()
+    mock_xq.get_daily_bars.return_value = _xueqiu_etf_df()
+    with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+        records = finance_flow._fetch_single_etf_xueqiu("510300", "沪深300ETF", "20260720", "20260726")
+    assert len(records) == 2
+    assert records[0]["trade_date"] == "2026-07-23"
+    assert records[0]["volume"] == 1024763152.0 / 100.0  # 股 → 手
+    assert records[1]["close"] == 4.701
+    assert all(r["data_source"] == "xueqiu" for r in records)
+
+
+def test_etf_xueqiu_fallback_empty_and_error():
+    import sys
+
+    mock_xq = MagicMock()
+    mock_xq.get_daily_bars.return_value = pd.DataFrame()
+    with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+        assert finance_flow._fetch_single_etf_xueqiu("510300", "x", "20260720", "20260726") == []
+    mock_xq.get_daily_bars.side_effect = RuntimeError("net")
+    with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+        assert finance_flow._fetch_single_etf_xueqiu("510300", "x", "20260720", "20260726") == []
+
+
+def test_etf_eastmoney_failure_routes_to_xueqiu():
+    """东财获取失败 → 自动路由到雪球 fallback。"""
+    ak = MagicMock()
+    ak.fund_etf_hist_em.return_value = pd.DataFrame()  # 东财返回空
+    with patch.object(finance_flow, "ak", ak), \
+         patch.object(finance_flow, "_fetch_single_etf_xueqiu", return_value=[{"ts_code": "510300"}]) as xq_fb:
+        records = finance_flow._fetch_single_etf("510300", "沪深300ETF", "20260720", "20260726")
+    assert records == [{"ts_code": "510300"}]
+    xq_fb.assert_called_once_with("510300", "沪深300ETF", "20260720", "20260726")
+
+
+# ===========================================================================
+# finance_flow — A/H 溢价 fallback
+# ===========================================================================
+
+
+def _create_ah_db(tmp_path) -> str:
+    """建带 ah_premium 映射 + daily_bars 收盘价的真实库。"""
+    import sqlite3
+
+    db_path = str(tmp_path / "quant_core.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE ah_premium (trade_date TEXT, ts_code TEXT, h_code TEXT,"
+        " name TEXT, h_price REAL, a_price REAL, premium REAL)"
+    )
+    conn.execute(
+        "INSERT INTO ah_premium VALUES ('2026-07-17', '000002', '02202', '万科A', 2.48, 3.1, 44.63)"
+    )
+    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT, close REAL)")
+    conn.execute("INSERT INTO daily_bars VALUES ('000002.SZ', '2026-07-24', 3.2)")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_ah_premium_fallback_synthesizes(tmp_path):
+    """腾讯 H 价 + 中行汇率 + 库内 A 价 → 合成溢价记录。"""
+    db_path = _create_ah_db(tmp_path)
+    ak = MagicMock()
+    ak.stock_zh_ah_spot.return_value = pd.DataFrame({"代码": ["02202"], "最新价": [2.5]})
+    ak.currency_boc_sina.return_value = pd.DataFrame(
+        {"日期": ["2026-07-24"], "中行折算价": [86.64]}
+    )
+    with patch.object(finance_flow, "ak", ak):
+        records = finance_flow._fetch_ah_premium_fallback(db_path)
+    assert len(records) == 1
+    r = records[0]
+    assert r["trade_date"] == "2026-07-24"
+    assert r["ts_code"] == "000002" and r["h_code"] == "02202"
+    assert r["h_price"] == 2.5 and r["a_price"] == 3.2
+    # 溢价率 = (3.2 / (2.5 * 0.8664) - 1) * 100
+    assert abs(r["premium"] - ((3.2 / (2.5 * 0.8664) - 1) * 100)) < 0.01
+    assert r["data_source"] == "tencent_synth"
+
+
+def test_ah_premium_fallback_guards(tmp_path):
+    """非真实 db_path / 腾讯失败 / 汇率失败 / 无映射 → 均返回 []。"""
+    ak = MagicMock()
+    # db_path 是 MagicMock → []
+    with patch.object(finance_flow, "ak", ak):
+        assert finance_flow._fetch_ah_premium_fallback(MagicMock()) == []
+    db_path = _create_ah_db(tmp_path)
+    # 腾讯接口异常 → []
+    ak.stock_zh_ah_spot.side_effect = RuntimeError("net")
+    with patch.object(finance_flow, "ak", ak):
+        assert finance_flow._fetch_ah_premium_fallback(db_path) == []
+    # 汇率异常 → []
+    ak.stock_zh_ah_spot.side_effect = None
+    ak.stock_zh_ah_spot.return_value = pd.DataFrame({"代码": ["02202"], "最新价": [2.5]})
+    ak.currency_boc_sina.side_effect = RuntimeError("fx down")
+    with patch.object(finance_flow, "ak", ak):
+        assert finance_flow._fetch_ah_premium_fallback(db_path) == []
+
+
+def test_update_ah_premium_uses_fallback_when_em_empty(tmp_path):
+    """东财无数据时 update_ah_premium 自动走 fallback。"""
+    db = MagicMock()
+    db.db_path = _create_ah_db(tmp_path)
+    db.save_ah_premium_batch.return_value = 1
+    fallback_records = [{"ts_code": "000002", "premium": 44.0}]
+    ak = MagicMock()
+    with patch.object(finance_flow, "ak", ak), \
+         patch.object(finance_flow, "_fetch_ah_premium", return_value=[]), \
+         patch.object(finance_flow, "_fetch_ah_premium_fallback", return_value=fallback_records) as fb:
+        r = finance_flow.update_ah_premium(db)
+    assert r["saved"] == 1
+    fb.assert_called_once_with(db.db_path)
+    db.save_ah_premium_batch.assert_called_once_with(fallback_records)
+
+
 def test_update_finance_flow_aggregate():
     ak = MagicMock()
     ak.stock_hsgt_hist_em.return_value = pd.DataFrame(

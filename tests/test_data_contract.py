@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import pytest
 
-from core.data_contract import DataContract, FieldRule, validate_frame
+from core.data_contract import (
+    INSTITUTION_SURVEY_CONTRACT,
+    STOCK_REPURCHASE_CONTRACT,
+    DataContract,
+    FieldRule,
+    validate_frame,
+    validate_records,
+)
 
 # ── helpers ───────────────────────────────────────────────────────────
 
@@ -70,6 +79,53 @@ class TestAliases:
         result = validate_frame(df, contract)
         assert not result.can_write
         assert any("trade_date" in v for v in result.violations)
+
+
+class TestSourceRecordContracts:
+    """Source-record contracts use complete business keys."""
+
+    def test_stock_repurchase_accepts_distinct_same_day_plan(self):
+        base = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+            "repurchase_amount": 100.0,
+            "repurchase_price": 12.0,
+            "repurchase_price_lower": 11.0,
+            "repurchase_price_upper": 13.0,
+            "repurchase_quantity": 10,
+            "progress_status": "planned",
+        }
+        distinct = {**base, "repurchase_amount": 120.0}
+
+        valid, violations = validate_records(
+            [base, distinct],
+            STOCK_REPURCHASE_CONTRACT,
+            logging.getLogger(__name__),
+        )
+
+        assert len(valid) == 2
+        assert violations == []
+
+    def test_institution_survey_accepts_distinct_nullable_org_count(self):
+        base = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "Ping An Bank",
+            "survey_org": None,
+            "survey_type": "call",
+            "survey_count": 3,
+        }
+        distinct = {**base, "survey_count": 4}
+
+        valid, violations = validate_records(
+            [base, distinct],
+            INSTITUTION_SURVEY_CONTRACT,
+            logging.getLogger(__name__),
+        )
+
+        assert len(valid) == 2
+        assert violations == []
 
 
 class TestDateParsing:
