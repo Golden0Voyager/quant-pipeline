@@ -246,6 +246,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         display_label="季度财务",
     ),
     TaskSpec(
+        name="update_financial_history",
+        callable=None,
+        tables=("quarterly_financials_history",),
+        cadence=Cadence.DAILY,  # 自动发现缺失报告期，已覆盖时秒级跳过
+        date_columns={"quarterly_financials_history": "publish_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="财务历史",
+    ),
+    TaskSpec(
         name="update_historical_valuation",
         callable=None,
         tables=("historical_valuation",),
@@ -513,6 +523,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="概念成分",
+    ),
+    TaskSpec(
+        name="update_index_membership",
+        callable=None,
+        tables=("index_member_history",),
+        cadence=Cadence.WEEKLY,  # PIT 快照按 interval 模型管理，无须每日全量
+        date_columns={"index_member_history": "valid_from"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="指数成分",
     ),
     # ── Market valuation ───────────────────────────────────────────
     TaskSpec(
