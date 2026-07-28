@@ -191,14 +191,14 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         ).fetchone()
         filled = filled or 0
         # 非空率 >= 40% 视为已补充（雪球对全市场的覆盖率约 60-70%）
-        _MIN_FILLED = max(1, int((total_rows or 0) * 0.4))
+        min_filled = max(1, int((total_rows or 0) * 0.4))
     except sqlite3.OperationalError:
         # 旧库/测试 fixture 可能缺 dividend_yield 列，退回旧行为（视为已补充）
-        filled = _MIN_FILLED = 0
+        filled = min_filled = 0
     finally:
         conn.close()
     last_run = db.get_last_task_run("update_market_snapshot")
-    if last_run == target_date and filled >= _MIN_FILLED:
+    if last_run == target_date and filled >= min_filled:
         logger.info(
             f"  跳过：target_date={target_date} 的 dividend_yield 已补充过 ({filled} 行非空)"
         )
@@ -206,7 +206,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     if last_run == target_date:
         logger.warning(
             f"  ⚠️ target_date={target_date} 曾标记完成，但 dividend_yield 非空仅 {filled} 行"
-            f" (< {_MIN_FILLED})，重新补充"
+            f" (< {min_filled})，重新补充"
         )
 
     # 1. 读取全量股票
