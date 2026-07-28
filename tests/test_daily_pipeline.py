@@ -380,6 +380,98 @@ class TestUpdateChipDistributionEm:
 
 
 # ===========================================================================
+# fetch_chip_em_record_for_refresh（Task 7 收盘刷新 helper）
+# ===========================================================================
+class TestFetchChipEmRecordForRefresh:
+    """只抽目标日一行，绝不调用随机目标选择器，不写库。"""
+
+    @staticmethod
+    def _em_df(dates: list[str], profit: float = 0.5, avg: float = 10.0) -> pd.DataFrame:
+        n = len(dates)
+        return pd.DataFrame({
+            "trade_date": dates,
+            "profit_ratio": [profit] * n,
+            "avg_cost": [avg] * n,
+            "cost_90_low": [9.0] * n,
+            "cost_90_high": [11.0] * n,
+            "concentration_90": [0.2] * n,
+            "cost_70_low": [9.5] * n,
+            "cost_70_high": [10.5] * n,
+            "concentration_70": [0.1] * n,
+        })
+
+    def test_returns_only_target_date_record(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-23", "2026-07-24", "2026-07-27"])
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+
+        assert reason is None
+        assert record["ts_code"] == "000001.SZ"
+        assert record["trade_date"] == "2026-07-27"
+        assert record["profit_ratio"] == 0.5
+        assert record["avg_cost"] == 10.0
+        # EM 源没有 chip_concentration 列，不得捆绑写入
+        assert "chip_concentration" not in record
+
+    def test_fetch_failure_reason(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: None
+        )
+        assert record is None
+        assert reason == "fetch_failed"
+
+    def test_missing_target_date(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-23", "2026-07-24"])
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "missing_target"
+
+    def test_all_zero_target_row_is_invalid(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"], profit=0.0, avg=0.0)
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "invalid"
+
+    def test_nan_target_row_is_invalid(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"], profit=float("nan"))
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "invalid"
+
+    def test_never_calls_random_target_selector(self):
+        """刷新模式下绝不调用 _get_chip_em_target_symbols（随机兼底）。"""
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"])
+        with patch(
+            "tasks.index_chain._get_chip_em_target_symbols",
+            side_effect=AssertionError("random selector must not be called"),
+        ):
+            record, reason = fetch_chip_em_record_for_refresh(
+                "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+            )
+        assert reason is None
+        assert record["trade_date"] == "2026-07-27"
+
+
+# ===========================================================================
 # New derived data task field mapping
 # ===========================================================================
 class TestDerivedDataTaskMappings:
