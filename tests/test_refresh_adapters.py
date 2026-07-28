@@ -29,12 +29,14 @@ from core.refresh_adapters import (
     HistoricalValuationRefreshAdapter,
     IndexDailyRefreshAdapter,
     IndicatorsRefreshAdapter,
+    InstitutionSurveyRefreshAdapter,
     LocalChipRefreshAdapter,
     MarginTradingRefreshAdapter,
     MarketSnapshotRefreshAdapter,
     MarketValuationRefreshAdapter,
     SectorIndustryRefreshAdapter,
     SouthFlowRefreshAdapter,
+    StockPledgeRefreshAdapter,
     build_core_refresh_adapters,
     build_derived_refresh_adapters,
 )
@@ -1730,3 +1732,111 @@ class TestCbIndexRefreshAdapter:
             "SELECT trade_date, index_code, close FROM cb_index",
         )
         assert rows == [("2026-07-25", "JSL_EW", 2101.5)]
+
+
+# ===========================================================================
+# 组2：键控 30 日回看（institution_survey / stock_pledge）
+# ===========================================================================
+
+
+def _survey_record(code: str, trade_date: str, count: int = 10) -> dict:
+    return {
+        "trade_date": trade_date,
+        "stock_code": code,
+        "stock_name": f"股票{code}",
+        "survey_org": "某基金",
+        "survey_type": "特定对象调研",
+        "survey_count": count,
+        "source_record_key": f"survey-{code}-{trade_date}",
+    }
+
+
+def _pledge_record(code: str, trade_date: str, ratio: float = 12.5) -> dict:
+    return {
+        "trade_date": trade_date,
+        "stock_code": code,
+        "stock_name": f"股票{code}",
+        "pledger": None,
+        "pledge_amount": 1e6,
+        "pledge_ratio": ratio,
+        "pledge_org": None,
+        "source_record_key": f"pledge-{code}-{trade_date}",
+    }
+
+
+class TestInstitutionSurveyRefreshAdapter:
+    def test_upserts_window_records_without_deleting_history(self, market_db_path, store):
+        """30 日窗口记录键控 upsert，窗口外旧行保留；as_of 取窗口内最新调研日。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO institution_survey (trade_date, stock_code, stock_name, source_record_key)"
+            " VALUES ('2026-06-01', '000009', '旧股', 'survey-000009-2026-06-01')",
+        )
+        fetch = FakeFetcher([
+            _survey_record("000001", "2026-07-24"),
+            _survey_record("000002", "2026-07-10"),
+        ])
+        adapter = InstitutionSurveyRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [("2026-06-27",)]
+        assert result.as_of_date == "2026-07-24"
+        assert result.replaced == 2
+        assert _query(
+            market_db_path, "SELECT COUNT(*) FROM institution_survey"
+        ) == [(3,)]
+
+    def test_records_outside_window_dropped_and_empty_raises(self, market_db_path, store):
+        """未来日 / 超出回看窗口的记录剔除；剔除后空 → 上抛，旧数据保留。"""
+        fetch = FakeFetcher([
+            _survey_record("000001", "2026-07-29"),
+            _survey_record("000002", "2026-05-01"),
+        ])
+        adapter = InstitutionSurveyRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(
+            market_db_path, "SELECT COUNT(*) FROM institution_survey"
+        ) == [(0,)]
+
+
+class TestStockPledgeRefreshAdapter:
+    def test_probes_back_until_nonempty_day(self, market_db_path, store):
+        """目标日起逐日探测，接受首个非空日；既有键外旧行保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO stock_pledge (trade_date, stock_code, stock_name, source_record_key)"
+            " VALUES ('2026-07-10', '000009', '旧股', 'pledge-000009-2026-07-10')",
+        )
+        fetch = FakeDatedFetcher({
+            "2026-07-24": [_pledge_record("000001", "2026-07-24")],
+        })
+        adapter = StockPledgeRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == "2026-07-24"
+        assert fetch.calls == ["2026-07-27", "2026-07-26", "2026-07-25", "2026-07-24"]
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, stock_code FROM stock_pledge ORDER BY trade_date",
+        )
+        assert rows == [("2026-07-10", "000009"), ("2026-07-24", "000001")]
+
+    def test_all_days_empty_raises_and_keeps_old_rows(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO stock_pledge (trade_date, stock_code, stock_name, source_record_key)"
+            " VALUES ('2026-07-10', '000009', '旧股', 'pledge-000009-2026-07-10')",
+        )
+        fetch = FakeDatedFetcher({})
+        adapter = StockPledgeRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert len(fetch.calls) == 31
+        assert _query(market_db_path, "SELECT COUNT(*) FROM stock_pledge") == [(1,)]
