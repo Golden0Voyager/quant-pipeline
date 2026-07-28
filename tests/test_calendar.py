@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -59,6 +60,38 @@ def test_get_expected_weekday_after_1530_uses_today():
     with patch.object(cal, "datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 20, 16, 0)  # Mon 16:00 > 15:30
         assert cal.get_expected_latest_trading_day() == "2026-07-20"
+
+
+def test_get_expected_explicit_shanghai_now_before_1530_uses_prev_day():
+    now = datetime(2026, 7, 21, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Tue 10:00 < 15:30
+    assert cal.get_expected_latest_trading_day(now=now) == "2026-07-20"
+
+
+def test_get_expected_explicit_shanghai_now_after_1530_uses_today():
+    now = datetime(2026, 7, 20, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Mon 16:00 > 15:30
+    assert cal.get_expected_latest_trading_day(now=now) == "2026-07-20"
+
+
+def test_get_expected_explicit_shanghai_now_weekend_rolls_back_to_friday():
+    now = datetime(2026, 7, 18, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Sat
+    assert cal.get_expected_latest_trading_day(now=now) == "2026-07-17"
+
+
+def test_get_expected_explicit_now_ignores_host_clock():
+    # 传入显式 now 时不得读取主机时钟，结果与主机本地时区无关
+    with patch.object(cal, "datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 1, 1, 0, 0)  # 与传入 now 冲突的主机时钟
+        now = datetime(2026, 7, 21, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Tue 16:00
+        assert cal.get_expected_latest_trading_day(now=now) == "2026-07-21"
+        mock_dt.now.assert_not_called()
+
+
+def test_get_expected_default_now_none_still_uses_local_clock():
+    # now=None 路径保持旧行为：走本机 datetime.now()
+    with patch.object(cal, "datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 21, 16, 0)  # Tue 16:00 > 15:30
+        assert cal.get_expected_latest_trading_day() == "2026-07-21"
+        mock_dt.now.assert_called_once_with()
 
 
 def test_get_recent_trading_days_uses_calendar_and_skips_weekend():
