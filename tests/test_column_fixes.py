@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 import tasks.corporate_actions as corporate_actions
 import tasks.finance_flow as finance_flow
@@ -625,3 +626,93 @@ def test_update_sector_derivatives_all_and_errors():
     ):
         result_err = sector_derivatives.update_sector_derivatives(db_err)
     assert str(result_err["sector_daily"]).startswith("error")
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+_T9_TARGET = "2026-07-27"
+
+
+def test_fetch_sector_daily_records_single_day_window():
+    """目标日单日窗口抓取主要板块；源异常上抛。"""
+    ak = MagicMock()
+    ak.stock_board_industry_name_em.return_value = pd.DataFrame(
+        {"板块名称": ["银行", "非目标板块"]}
+    )
+    ak.stock_board_industry_hist_em.return_value = pd.DataFrame(
+        [{"日期": "2026-07-27", "开盘": 1.0, "收盘": 2.0, "最高": 2.5,
+          "最低": 0.5, "成交量": 10, "成交额": 100, "涨跌幅": 1.5}]
+    )
+    with patch.object(sector_derivatives, "ak", ak):
+        records = sector_derivatives.fetch_sector_daily_records(_T9_TARGET)
+
+    ak.stock_board_industry_hist_em.assert_called_once_with(
+        symbol="银行", start_date="20260727", end_date="20260727"
+    )
+    assert len(records) == 1
+    assert records[0]["sector_name"] == "银行"
+    assert records[0]["trade_date"] == "2026-07-27"
+    assert records[0]["close"] == 2.0
+
+    ak.stock_board_industry_name_em.side_effect = ConnectionError("em down")
+    with patch.object(sector_derivatives, "ak", ak), pytest.raises(ConnectionError):
+        sector_derivatives.fetch_sector_daily_records(_T9_TARGET)
+
+
+def test_fetch_sector_valuation_records_uses_target_date():
+    """估值直传目标日；权威空返回 []；源异常上抛。"""
+    ak = MagicMock()
+    ak.stock_industry_pe_ratio_cninfo.return_value = pd.DataFrame(
+        [{"行业名称": "银行", "变动日期": "2026-07-27", "静态市盈率-加权平均": 5.1,
+          "市净率": 0.6, "总市值": 1000.0}]
+    )
+    with patch.object(sector_derivatives, "ak", ak):
+        records = sector_derivatives.fetch_sector_valuation_records(_T9_TARGET)
+
+    ak.stock_industry_pe_ratio_cninfo.assert_called_once_with(
+        symbol="证监会行业分类", date="20260727"
+    )
+    assert records == [{
+        "sector_name": "银行", "trade_date": "2026-07-27",
+        "pe": 5.1, "pb": 0.6, "total_mv": 1000.0, "data_source": "akshare",
+    }]
+
+    ak.stock_industry_pe_ratio_cninfo.return_value = pd.DataFrame()
+    with patch.object(sector_derivatives, "ak", ak):
+        assert sector_derivatives.fetch_sector_valuation_records(_T9_TARGET) == []
+
+    ak.stock_industry_pe_ratio_cninfo.side_effect = ConnectionError("cninfo down")
+    with patch.object(sector_derivatives, "ak", ak), pytest.raises(ConnectionError):
+        sector_derivatives.fetch_sector_valuation_records(_T9_TARGET)
+
+
+def test_fetch_index_futures_basis_records_filters_target_day():
+    """历史型源只发目标日基差行；合约空日跳过；源异常上抛。"""
+    ak = MagicMock()
+    ak.futures_zh_daily_sina.side_effect = lambda symbol: (
+        pd.DataFrame([
+            {"date": "2026-07-24", "close": 4000.0},
+            {"date": "2026-07-27", "close": 4010.0},
+        ])
+        if symbol == "IF0"
+        else pd.DataFrame()
+    )
+    ak.stock_zh_index_daily_tx.return_value = pd.DataFrame(
+        [{"date": "2026-07-24", "close": 4005.0}, {"date": "2026-07-27", "close": 4000.0}]
+    )
+    with patch.object(sector_derivatives, "ak", ak):
+        records = sector_derivatives.fetch_index_futures_basis_records(_T9_TARGET)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["futures_code"] == "IF0"
+    assert rec["trade_date"] == "2026-07-27"
+    assert rec["basis"] == 10.0
+    assert rec["basis_pct"] == 0.25
+    ak.stock_zh_index_daily_tx.assert_called_once_with(symbol="sh000300")
+
+    ak.futures_zh_daily_sina.side_effect = ConnectionError("sina down")
+    with patch.object(sector_derivatives, "ak", ak), pytest.raises(ConnectionError):
+        sector_derivatives.fetch_index_futures_basis_records(_T9_TARGET)
