@@ -101,7 +101,16 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
             "started_at": started_at.isoformat(timespec="seconds"),
             "finished_at": started_at.isoformat(timespec="seconds"),
         }
-        if not _write_audit(running_payload):
+        # 父行是 PIT 表 snapshot_run_id 外键的引用目标，写入失败只能放弃任务；
+        # 但审计连接可能因主管道持写锁而瞬时 busy，先重试再放弃
+        parent_written = False
+        for attempt in range(3):
+            if _write_audit(running_payload):
+                parent_written = True
+                break
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+        if not parent_written:
             failure = TaskResult.failed(
                 name,
                 ErrorKind.DATABASE,
