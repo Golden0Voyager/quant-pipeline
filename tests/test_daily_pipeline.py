@@ -1038,13 +1038,16 @@ class TestRunCloseRefresh:
                 symbols=["000001.SZ"],
                 orchestrator=FakeOrchestrator(),
             )
-        expected.assert_called_once_with()
+        expected.assert_called_once_with(now=mock_dt.now.return_value)
+        # 目标日计算与 started_at 共用同一次上海时钟读取
+        mock_dt.now.assert_called_once_with(daily_pipeline._SHANGHAI_TZ)
         assert result.exit_failure is False
         ctx = captured[0]
         assert ctx.target_date == "2026-07-27"
         assert ctx.symbols == ("000001.SZ",)
         assert ctx.bypass_cache is True
         assert ctx.run_id
+        assert ctx.started_at is mock_dt.now.return_value
         assert ctx.started_at.tzinfo is not None
 
     def test_pre_close_fails_without_force_and_never_starts_run(self, tmp_path):
