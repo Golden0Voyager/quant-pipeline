@@ -1,6 +1,8 @@
 """Tests for interface.py - ProviderFactory and Protocol interfaces."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pandas as pd
 import pytest
 
@@ -250,6 +252,41 @@ def test_provider_factory_not_configured():
 def test_provider_factory_unknown_provider():
     with pytest.raises(ValueError, match="Unknown provider"):
         ProviderFactory.configure(provider="nonexistent")
+
+
+class _RecordingDataLoader:
+    """Recording fake standing in for the smartmoney DataLoader."""
+
+    def __init__(self, use_cache: bool = True):
+        self.use_cache = use_cache
+
+
+def test_get_loader_uncached_returns_fresh_loader_without_touching_singleton():
+    import providers
+
+    cached = MockDataLoader()
+    ProviderFactory._loader_provider = cached
+
+    with patch.object(providers, "DataLoader", _RecordingDataLoader):
+        uncached = ProviderFactory.get_loader(use_cache=False)
+        again = ProviderFactory.get_loader(use_cache=False)
+
+    # 非缓存路径：每次返回全新的本地 loader，且 use_cache=False 透传到底层
+    assert isinstance(uncached, providers.SmartMoneyLoaderProvider)
+    assert uncached._loader.use_cache is False
+    assert again is not uncached
+
+    # 默认缓存单例行为不变
+    assert ProviderFactory.get_loader() is cached
+    assert ProviderFactory.get_loader(use_cache=True) is cached
+    assert ProviderFactory._loader_provider is cached
+
+
+def test_get_loader_uncached_requires_configuration():
+    ProviderFactory._loader_provider = None
+
+    with pytest.raises(RuntimeError, match="Provider not configured"):
+        ProviderFactory.get_loader(use_cache=False)
 
 
 def test_provider_factory_configure_smartmoney():
