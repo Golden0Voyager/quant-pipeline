@@ -8,11 +8,14 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
 import daily_pipeline
+from core.refresh import RefreshOrchestrator
+from core.task_result import ErrorKind, TaskResult
 
 
 # ===========================================================================
@@ -987,6 +990,178 @@ class TestMain:
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
             mock_fn.assert_called_once_with(db, loader)
+
+
+# ===========================================================================
+# run_close_refresh / --refresh-today
+# ===========================================================================
+class _RecordingRefreshStore:
+    """Recording fake for the refresh run store — 不落盘、不联网。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def start_run(self, **kwargs):
+        self.calls.append(("start", kwargs))
+
+    def record_task_result(self, **kwargs):
+        self.calls.append(("task", kwargs))
+
+    def finish_run(self, **kwargs):
+        self.calls.append(("finish", kwargs))
+
+
+def _shanghai_now(mock_dt, hour: int, minute: int = 0) -> None:
+    mock_dt.now.return_value = datetime(
+        2026, 7, 28, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+
+
+def _empty_orchestrator(store: _RecordingRefreshStore) -> RefreshOrchestrator:
+    return RefreshOrchestrator(specs=(), adapters={}, store=store)
+
+
+class TestRunCloseRefresh:
+    def test_context_uses_expected_trading_day_and_shanghai_clock(self, tmp_path):
+        captured: list = []
+
+        class FakeOrchestrator:
+            def run(self, context):
+                captured.append(context)
+                return TaskResult.success("refresh_today", saved=0)
+
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27") as expected, \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                symbols=["000001.SZ"],
+                orchestrator=FakeOrchestrator(),
+            )
+        expected.assert_called_once_with()
+        assert result.exit_failure is False
+        ctx = captured[0]
+        assert ctx.target_date == "2026-07-27"
+        assert ctx.symbols == ("000001.SZ",)
+        assert ctx.bypass_cache is True
+        assert ctx.run_id
+        assert ctx.started_at.tzinfo is not None
+
+    def test_pre_close_fails_without_force_and_never_starts_run(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 10, 0)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"), orchestrator=_empty_orchestrator(store)
+            )
+        assert result.exit_failure is True
+        assert "16:00" in (result.error or "")
+        assert store.calls == []
+
+    def test_pre_close_force_allows_run(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 10, 0)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                force=True,
+                orchestrator=_empty_orchestrator(store),
+            )
+        assert result.exit_failure is False
+        assert [name for name, _ in store.calls] == ["start", "finish"]
+
+    def test_post_close_dispatches_orchestrator(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"), orchestrator=_empty_orchestrator(store)
+            )
+        assert result.exit_failure is False
+        assert store.calls[0][0] == "start"
+        assert store.calls[0][1]["target_date"] == "2026-07-27"
+        assert store.calls[-1][0] == "finish"
+
+    def test_default_wiring_requests_uncached_loader(self, tmp_path):
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_loader.return_value = MagicMock()
+            orchestrator = daily_pipeline._build_refresh_orchestrator(str(tmp_path / "audit.db"))
+        factory.get_loader.assert_called_once_with(use_cache=False)
+        assert isinstance(orchestrator, RefreshOrchestrator)
+
+
+class TestRefreshTodayCLI:
+    def test_no_flags_still_runs_legacy_all(self, weekday_mock):
+        with patch.object(sys, "argv", ["daily_pipeline.py"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.run_close_refresh") as refresh, \
+             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as run_all_mock:
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        run_all_mock.assert_called_once()
+        refresh.assert_not_called()
+
+    def test_task_conflicts_with_refresh_today(self, capsys):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--task", "update_bars"]), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--task 不能与 --refresh-today 同时使用" in capsys.readouterr().err
+
+    def test_resume_conflicts_with_refresh_today(self, capsys):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--resume"]), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--resume 不能与 --refresh-today 同时使用" in capsys.readouterr().err
+
+    def test_refresh_today_dispatches_and_never_calls_run_all(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh, \
+             patch("daily_pipeline.run_all") as run_all_mock:
+            daily_pipeline.main()
+        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=False)
+        run_all_mock.assert_not_called()
+
+    def test_refresh_today_forwards_force(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--force"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh:
+            daily_pipeline.main()
+        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=True)
+
+    def test_refresh_today_acquires_global_pipeline_lock(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline._acquire_lock") as lock, \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok):
+            daily_pipeline.main()
+        lock.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            TaskResult.degraded("refresh_today", ErrorKind.DATA_QUALITY, "partial"),
+            TaskResult.failed("refresh_today", ErrorKind.NETWORK, "down"),
+            TaskResult.aborted("refresh_today", error="cancelled"),
+        ],
+    )
+    def test_refresh_today_failure_exits_nonzero(self, result):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=result), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
 
 
 # ===========================================================================
