@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from core.task_result import TaskStatus
+
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TERMINAL_STATUSES = frozenset(status.value for status in TaskStatus)
 
 type Row = tuple[object, ...]
 type Rows = tuple[Row, ...]
@@ -20,14 +23,38 @@ type Rows = tuple[Row, ...]
 def _stable_json(value: object) -> str:
     return json.dumps(
         value,
+        allow_nan=False,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
 
 
+def _stable_metadata_json(metadata: Mapping[str, Any] | None) -> str:
+    return _stable_json({} if metadata is None else dict(metadata))
+
+
 class RefreshValidationError(ValueError):
     """Raised when fetched refresh rows are unsafe to publish."""
+
+
+class RefreshStateError(RuntimeError):
+    """Raised when a refresh audit lifecycle transition is invalid."""
+
+
+def _validate_terminal_status(status: str, *, scope: str) -> None:
+    if status not in _TERMINAL_STATUSES:
+        raise RefreshValidationError(
+            f"invalid terminal {scope} status: {status!r}"
+        )
+
+
+def _validate_audit_counters(values: Mapping[str, object]) -> None:
+    for name, value in values.items():
+        if type(value) is not int or value < 0:
+            raise RefreshValidationError(
+                f"{name} must be a non-negative integer, got {value!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,14 +177,26 @@ class SQLiteRefreshStore:
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """Persist the final result for one task in a refresh run."""
+        _validate_terminal_status(status, scope="task")
+        _validate_audit_counters({
+            "fetched": fetched,
+            "validated": validated,
+            "replaced": replaced,
+            "retained": retained,
+            "failed": failed,
+        })
         conn = self._connect()
         try:
-            conn.execute(
+            cursor = conn.execute(
                 """INSERT INTO refresh_task_runs
                    (run_id, task_name, policy_kind, requested_date, as_of_date,
                     status, fetched, validated, replaced, retained, failed,
                     metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   WHERE EXISTS (
+                       SELECT 1 FROM refresh_runs
+                       WHERE run_id = ? AND status = 'running'
+                   )""",
                 (
                     run_id,
                     task_name,
@@ -170,9 +209,14 @@ class SQLiteRefreshStore:
                     replaced,
                     retained,
                     failed,
-                    _stable_json(metadata or {}),
+                    _stable_metadata_json(metadata),
+                    run_id,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RefreshStateError(
+                    f"refresh run {run_id!r} does not exist or is not running"
+                )
         finally:
             conn.close()
 
@@ -184,14 +228,19 @@ class SQLiteRefreshStore:
         status: str,
     ) -> None:
         """Persist the completion state for one close-refresh run."""
+        _validate_terminal_status(status, scope="run")
         conn = self._connect()
         try:
-            conn.execute(
+            cursor = conn.execute(
                 """UPDATE refresh_runs
                    SET finished_at = ?, status = ?
-                   WHERE run_id = ?""",
+                   WHERE run_id = ? AND status = 'running'""",
                 (finished_at, status, run_id),
             )
+            if cursor.rowcount != 1:
+                raise RefreshStateError(
+                    f"refresh run {run_id!r} does not exist or is not running"
+                )
         finally:
             conn.close()
 
