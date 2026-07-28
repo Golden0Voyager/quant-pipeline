@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 from core.task_result import TaskStatus, normalize_task_result
-from tasks.bars import update_bars
+from tasks.bars import fetch_bars_for_refresh, normalize_bar_row_for_refresh, update_bars
 
 # ===========================================================================
 # Helpers
@@ -1069,3 +1069,124 @@ class TestSuspendedPrecheck:
         assert all(
             call.args[0] != "002036.SZ" for call in loader.incremental_update.call_args_list
         )
+
+
+# ===========================================================================
+# 收盘刷新 helpers（Task 6）：不落库的抓取 / 归一化
+# ===========================================================================
+
+_REFRESH_TARGET = "2026-07-27"
+
+
+class _RecordingRefreshLoader:
+    """记录 get_daily_bars 调用参数并返回预设 DataFrame 的手写 fake。"""
+
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+        self.calls: list[tuple[str, str | None, str | None]] = []
+
+    def get_daily_bars(self, symbol, start_date=None, end_date=None):
+        self.calls.append((symbol, start_date, end_date))
+        return self.df
+
+
+def _refresh_bar_df(**overrides) -> pd.DataFrame:
+    """单行目标日日线 DataFrame，字段可按测试覆盖。"""
+    row = {
+        "trade_date": _REFRESH_TARGET,
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.5,
+        "close": 10.5,
+        "volume": 1000.0,
+        "amount": 10500.0,
+        "data_source": "akshare",
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+class TestFetchBarsForRefresh:
+    """fetch_bars_for_refresh 只抓目标日、绕过任何完成快捷路径。"""
+
+    def test_requests_exactly_target_date_window(self):
+        """抓取窗口 start=end=目标日（YYYYMMDD），不做 latest-date 跳过。"""
+        loader = _RecordingRefreshLoader(_refresh_bar_df())
+        df = fetch_bars_for_refresh(loader, "000001", _REFRESH_TARGET)
+
+        assert loader.calls == [("000001", "20260727", "20260727")]
+        assert len(df) == 1
+
+
+class TestNormalizeBarRowForRefresh:
+    """normalize_bar_row_for_refresh 校验并归一化目标日单行，不写库。"""
+
+    def test_accepts_valid_target_row(self):
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(), "000001", _REFRESH_TARGET
+        )
+        assert reason is None
+        assert row["ts_code"] == "000001"
+        assert row["trade_date"] == _REFRESH_TARGET
+        assert row["close"] == 10.5
+
+    def test_normalizes_compact_trade_date(self):
+        """YYYYMMDD 形式的 trade_date 归一化为 YYYY-MM-DD。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(trade_date="20260727"), "000001", _REFRESH_TARGET
+        )
+        assert reason is None
+        assert row["trade_date"] == _REFRESH_TARGET
+
+    def test_rejects_missing_target_date(self):
+        """返回数据不含目标日 → 拒绝（源端缺数）。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(trade_date="2026-07-24"), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert reason
+
+    def test_rejects_empty_dataframe(self):
+        row, reason = normalize_bar_row_for_refresh(
+            pd.DataFrame(), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert reason
+
+    def test_rejects_yfinance_source(self):
+        """yfinance 来源的行绝不入库。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(data_source="yfinance"), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert "yfinance" in reason
+
+    def test_rejects_invalid_ohlc(self):
+        """high < close 违反 OHLC 不变量 → 拒绝。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(high=10.2, close=10.5), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert reason
+
+    def test_rejects_negative_volume(self):
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(volume=-1.0), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert reason
+
+    def test_rejects_missing_required_field(self):
+        """缺少 amount 等必填字段 → 拒绝。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(amount=None), "000001", _REFRESH_TARGET
+        )
+        assert row is None
+        assert reason
+
+    def test_rejects_duplicate_target_rows(self):
+        """目标日出现重复行 → 拒绝（自然键冲突）。"""
+        df = pd.concat([_refresh_bar_df(), _refresh_bar_df()], ignore_index=True)
+        row, reason = normalize_bar_row_for_refresh(df, "000001", _REFRESH_TARGET)
+        assert row is None
+        assert reason
