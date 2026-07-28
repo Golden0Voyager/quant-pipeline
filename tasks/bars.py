@@ -224,6 +224,22 @@ def _bars_no_data_result(*, reason: str) -> dict[str, Any]:
     return result
 
 
+def _bars_failed_result(*, error: str) -> dict[str, Any]:
+    """构造参数/契约错误的日线任务结果。"""
+    result = _bars_result(
+        success=0,
+        failed=0,
+        skipped=0,
+        total=0,
+        attempted=0,
+        failed_symbols=[],
+    )
+    result["status"] = "failed"
+    result["error_kind"] = "data_quality"
+    result["error"] = error
+    return result
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -236,6 +252,11 @@ def update_bars(
     logger.info("=" * 60)
     logger.info("📈 任务: 更新日线数据")
     logger.info("=" * 60)
+
+    if resume and (limit is not None or symbols is not None):
+        return _bars_failed_result(
+            error="resume cannot be combined with limit or symbols"
+        )
 
     now = datetime.now()
     if now.hour == 15:
@@ -317,6 +338,8 @@ def update_bars(
     # ── 断点续传检测 ──
     progress = None
     start_idx = 0
+    retry_mode = False
+    retry_unresolved: list[str] = []
     if resume:
         progress = ProgressTracker.load()
         if progress:
@@ -325,9 +348,11 @@ def update_bars(
                 if progress_task == "retry":
                     stock_code_set = set(stock_codes)
                     stock_codes = [
-                        code for code in progress.get("failed_queue", [])
+                        code for code in dict.fromkeys(progress.get("failed_queue", []))
                         if code in stock_code_set
                     ]
+                    retry_mode = True
+                    retry_unresolved = stock_codes.copy()
                     total = len(stock_codes)
                     progress = None
                     logger.info("🔄 断点续传：仅重试失败队列 (%d 只)", total)
@@ -374,6 +399,25 @@ def update_bars(
     # 计算剩余需要处理的股票
     remaining_codes = stock_codes[start_idx:]
     remaining_total = len(remaining_codes)
+
+    def _mark_retry_resolved(symbol: str, result: str) -> None:
+        if retry_mode and result in {"success", "skipped"}:
+            with contextlib.suppress(ValueError):
+                retry_unresolved.remove(symbol)
+
+    def _save_checkpoint(last: str, processed: int) -> None:
+        failed_queue = (
+            retry_unresolved.copy()
+            if retry_mode
+            else list(dict.fromkeys(failed_symbols))
+        )
+        ProgressTracker.save(
+            task="retry" if retry_mode else "update_bars",
+            last_symbol=last,
+            processed=processed,
+            total=total,
+            failed_queue=failed_queue,
+        )
 
     # 初始化 AkShare 稳定性监控
     monitor = AkShareMonitor()
@@ -473,6 +517,7 @@ def update_bars(
                         if symbol not in failed_symbols:
                             failed_symbols.append(symbol)
                     processed_count += 1
+                    _mark_retry_resolved(symbol, result)
 
                     if result != "skipped":
                         monitor.record(result == "success", symbol)
@@ -482,13 +527,7 @@ def update_bars(
 
             # 并行批次结束后：使用批次原始顺序的最后一只股票作为断点
             last_symbol = batch[-1]
-            ProgressTracker.save(
-                task="update_bars",
-                last_symbol=last_symbol,
-                processed=processed_count,
-                total=total,
-                failed_queue=failed_symbols,
-            )
+            _save_checkpoint(last_symbol, processed_count)
             logger.info(
                 f"  📥 批次完成: {processed_count}/{total} "
                 f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
@@ -499,13 +538,7 @@ def update_bars(
             if should_abort:
                 logger.warning(f"⛔ {abort_msg}")
                 monitor.flush()
-                ProgressTracker.save(
-                    task="update_bars",
-                    last_symbol=last_symbol,
-                    processed=processed_count,
-                    total=total,
-                    failed_queue=failed_symbols,
-                )
+                _save_checkpoint(last_symbol, processed_count)
                 result = _bars_result(
                     success=success_count,
                     failed=failed_count,
@@ -538,6 +571,7 @@ def update_bars(
                     if symbol not in failed_symbols:
                         failed_symbols.append(symbol)
                 processed_count += 1
+                _mark_retry_resolved(symbol, result)
 
                 # 记录 AkShare 稳定性（仅对真实执行过网络更新的股票进行记录，跳过的股票不影响统计）
                 if result != "skipped":
@@ -556,13 +590,7 @@ def update_bars(
                         f"  📥 进度: {current_processed}/{total} "
                         f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {failed_count})"
                     )
-                    ProgressTracker.save(
-                        task="update_bars",
-                        last_symbol=last_symbol,
-                        processed=current_processed,
-                        total=total,
-                        failed_queue=failed_symbols,
-                    )
+                    _save_checkpoint(last_symbol, current_processed)
 
                 # 动态调整限流：成功率低时增加休息时间
                 if result != "skipped":
@@ -574,13 +602,7 @@ def update_bars(
                 should_abort, abort_msg = _check_abort()
                 if should_abort:
                     logger.warning(f"⛔ {abort_msg}")
-                    ProgressTracker.save(
-                        task="update_bars",
-                        last_symbol=last_symbol,
-                        processed=current_processed,
-                        total=total,
-                        failed_queue=failed_symbols,
-                    )
+                    _save_checkpoint(last_symbol, current_processed)
                     result = _bars_result(
                         success=success_count,
                         failed=failed_count,
@@ -595,13 +617,7 @@ def update_bars(
 
         # 每批次结束也刷新进度
         current_processed = processed_count
-        ProgressTracker.save(
-            task="update_bars",
-            last_symbol=last_symbol,
-            processed=current_processed,
-            total=total,
-            failed_queue=failed_symbols,
-        )
+        _save_checkpoint(last_symbol, current_processed)
 
         # 批次结束时汇报监控状态
         monitor.log_status()
@@ -618,7 +634,11 @@ def update_bars(
                 time.sleep(batch_sleep)
 
     # 处理完成：去重并保存失败队列
-    unique_failed = list(dict.fromkeys(failed_symbols))  # 保持顺序去重
+    unique_failed = (
+        retry_unresolved.copy()
+        if retry_mode
+        else list(dict.fromkeys(failed_symbols))
+    )
     if unique_failed:
         # 保留进度文件，记录失败队列供 retry_failed 任务使用
         ProgressTracker.save(
