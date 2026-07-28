@@ -1721,3 +1721,140 @@ def test_fetch_em_spot_pagination():
         result = concept_board.update_concept_board(db)
     assert mock_session.get.call_count == 2
     assert result["board_saved"] == 150
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 7）：valuation_chain 派生任务
+# ===========================================================================
+
+_REFRESH_TARGET = "2026-07-27"
+
+
+def _create_valuation_refresh_db(db_path: str) -> None:
+    """建 fundamentals + stock_list 最小表结构（临时 SQLite）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE fundamentals (
+            ts_code TEXT, trade_date TEXT, pe_ttm REAL, pb REAL, ps_ttm REAL,
+            dividend_yield REAL, roe REAL, revenue_growth REAL,
+            profit_growth REAL, market_cap REAL)"""
+    )
+    conn.execute("CREATE TABLE stock_list (code TEXT, industry TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def _seed_refresh_fundamental(
+    db_path: str,
+    code: str,
+    trade_date: str = _REFRESH_TARGET,
+    pe: float = 10.0,
+    dividend_yield: float | None = 1.5,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, ps_ttm,"
+        " dividend_yield, roe, revenue_growth, profit_growth, market_cap)"
+        " VALUES (?, ?, ?, 1.2, 2.4, ?, 0.1, 0.2, 0.3, 1e9)",
+        (code, trade_date, pe, dividend_yield),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestFetchHistoricalValuationRowsForRefresh:
+    """fetch_historical_valuation_rows_for_refresh：只读目标日分区，不写库。"""
+
+    def test_reads_only_target_partition(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "600000", pe=20.0)
+        _seed_refresh_fundamental(db_path, "000001", trade_date="2026-07-24", pe=99.0)
+
+        rows = fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert {row["ts_code"] for row in rows} == {"000001", "600000"}
+        assert all(row["trade_date"] == _REFRESH_TARGET for row in rows)
+        assert all(
+            set(row) == {"ts_code", "trade_date", "pe_ttm", "pb", "ps_ttm", "dividend_yield"}
+            for row in rows
+        )
+        by_code = {row["ts_code"]: row for row in rows}
+        assert by_code["000001"]["pe_ttm"] == 10.0
+        assert by_code["000001"]["dividend_yield"] == 1.5
+
+    def test_deduplicates_codes(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "000001", pe=11.0)
+
+        rows = fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert len(rows) == 1
+
+    def test_empty_partition_returns_empty(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+
+        assert fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET) == []
+
+
+class TestComputeSectorIndustryRowsForRefresh:
+    """compute_sector_industry_rows_for_refresh：只聚合目标日分区，不写库。"""
+
+    def test_aggregates_target_partition(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "600000", pe=20.0)
+        _seed_refresh_fundamental(db_path, "600519", pe=30.0)
+        # 历史分区不得参与聚合
+        _seed_refresh_fundamental(db_path, "000001", trade_date="2026-07-24", pe=999.0)
+        conn = sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO stock_list (code, industry) VALUES (?, ?)",
+            [("000001", "银行"), ("600000", "银行"), ("600519", "白酒")],
+        )
+        conn.commit()
+        conn.close()
+
+        rows = compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        by_industry = {row["industry_name"]: row for row in rows}
+        assert set(by_industry) == {"银行", "白酒"}
+        assert by_industry["银行"]["avg_pe"] == pytest.approx(15.0)
+        assert by_industry["白酒"]["avg_pe"] == pytest.approx(30.0)
+        assert by_industry["银行"]["total_market_cap"] == pytest.approx(2e9)
+        assert all(row["trade_date"] == _REFRESH_TARGET for row in rows)
+        # 刷新模式不做 sector_fund_flow 模糊映射，排名置空
+        assert all(row["fund_inflow_rank"] is None for row in rows)
+        assert all(row["data_source"] == "derived" for row in rows)
+
+    def test_unknown_industry_bucket(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "300001", pe=40.0)
+
+        rows = compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert [row["industry_name"] for row in rows] == ["未知行业"]
+
+    def test_empty_partition_returns_empty(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+
+        assert compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET) == []
