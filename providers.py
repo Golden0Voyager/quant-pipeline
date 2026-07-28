@@ -630,6 +630,9 @@ class SmartMoneyDBProvider:
                 conn.commit()
         except Exception as e:
             logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
+        # 版本化迁移放在兜底 DDL 的吞异常范围之外：
+        # MigrationError 必须硬失败上抛，不能被当作 Phase 2 兼容问题吞掉
+        self._run_versioned_migrations()
 
     @property
     def db_path(self) -> str:
