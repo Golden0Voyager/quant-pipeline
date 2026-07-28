@@ -346,8 +346,13 @@ def run_all(
     def _run_task(name: str, fn, *args, **kwargs):
         if target_cadences is not None:
             spec = lookup_task(name)
-            if spec is None or spec.cadence not in target_cadences:
-                logger.info("⏭️ 跳过任务: %s (cadence=%s)", name, getattr(spec, "cadence", "unknown"))
+            if spec is None:
+                # 未注册任务不允许静默跳过：显式失败暴露注册遗漏
+                logger.error("❌ 任务未注册于 TASK_REGISTRY，无法按 cadence 过滤: %s", name)
+                return {"status": "failed", "reason": f"task not in registry: {name}"}
+            # ON_DEMAND 为运维型任务（retry / health_check），始终随管道执行
+            if spec.cadence is not Cadence.ON_DEMAND and spec.cadence not in target_cadences:
+                logger.info("⏭️ 跳过任务: %s (cadence=%s)", name, spec.cadence)
                 return {"status": "skipped", "reason": f"cadence not in {target_cadences}"}
         return _safe_task(name, fn, *args, **kwargs)
 
@@ -428,7 +433,7 @@ def run_all(
         "update_concept_member", update_concept_member, db
     )
 
-    results["retry"] = _run_task("retry_failed", retry_failed, db, loader)
+    results["retry"] = _run_task("retry", retry_failed, db, loader)
     results["health"] = _run_task("health_check", health_check, db)
 
     db.close()
