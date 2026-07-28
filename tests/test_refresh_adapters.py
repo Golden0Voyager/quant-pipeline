@@ -24,16 +24,19 @@ from core.refresh_adapters import (
     BarsRefreshAdapter,
     CbIndexRefreshAdapter,
     EastmoneyChipRefreshAdapter,
+    EtfDailyRefreshAdapter,
     FundamentalsRefreshAdapter,
     FundFlowRefreshAdapter,
     HistoricalValuationRefreshAdapter,
     IndexDailyRefreshAdapter,
     IndicatorsRefreshAdapter,
     InstitutionSurveyRefreshAdapter,
+    LimitUpDownRefreshAdapter,
     LocalChipRefreshAdapter,
     MarginTradingRefreshAdapter,
     MarketSnapshotRefreshAdapter,
     MarketValuationRefreshAdapter,
+    OptionSentimentRefreshAdapter,
     SectorIndustryRefreshAdapter,
     SouthFlowRefreshAdapter,
     StockPledgeRefreshAdapter,
@@ -1840,3 +1843,236 @@ class TestStockPledgeRefreshAdapter:
 
         assert len(fetch.calls) == 31
         assert _query(market_db_path, "SELECT COUNT(*) FROM stock_pledge") == [(1,)]
+
+
+# ===========================================================================
+# 组3：目标日精确型（etf_daily / limit_up_down / option_sentiment）
+# ===========================================================================
+
+
+class FakeEtfFetcher:
+    """按 ETF 代码返回预设记录（或抛预设异常）的手写 fetch fake。"""
+
+    def __init__(self, frames: dict[str, list | Exception]):
+        self.frames = frames
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, code: str, name: str, trade_date: str) -> list[dict]:
+        self.calls.append((code, name, trade_date))
+        item = self.frames.get(code, [])
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _etf_record(code: str, name: str, close: float = 3.5) -> dict:
+    return {
+        "trade_date": TARGET,
+        "ts_code": code,
+        "name": name,
+        "open": close - 0.1,
+        "high": close + 0.1,
+        "low": close - 0.2,
+        "close": close,
+        "volume": 1e6,
+        "amount": 3.5e6,
+        "data_source": "akshare",
+    }
+
+
+def _limit_record(code: str, limit_type: str = "涨停", trade_date: str = TARGET) -> dict:
+    return {
+        "trade_date": trade_date,
+        "ts_code": code,
+        "name": f"股票{code}",
+        "pct_change": 10.0 if limit_type == "涨停" else -10.0,
+        "close_price": 11.0,
+        "turnover_rate": 5.0,
+        "limit_type": limit_type,
+        "board_count": 2 if limit_type == "涨停" else None,
+        "industry": "某行业",
+        "data_source": "akshare",
+    }
+
+
+_ETF_UNIVERSE = (
+    ("510050", "上证50ETF"),
+    ("510300", "沪深300ETF"),
+    ("510500", "中证500ETF"),
+    ("510880", "红利ETF"),
+    ("588000", "科创50ETF"),
+)
+
+
+class TestEtfDailyRefreshAdapter:
+    def test_partial_failure_keeps_old_row_when_coverage_met(self, market_db_path, store):
+        """单只失败不拖垮整体：达覆盖率则发布其余，失败 ETF 旧行保留。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO etf_daily (ts_code, name, trade_date, close, data_source)"
+            " VALUES ('588000', '科创50ETF', ?, 1.0, 'akshare')",
+            (TARGET,),
+        )
+        frames: dict[str, list | Exception] = {
+            code: [_etf_record(code, name)] for code, name in _ETF_UNIVERSE[:4]
+        }
+        frames["588000"] = RuntimeError("source down")
+        fetch = FakeEtfFetcher(frames)
+        adapter = EtfDailyRefreshAdapter(
+            store=store, fetch_records=fetch, codes=_ETF_UNIVERSE
+        )
+
+        result = adapter.refresh(_context())
+
+        assert result.as_of_date == TARGET
+        assert result.replaced == 4
+        assert result.failed_symbols == ("588000",)
+        rows = _query(
+            market_db_path,
+            "SELECT ts_code, close FROM etf_daily WHERE ts_code = '588000'",
+        )
+        assert rows == [("588000", 1.0)]
+
+    def test_low_coverage_raises_and_keeps_old_rows(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO etf_daily (ts_code, name, trade_date, close, data_source)"
+            " VALUES ('510050', '上证50ETF', ?, 2.0, 'akshare')",
+            (TARGET,),
+        )
+        frames: dict[str, list | Exception] = {
+            code: RuntimeError("source down") for code, _ in _ETF_UNIVERSE[1:]
+        }
+        frames["510050"] = [_etf_record("510050", "上证50ETF")]
+        adapter = EtfDailyRefreshAdapter(
+            store=store, fetch_records=FakeEtfFetcher(frames), codes=_ETF_UNIVERSE
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(
+            market_db_path, "SELECT ts_code, close FROM etf_daily"
+        ) == [("510050", 2.0)]
+
+    def test_symbol_scope_fetches_only_requested(self, market_db_path, store):
+        fetch = FakeEtfFetcher({"510300": [_etf_record("510300", "沪深300ETF")]})
+        adapter = EtfDailyRefreshAdapter(
+            store=store, fetch_records=fetch, codes=_ETF_UNIVERSE
+        )
+
+        result = adapter.refresh(_context(symbols=("510300",)))
+
+        assert fetch.calls == [("510300", "沪深300ETF", TARGET)]
+        assert result.replaced == 1
+
+
+class TestLimitUpDownRefreshAdapter:
+    def test_replaces_target_partition(self, market_db_path, store):
+        """目标日分区整体替换，盘中残留行清理，历史分区不动。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO limit_up_down (trade_date, ts_code, name, limit_type, data_source)"
+            " VALUES (?, '000003', '残留股', '涨停', 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO limit_up_down (trade_date, ts_code, name, limit_type, data_source)"
+            " VALUES ('2026-07-24', '000004', '历史股', '跌停', 'akshare')",
+        )
+        fetch = FakeFetcher([
+            _limit_record("000001", "涨停"),
+            _limit_record("000002", "跌停"),
+        ])
+        adapter = LimitUpDownRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.as_of_date == TARGET
+        assert result.replaced == 2
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, ts_code FROM limit_up_down ORDER BY trade_date, ts_code",
+        )
+        assert rows == [
+            ("2026-07-24", "000004"),
+            (TARGET, "000001"),
+            (TARGET, "000002"),
+        ]
+
+    def test_authoritative_empty_pool_clears_partition(self, market_db_path, store):
+        """权威空池 ≠ 源失败：发布空分区清目标日残留，历史不动。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO limit_up_down (trade_date, ts_code, name, limit_type, data_source)"
+            " VALUES (?, '000003', '残留股', '涨停', 'akshare')",
+            (TARGET,),
+        )
+        _execute(
+            market_db_path,
+            "INSERT INTO limit_up_down (trade_date, ts_code, name, limit_type, data_source)"
+            " VALUES ('2026-07-24', '000004', '历史股', '跌停', 'akshare')",
+        )
+        adapter = LimitUpDownRefreshAdapter(store=store, fetch_records=FakeFetcher([]))
+
+        result = adapter.refresh(_context())
+
+        assert (result.fetched, result.replaced) == (0, 0)
+        assert result.as_of_date == TARGET
+        rows = _query(market_db_path, "SELECT trade_date, ts_code FROM limit_up_down")
+        assert rows == [("2026-07-24", "000004")]
+
+    def test_source_error_propagates_and_keeps_target_rows(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO limit_up_down (trade_date, ts_code, name, limit_type, data_source)"
+            " VALUES (?, '000001', '旧股', '涨停', 'akshare')",
+            (TARGET,),
+        )
+        adapter = LimitUpDownRefreshAdapter(
+            store=store, fetch_records=FakeFetcher(RuntimeError("source down"))
+        )
+
+        with pytest.raises(RuntimeError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM limit_up_down") == [(1,)]
+
+
+class TestOptionSentimentRefreshAdapter:
+    def test_publishes_single_target_row(self, market_db_path, store):
+        fetch = FakeFetcher({
+            "trade_date": TARGET,
+            "qvix": 18.5,
+            "pcr": 0.95,
+            "put_volume": 100,
+            "call_volume": 120,
+            "put_oi": 90,
+            "call_oi": 110,
+        })
+        adapter = OptionSentimentRefreshAdapter(store=store, fetch_record=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert fetch.calls == [(TARGET,)]
+        assert result.as_of_date == TARGET
+        assert result.replaced == 1
+        rows = _query(
+            market_db_path,
+            "SELECT trade_date, qvix, pcr, implied_vol_avg FROM option_sentiment",
+        )
+        assert rows == [(TARGET, 18.5, 0.95, None)]
+
+    def test_missing_target_row_raises_and_keeps_old(self, market_db_path, store):
+        _execute(
+            market_db_path,
+            "INSERT INTO option_sentiment (trade_date, qvix) VALUES ('2026-07-24', 17.0)",
+        )
+        adapter = OptionSentimentRefreshAdapter(store=store, fetch_record=FakeFetcher(None))
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM option_sentiment") == [(1,)]
