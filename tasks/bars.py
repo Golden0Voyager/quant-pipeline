@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd  # noqa: F401  # DataFrame types used via db/loader returns
 
@@ -182,6 +183,32 @@ def _has_real_db_path(db: DatabaseInterface) -> bool:
     return is_real_db_path(getattr(db, "db_path", None))
 
 
+def _bars_result(
+    *,
+    success: int,
+    failed: int,
+    skipped: int,
+    total: int,
+    attempted: int,
+    failed_symbols: list[str],
+) -> dict[str, Any]:
+    """构造兼容旧计数器的日线任务结果。"""
+    status = "degraded" if failed else "success"
+    result = {
+        "status": status,
+        "saved": success,
+        "attempted": attempted,
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+        "total": total,
+        "failed_symbols": failed_symbols,
+    }
+    if failed:
+        result["error"] = f"{failed} failures"
+    return result
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -209,7 +236,14 @@ def update_bars(
         stocks = db.get_stock_list()
         if stocks.empty:
             logger.error("❌ 股票列表为空")
-            return {"success": 0, "failed": 0, "skipped": 0, "total": 0}
+            return _bars_result(
+                success=0,
+                failed=0,
+                skipped=0,
+                total=0,
+                attempted=0,
+                failed_symbols=[],
+            )
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
         bj_count = len(stocks) - len(stock_codes)
     if limit:
@@ -245,10 +279,16 @@ def update_bars(
                         f"✅ 智能探测：全部 {_total_stocks} 只股票数据已是最新"
                         f"（截至 {_latest_bar}），跳过批次扫描"
                     )
-                    return {
-                        "success": 0, "failed": 0, "skipped": _total_stocks,
-                        "total": _total_stocks, "probe_skipped": True,
-                    }
+                    result = _bars_result(
+                        success=0,
+                        failed=0,
+                        skipped=_total_stocks,
+                        total=_total_stocks,
+                        attempted=0,
+                        failed_symbols=[],
+                    )
+                    result["probe_skipped"] = True
+                    return result
                 logger.info(
                     f"💡 智能探测：数据截至 {_latest_bar}，最新交易日为 {_expected}，继续更新"
                 )
@@ -270,12 +310,28 @@ def update_bars(
         progress = ProgressTracker.load()
         if progress:
             if progress.get("date") == datetime.now().strftime("%Y-%m-%d"):
-                last_symbol = progress.get("last_symbol", "")
-                start_idx = ProgressTracker.find_resume_index(stock_codes, last_symbol)
-                if start_idx > 0:
+                progress_task = progress.get("task")
+                if progress_task == "retry":
+                    stock_code_set = set(stock_codes)
+                    stock_codes = [
+                        code for code in progress.get("failed_queue", [])
+                        if code in stock_code_set
+                    ]
+                    total = len(stock_codes)
+                    progress = None
+                    logger.info("🔄 断点续传：仅重试失败队列 (%d 只)", total)
+                elif progress_task in (None, "update_bars"):
+                    last_symbol = progress.get("last_symbol", "")
+                    start_idx = ProgressTracker.find_resume_index(stock_codes, last_symbol)
+                    if start_idx > 0:
+                        logger.info(
+                            f"🔄 断点续传：上次处理到 {last_symbol} "
+                            f"({start_idx}/{total})，继续处理..."
+                        )
+                else:
                     logger.info(
-                        f"🔄 断点续传：上次处理到 {last_symbol} "
-                        f"({start_idx}/{total})，继续处理..."
+                        "ℹ️  忽略未知进度任务 %s 的扫描断点",
+                        progress_task,
                     )
             else:
                 logger.info(
@@ -432,13 +488,17 @@ def update_bars(
                     total=total,
                     failed_queue=failed_symbols,
                 )
-                return {
-                    "success": success_count,
-                    "failed": failed_count,
-                    "skipped": skipped_count,
-                    "total": total,
-                    "failed_symbols": failed_symbols,
-                }
+                result = _bars_result(
+                    success=success_count,
+                    failed=failed_count,
+                    skipped=skipped_count,
+                    total=total,
+                    attempted=success_count + failed_count + skipped_count,
+                    failed_symbols=failed_symbols,
+                )
+                result["status"] = "aborted"
+                result["error"] = abort_msg
+                return result
         else:
             for symbol in batch:
                 result = _update_single_bar(
@@ -503,13 +563,17 @@ def update_bars(
                         total=total,
                         failed_queue=failed_symbols,
                     )
-                    return {
-                        "success": success_count,
-                        "failed": failed_count,
-                        "skipped": skipped_count,
-                        "total": total,
-                        "failed_symbols": failed_symbols,
-                    }
+                    result = _bars_result(
+                        success=success_count,
+                        failed=failed_count,
+                        skipped=skipped_count,
+                        total=total,
+                        attempted=success_count + failed_count + skipped_count,
+                        failed_symbols=failed_symbols,
+                    )
+                    result["status"] = "aborted"
+                    result["error"] = abort_msg
+                    return result
 
         # 每批次结束也刷新进度
         current_processed = processed_count
@@ -559,13 +623,14 @@ def update_bars(
     logger.info("=" * 60)
 
     monitor.flush()
-    return {
-        "success": success_count,
-        "failed": failed_count,
-        "skipped": skipped_count,
-        "total": total,
-        "failed_symbols": failed_symbols,
-    }
+    return _bars_result(
+        success=success_count,
+        failed=failed_count,
+        skipped=skipped_count,
+        total=total,
+        attempted=success_count + failed_count + skipped_count,
+        failed_symbols=unique_failed,
+    )
 
 
 def _update_single_bar(
