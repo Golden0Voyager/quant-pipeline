@@ -149,6 +149,104 @@ def update_fundamentals(
 
 
 # ===========================================================================
+# 收盘刷新 helper（Task 6）：只抓取/归一化，不写库
+# ===========================================================================
+
+
+def fetch_fundamentals_snapshot(
+    target_date: str,
+    *,
+    session=None,
+    page_size: int = 500,
+) -> list[dict]:
+    """收盘刷新专用：只抓目标日估值快照并归一化为写库记录形状。
+
+    与 update_fundamentals 不同：无 5000 行完成阈值、无日期回退、不写库；
+    源端异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    if session is None:
+        session = get_default_client().get_session("eastmoney")
+
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    raw_records: list[dict] = []
+    page = 1
+    while True:
+        params = {
+            "sortColumns": "TRADE_DATE,SECURITY_CODE",
+            "sortTypes": "-1,1",
+            "pageSize": str(page_size),
+            "pageNumber": str(page),
+            "reportName": "RPT_VALUEANALYSIS_DET",
+            "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CLOSE_PRICE,TOTAL_MARKET_CAP,PE_TTM,PB_MRQ,PE_LAR,PEG_CAR,PS_TTM",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(TRADE_DATE='{target_date}')",
+        }
+        resp = session.get(url, params=params, timeout=15)
+        data = resp.json()
+        if not (data.get("success") and data.get("result") and data["result"].get("data")):
+            break
+        raw_records.extend(data["result"]["data"])
+        total_count = data["result"].get("count", 0)
+        if page * page_size >= total_count:
+            break
+        page += 1
+
+    records: list[dict] = []
+    for rec in raw_records:
+        code = str(rec.get("SECURITY_CODE", "")).strip()
+        if not code:
+            continue
+        records.append({
+            "ts_code": code,
+            "trade_date": str(rec.get("TRADE_DATE", target_date))[:10],
+            "pe_ttm": rec.get("PE_TTM"),
+            "pb": rec.get("PB_MRQ"),
+            "ps_ttm": rec.get("PS_TTM"),
+            "dividend_yield": None,
+            "roe": None,
+            "roa": None,
+            "gross_margin": None,
+            "net_margin": None,
+            "debt_ratio": None,
+            "revenue_growth": None,
+            "profit_growth": None,
+            "eps_growth": None,
+            "peg": rec.get("PEG_CAR"),
+            "market_cap": rec.get("TOTAL_MARKET_CAP"),
+        })
+    return records
+
+
+def fetch_market_snapshot_quotes(
+    codes: list[str],
+    *,
+    batch_size: int = 50,
+    sleep_seconds: float = 0.05,
+) -> list[dict]:
+    """收盘刷新专用：批量拉取雪球行情报价，不写库。
+
+    无 Token 直接抛错（源端不可用 → 保留旧数据）；单批失败静默降级，
+    覆盖率是否达标由适配器把关。北交所代码在此过滤（雪球不支持）。
+    """
+    from smartmoney_hunter import xueqiu as xq
+
+    if xq._get_token() is None:
+        raise RuntimeError("XUEQIU_TOKEN is not configured")
+
+    eligible = [code for code in codes if not is_beijing_stock(code)]
+    quotes: list[dict] = []
+    for i in range(0, len(eligible), batch_size):
+        chunk = eligible[i : i + batch_size]
+        try:
+            quotes.extend(xq.get_batch_quotes(chunk))
+        except Exception as e:
+            logger.debug(f"  收盘刷新批次 {i // batch_size + 1} 失败: {e}")
+        time.sleep(sleep_seconds)
+    return quotes
+
+
+# ===========================================================================
 # 任务 3.5: 雪球 token 落地 — 批量补充实时行情指标
 # ===========================================================================
 
