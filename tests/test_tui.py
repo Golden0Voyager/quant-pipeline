@@ -216,6 +216,26 @@ async def test_run_in_background_tracks_current_process():
 
 
 @pytest.mark.asyncio
+async def test_run_in_background_refuses_when_task_running():
+    """有任务在跑时拒绝启动新任务，且不得杀掉正在运行的子进程。"""
+    app = PipelineApp()
+    running_proc = MagicMock()
+    running_proc.pid = 12345
+    running_proc.returncode = None
+    app._current_process = running_proc
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        result = await app._run_in_background("arg1")
+
+    assert result is None
+    mock_exec.assert_not_called()
+    running_proc.terminate.assert_not_called()
+    running_proc.kill.assert_not_called()
+    # 运行中的子进程保持被跟踪，不得被顶掉
+    assert app._current_process is running_proc
+
+
+@pytest.mark.asyncio
 async def test_stop_current_process_terminates_running_process():
     app = PipelineApp()
     mock_proc = MagicMock()
