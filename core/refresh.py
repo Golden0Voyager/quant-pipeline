@@ -373,9 +373,12 @@ class RefreshOrchestrator:
     ) -> _TaskExecution:
         adapter = self._adapters[spec.name]
         last_error: BaseException | None = None
+        published: RefreshAdapterResult | None = None
         for attempt in (1, 2):
             try:
                 adapter_result = adapter.refresh(context)
+                if adapter_result.replaced > 0:
+                    published = adapter_result
                 audit_report = self._audit.validate_task(
                     spec,
                     context,
@@ -436,11 +439,16 @@ class RefreshOrchestrator:
             str(last_error),
             source=spec.primary_source,
         )
-        metadata = {
-            "attempts": 2,
-            "retained_old_data": True,
-            "error_type": type(last_error).__name__,
-        }
+        metadata: dict[str, Any] = {"attempts": 2}
+        if published is None:
+            metadata["retained_old_data"] = True
+        else:
+            # 某次尝试已发布行后审计才失败：写入确实发生，
+            # 不能再宣称旧数据完整保留。
+            metadata["retained_old_data"] = False
+            metadata["partial_write"] = True
+            metadata["published_rows"] = published.replaced
+        metadata["error_type"] = type(last_error).__name__
         if symbols_ignored:
             metadata["symbols_ignored"] = True
         task_result.metadata = metadata
