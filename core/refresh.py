@@ -11,11 +11,12 @@ from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from core.refresh_audit import (
+    CrossSourceComparison,
     CrossSourceTolerance,
     RefreshAudit,
     RefreshAuditError,
     RefreshAuditReport,
-    cross_source_mismatches,
+    compare_cross_source_quotes,
     stratified_cross_source_sample,
 )
 from core.task_registry import TaskSpec
@@ -533,6 +534,7 @@ class RefreshOrchestrator:
             "price_tolerance": config.tolerance.price,
             "volume_tolerance": config.tolerance.volume,
             "mismatched": (),
+            "unverifiable": (),
             "still_mismatched": (),
         }
         execution.metadata["cross_source"] = summary
@@ -540,14 +542,16 @@ class RefreshOrchestrator:
             # 观察模式：只记录 + 告警，绝不降级也绝不定向重试，用于在
             # 真实数据上验证容差与口径假设（如雪球成交量 /100 换算）。
             summary["report_only"] = True
-            if not sample.symbols:
-                return execution
-            try:
-                mismatched = self._compare_quotes(
-                    verifier, sample.symbols, context.target_date, config.tolerance
-                )
-            except Exception as exc:
-                summary["error"] = str(exc)
+        if not sample.symbols:
+            return execution
+
+        try:
+            comparison = self._compare_quotes(
+                verifier, sample.symbols, context.target_date, config.tolerance
+            )
+        except Exception as exc:
+            summary["error"] = str(exc)
+            if config.report_only:
                 logger.warning(
                     "cross-source report-only check for %s against %s failed: %s",
                     spec.name,
@@ -555,36 +559,59 @@ class RefreshOrchestrator:
                     exc,
                 )
                 return execution
-            summary["mismatched"] = mismatched
-            if mismatched:
-                logger.warning(
-                    "cross-source report-only check for %s: %d/%d sampled "
-                    "symbols mismatch %s: %s",
-                    spec.name,
-                    len(mismatched),
-                    len(sample.symbols),
-                    verifier.source_name,
-                    ", ".join(mismatched),
-                )
-            return execution
-
-        if not sample.symbols:
-            return execution
-
-        try:
-            mismatched = self._compare_quotes(
-                verifier, sample.symbols, context.target_date, config.tolerance
-            )
-        except Exception as exc:
-            summary["error"] = str(exc)
             return self._degrade_cross_source(
                 spec,
                 execution,
                 f"cross-source check against {verifier.source_name} failed: "
                 f"{exc}; old data retained",
             )
-        summary["mismatched"] = mismatched
-        if not mismatched:
+
+        summary["mismatched"] = comparison.mismatched
+        summary["unverifiable"] = comparison.unverifiable
+        if comparison.unverifiable:
+            # 参考源无数据（停牌/未覆盖）：不可校验，不是分歧
+            logger.warning(
+                "cross-source check for %s: %d/%d sampled symbols are "
+                "unverifiable (no data from %s): %s",
+                spec.name,
+                len(comparison.unverifiable),
+                len(sample.symbols),
+                verifier.source_name,
+                ", ".join(comparison.unverifiable),
+            )
+        if comparison.mismatched:
+            logger.warning(
+                "cross-source check for %s: %d/%d sampled symbols mismatch "
+                "%s: %s",
+                spec.name,
+                len(comparison.mismatched),
+                len(sample.symbols),
+                verifier.source_name,
+                ", ".join(comparison.mismatched),
+            )
+
+        # 死参考源守卫：非空样本却零覆盖 ⇒ 备源挂了/配置错了，必须响亮
+        # 失败，而不是被 “unverifiable 不算分歧” 静默放过。
+        if len(comparison.unverifiable) == len(sample.symbols):
+            summary["reference_dead"] = True
+            logger.warning(
+                "cross-source reference %s returned no data for any sampled "
+                "symbol of %s",
+                verifier.source_name,
+                spec.name,
+            )
+            if config.report_only:
+                return execution
+            return self._degrade_cross_source(
+                spec,
+                execution,
+                f"cross-source reference {verifier.source_name} returned no "
+                "data for any sampled symbol; old data retained",
+            )
+
+        # 重试与降级只看真实分歧：unverifiable 自身绝不触发两者
+        mismatched = comparison.mismatched
+        if config.report_only or not mismatched:
             return execution
 
         policy = spec.refresh_policy
@@ -609,7 +636,7 @@ class RefreshOrchestrator:
         try:
             retry_result = self._adapters[spec.name].refresh(retry_context)
             self._audit.validate_task(spec, retry_context, retry_result)
-            still_mismatched = self._compare_quotes(
+            recheck = self._compare_quotes(
                 verifier, mismatched, context.target_date, config.tolerance
             )
         except Exception as exc:
@@ -619,12 +646,14 @@ class RefreshOrchestrator:
                 execution,
                 f"cross-source targeted retry failed: {exc}; old data retained",
             )
-        summary["still_mismatched"] = still_mismatched
-        if still_mismatched:
+        # 复核沿用同一拆分：重试后变为不可校验的股票不算仍分歧
+        summary["still_mismatched"] = recheck.mismatched
+        summary["still_unverifiable"] = recheck.unverifiable
+        if recheck.mismatched:
             return self._degrade_cross_source(
                 spec,
                 execution,
-                f"{len(still_mismatched)} symbols still mismatch "
+                f"{len(recheck.mismatched)} symbols still mismatch "
                 f"{verifier.source_name} after one targeted retry; "
                 "old data retained",
             )
@@ -636,10 +665,10 @@ class RefreshOrchestrator:
         symbols: tuple[str, ...],
         target_date: str,
         tolerance: CrossSourceTolerance,
-    ) -> tuple[str, ...]:
+    ) -> CrossSourceComparison:
         primary = verifier.primary_quotes(symbols, target_date)
         reference = verifier.reference_quotes(symbols, target_date)
-        return cross_source_mismatches(symbols, primary, reference, tolerance)
+        return compare_cross_source_quotes(symbols, primary, reference, tolerance)
 
     @staticmethod
     def _degrade_cross_source(
