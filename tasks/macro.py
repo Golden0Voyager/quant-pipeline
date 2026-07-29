@@ -810,3 +810,52 @@ def update_us_treasury(db: DatabaseInterface) -> dict:
     except Exception as e:
         logger.error(f"❌ 中美国债收益率更新失败: {e}")
         return {"saved": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_limit_pool_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取指定交易日涨停池 + 跌停池并合并归一化。
+
+    两池均权威空返回 []（空池 ≠ 源失败）；源异常直接上抛，
+    不得吞掉后当空池处理（由适配器/编排器落实保留旧数据）。
+    """
+    date_compact = trade_date.replace("-", "")
+    records: list[dict] = []
+
+    up_df = ak.stock_zt_pool_em(date=date_compact)
+    if up_df is not None and not up_df.empty:
+        for _, row in up_df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "ts_code": str(row.get("代码", "")).strip(),
+                "name": str(row.get("名称", "")).strip(),
+                "pct_change": row.get("涨跌幅"),
+                "close_price": row.get("最新价"),
+                "turnover_rate": row.get("换手率"),
+                "limit_type": "涨停",
+                "board_count": row.get("连板数"),
+                "industry": str(row.get("所属行业", "")).strip(),
+                "data_source": "akshare",
+            })
+
+    down_df = ak.stock_zt_pool_dtgc_em(date=date_compact)
+    if down_df is not None and not down_df.empty:
+        for _, row in down_df.iterrows():
+            records.append({
+                "trade_date": trade_date,
+                "ts_code": str(row.get("代码", "")).strip(),
+                "name": str(row.get("名称", "")).strip(),
+                "pct_change": row.get("涨跌幅"),
+                "close_price": row.get("最新价"),
+                "turnover_rate": row.get("换手率"),
+                "limit_type": "跌停",
+                "board_count": None,
+                "industry": str(row.get("所属行业", "")).strip(),
+                "data_source": "akshare",
+            })
+
+    return records

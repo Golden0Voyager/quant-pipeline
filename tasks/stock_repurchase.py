@@ -142,3 +142,57 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
     saved = db.save_stock_repurchase_batch(validated_records)
     logger.info(f"✅ 股票回购数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_stock_repurchase_records() -> list[dict]:
+    """收盘刷新专用：抓取全量回购快照并归一化，附 64 位稳定源键。
+
+    权威空返回 []；源异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    from core.source_record_key import STOCK_REPURCHASE_SOURCE_KEY_FIELDS, source_record_key
+
+    df = ak.stock_repurchase_em()
+    if df is None or df.empty:
+        return []
+
+    df = df.rename(columns=_COLUMN_MAP)
+    keep = {"trade_date", "stock_code", "stock_name",
+            "repurchase_amount", "repurchase_price", "repurchase_price_lower",
+            "repurchase_price_upper", "repurchase_quantity", "progress_status"}
+    available = [c for c in keep if c in df.columns]
+    df = df[available].drop_duplicates()
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        df = df[df["trade_date"].notna()]
+        df["trade_date"] = df["trade_date"].dt.strftime("%Y-%m-%d")
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        trade_date = row.get("trade_date")
+        stock_code = _to_text(row.get("stock_code"))
+        if not trade_date or not stock_code:
+            continue
+        price_lower = _to_float(row.get("repurchase_price_lower"))
+        price_upper = _to_float(row.get("repurchase_price_upper"))
+        price = _to_float(row.get("repurchase_price"))
+        if price is None:
+            price = price_upper
+        record = {
+            "trade_date": trade_date,
+            "stock_code": stock_code,
+            "stock_name": _to_text(row.get("stock_name")),
+            "repurchase_amount": _to_float(row.get("repurchase_amount")),
+            "repurchase_price": price,
+            "repurchase_price_lower": price_lower,
+            "repurchase_price_upper": price_upper,
+            "repurchase_quantity": _to_int(row.get("repurchase_quantity")),
+            "progress_status": _to_text(row.get("progress_status")) or None,
+        }
+        record["source_record_key"] = source_record_key(record, STOCK_REPURCHASE_SOURCE_KEY_FIELDS)
+        records.append(record)
+    return records

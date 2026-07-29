@@ -1,0 +1,804 @@
+"""Behavior tests for the close-refresh orchestrator."""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+
+from core.refresh import (
+    CrossSourceCheckConfig,
+    RefreshAdapterResult,
+    RefreshContext,
+    RefreshOrchestrator,
+)
+from core.refresh_audit import (
+    CROSS_SOURCE_BOARDS,
+    CrossSourceTolerance,
+    RefreshAuditError,
+    stratified_cross_source_sample,
+)
+from core.task_registry import (
+    Cadence,
+    DateStrategy,
+    EmptyPolicy,
+    RefreshKind,
+    RefreshPolicy,
+    TaskSpec,
+)
+from core.task_result import TaskStatus
+
+
+def _spec(
+    name: str,
+    *,
+    tables: tuple[str, ...] | None = None,
+    dependencies: tuple[str, ...] = (),
+    supports_symbols: bool = False,
+) -> TaskSpec:
+    task_tables = tables or (f"{name}_table",)
+    return TaskSpec(
+        name=name,
+        callable=None,
+        tables=task_tables,
+        cadence=Cadence.TRADING_DAY,
+        date_columns=dict.fromkeys(task_tables, "trade_date"),
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="test",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            dict.fromkeys(task_tables, ("code", "trade_date")),
+            dict.fromkeys(task_tables, ("code", "trade_date")),
+            dependencies=dependencies,
+            supports_symbols=supports_symbols,
+        ),
+    )
+
+
+def _adapter_result(
+    task_name: str,
+    *,
+    changed_symbols: tuple[str, ...] = (),
+    failed_symbols: tuple[str, ...] = (),
+    metadata: Mapping[str, Any] | None = None,
+) -> RefreshAdapterResult:
+    return RefreshAdapterResult(
+        task_name=task_name,
+        as_of_date="2026-07-27",
+        fetched=1,
+        validated=1,
+        replaced=1,
+        retained=len(failed_symbols),
+        failed_symbols=failed_symbols,
+        changed_symbols=changed_symbols,
+        metadata=metadata or {},
+    )
+
+
+@dataclass
+class RecordingStore:
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+    def start_run(self, **kwargs: Any) -> None:
+        self.calls.append(("start", kwargs))
+
+    def record_task_result(self, **kwargs: Any) -> None:
+        self.calls.append(("task", kwargs))
+
+    def finish_run(self, **kwargs: Any) -> None:
+        self.calls.append(("finish", kwargs))
+
+
+@dataclass
+class RecordCrashStore(RecordingStore):
+    finish_error: bool = False
+
+    def record_task_result(self, **kwargs: Any) -> None:
+        self.calls.append(("task", kwargs))
+        raise sqlite3.OperationalError("database is locked")
+
+    def finish_run(self, **kwargs: Any) -> None:
+        if self.finish_error:
+            raise sqlite3.OperationalError("finish failed")
+        self.calls.append(("finish", kwargs))
+
+
+@dataclass
+class RecordingAdapter:
+    task_name: str
+    calls: list[RefreshContext]
+    result: RefreshAdapterResult | None = None
+    failures_before_success: int = 0
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        self.calls.append(context)
+        if len(self.calls) <= self.failures_before_success:
+            raise ConnectionError(f"{self.task_name} unavailable")
+        return self.result or _adapter_result(self.task_name)
+
+
+def _context(
+    *,
+    hour_utc: int = 8,
+    minute: int = 0,
+    symbols: tuple[str, ...] | None = None,
+    allow_pre_close: bool = False,
+) -> RefreshContext:
+    return RefreshContext(
+        target_date="2026-07-27",
+        started_at=datetime(2026, 7, 27, hour_utc, minute, tzinfo=UTC),
+        run_id="refresh-1",
+        symbols=symbols,
+        allow_pre_close=allow_pre_close,
+    )
+
+
+def test_pre_close_gate_uses_shanghai_time_and_does_not_start_run() -> None:
+    store = RecordingStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+    )
+
+    result = orchestrator.run(_context(hour_utc=7, minute=59))
+
+    assert result.status is TaskStatus.FAILED
+    assert result.exit_failure is True
+    assert "16:00" in (result.error or "")
+    assert calls == []
+    assert store.calls == []
+
+
+def test_force_equivalent_context_allows_pre_close_and_preserves_target_date() -> None:
+    store = RecordingStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+        clock=lambda: datetime(2026, 7, 27, 8, 30, tzinfo=UTC),
+    )
+
+    result = orchestrator.run(_context(hour_utc=7, minute=59, allow_pre_close=True))
+
+    assert result.status is TaskStatus.SUCCESS
+    assert calls[0].target_date == "2026-07-27"
+    assert store.calls[0] == (
+        "start",
+        {
+            "run_id": "refresh-1",
+            "target_date": "2026-07-27",
+            "started_at": "2026-07-27T07:59:00+00:00",
+            "symbols": None,
+        },
+    )
+
+
+def test_dependencies_are_topological_and_shared_table_writers_are_serial() -> None:
+    order: list[str] = []
+
+    @dataclass
+    class OrderedAdapter:
+        name: str
+
+        def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+            order.append(self.name)
+            return _adapter_result(self.name)
+
+    base = _spec("base", tables=("shared",))
+    overlay = _spec(
+        "overlay",
+        tables=("shared",),
+        dependencies=("base",),
+    )
+    derived = _spec("derived", dependencies=("overlay",))
+    orchestrator = RefreshOrchestrator(
+        specs=(derived, overlay, base),
+        adapters={
+            "base": OrderedAdapter("base"),
+            "overlay": OrderedAdapter("overlay"),
+            "derived": OrderedAdapter("derived"),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert order == ["base", "overlay", "derived"]
+
+
+def test_failed_dependency_is_blocked_but_independent_task_continues() -> None:
+    store = RecordingStore()
+    base_calls: list[RefreshContext] = []
+    dependent_calls: list[RefreshContext] = []
+    independent_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("dependent", dependencies=("base",)),
+            _spec("independent"),
+            _spec("base"),
+        ),
+        adapters={
+            "base": RecordingAdapter(
+                "base",
+                base_calls,
+                failures_before_success=2,
+            ),
+            "dependent": RecordingAdapter("dependent", dependent_calls),
+            "independent": RecordingAdapter("independent", independent_calls),
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    assert result.exit_failure is True
+    assert len(base_calls) == 2
+    assert dependent_calls == []
+    assert len(independent_calls) == 1
+    assert result.metadata["task_statuses"] == {
+        "base": "failed",
+        "dependent": "failed",
+        "independent": "success",
+    }
+    task_records = {
+        kwargs["task_name"]: kwargs
+        for call, kwargs in store.calls
+        if call == "task"
+    }
+    assert task_records["dependent"]["metadata"]["blocked_by"] == ("base",)
+    assert store.calls[-1][1]["status"] == "degraded"
+
+
+def test_symbol_scope_is_forwarded_only_to_supported_tasks() -> None:
+    supported_calls: list[RefreshContext] = []
+    full_market_calls: list[RefreshContext] = []
+    store = RecordingStore()
+    symbols = ("000001.SZ", "600000.SH")
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("supported", supports_symbols=True),
+            _spec("full_market"),
+        ),
+        adapters={
+            "supported": RecordingAdapter("supported", supported_calls),
+            "full_market": RecordingAdapter("full_market", full_market_calls),
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context(symbols=symbols))
+
+    assert result.status is TaskStatus.SUCCESS
+    assert supported_calls[0].symbols == symbols
+    assert full_market_calls[0].symbols is None
+    records = [
+        kwargs for call, kwargs in store.calls if call == "task"
+    ]
+    assert records[1]["metadata"]["symbols_ignored"] is True
+
+
+def test_changed_symbols_flow_to_supported_dependent_task() -> None:
+    base_calls: list[RefreshContext] = []
+    derived_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("base", supports_symbols=True),
+            _spec(
+                "derived",
+                dependencies=("base",),
+                supports_symbols=True,
+            ),
+        ),
+        adapters={
+            "base": RecordingAdapter(
+                "base",
+                base_calls,
+                result=_adapter_result(
+                    "base",
+                    changed_symbols=("000001.SZ", "600000.SH"),
+                ),
+            ),
+            "derived": RecordingAdapter("derived", derived_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context(symbols=("000001.SZ", "300001.SZ")))
+
+    assert result.status is TaskStatus.SUCCESS
+    assert derived_calls[0].symbols == ("000001.SZ",)
+
+
+def test_empty_upstream_changed_set_keeps_full_market_scope_for_dependent() -> None:
+    base_calls: list[RefreshContext] = []
+    derived_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("base", supports_symbols=True),
+            _spec(
+                "derived",
+                dependencies=("base",),
+                supports_symbols=True,
+            ),
+        ),
+        adapters={
+            "base": RecordingAdapter("base", base_calls),
+            "derived": RecordingAdapter("derived", derived_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert derived_calls[0].symbols is None
+
+
+def test_nonempty_upstream_changed_set_narrows_full_market_dependent() -> None:
+    base_calls: list[RefreshContext] = []
+    derived_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(
+            _spec("base", supports_symbols=True),
+            _spec(
+                "derived",
+                dependencies=("base",),
+                supports_symbols=True,
+            ),
+        ),
+        adapters={
+            "base": RecordingAdapter(
+                "base",
+                base_calls,
+                result=_adapter_result(
+                    "base",
+                    changed_symbols=("000001.SZ", "600000.SH"),
+                ),
+            ),
+            "derived": RecordingAdapter("derived", derived_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert derived_calls[0].symbols == ("000001.SZ", "600000.SH")
+
+
+def test_store_error_mid_run_returns_failed_result_and_finishes_run_failed() -> None:
+    store = RecordCrashStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.exit_failure is True
+    assert result.metadata["error_type"] == "OperationalError"
+    finishes = [kwargs for call, kwargs in store.calls if call == "finish"]
+    assert [kwargs["status"] for kwargs in finishes] == ["failed"]
+
+
+def test_finish_run_error_does_not_mask_failed_outcome() -> None:
+    store = RecordCrashStore(finish_error=True)
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.FAILED
+    assert result.metadata["error_type"] == "OperationalError"
+
+
+class InterruptingAdapter:
+    """Adapter fake：refresh 中抛 KeyboardInterrupt，模拟人工中断。"""
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        raise KeyboardInterrupt
+
+
+def test_keyboard_interrupt_finishes_run_aborted_and_propagates() -> None:
+    """中断不得把运行行留在 'running'：落 'aborted' 后原样重抛。"""
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": InterruptingAdapter()},
+        store=store,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        orchestrator.run(_context())
+
+    assert store.calls[0][0] == "start"
+    finishes = [kwargs for call, kwargs in store.calls if call == "finish"]
+    assert [kwargs["status"] for kwargs in finishes] == ["aborted"]
+
+
+def test_finish_run_error_during_interrupt_does_not_mask_interrupt() -> None:
+    """收尾时 store 再报错也不得吞掉或替换原始中断信号。"""
+    store = RecordCrashStore(finish_error=True)
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": InterruptingAdapter()},
+        store=store,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        orchestrator.run(_context())
+
+
+def test_adapter_failure_is_retried_once_then_success_is_audited() -> None:
+    calls: list[RefreshContext] = []
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={
+            "bars": RecordingAdapter(
+                "bars",
+                calls,
+                failures_before_success=1,
+            )
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(calls) == 2
+    record = next(kwargs for call, kwargs in store.calls if call == "task")
+    assert record["metadata"]["attempts"] == 2
+
+
+class FailingAudit:
+    """Audit fake：适配器发布后必抛，模拟发布后审计失败。"""
+
+    def validate_task(self, spec, context, adapter_result):
+        raise RefreshAuditError("bars coverage 0.500 is below minimum 0.800")
+
+
+def test_publish_then_audit_failure_does_not_claim_retained_old_data() -> None:
+    """已发布行后审计才失败 → 不得谎称 retained_old_data，如实记部分写入。"""
+    store = RecordingStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+        audit=FailingAudit(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    record = _task_record(store)
+    assert record["status"] == "failed"
+    metadata = record["metadata"]
+    assert metadata["retained_old_data"] is False
+    assert metadata["partial_write"] is True
+    assert metadata["published_rows"] == 1
+
+
+def test_failure_before_any_write_claims_retained_old_data() -> None:
+    """两次尝试均在写入前失败 → retained_old_data=True 仍成立。"""
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={
+            "bars": RecordingAdapter("bars", [], failures_before_success=2),
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    record = _task_record(store)
+    assert record["status"] == "failed"
+    assert record["metadata"]["retained_old_data"] is True
+    assert "partial_write" not in record["metadata"]
+
+
+def test_failed_symbols_and_dead_source_make_run_degraded_and_retain_old_data() -> None:
+    store = RecordingStore()
+    partial_calls: list[RefreshContext] = []
+    dead_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("partial"), _spec("dead")),
+        adapters={
+            "partial": RecordingAdapter(
+                "partial",
+                partial_calls,
+                result=_adapter_result(
+                    "partial",
+                    failed_symbols=("600000.SH",),
+                ),
+            ),
+            "dead": RecordingAdapter(
+                "dead",
+                dead_calls,
+                result=RefreshAdapterResult(
+                    task_name="dead",
+                    as_of_date=None,
+                    fetched=0,
+                    validated=0,
+                    replaced=0,
+                    retained=12,
+                    failed_symbols=(),
+                    changed_symbols=(),
+                    metadata={
+                        "source_status": "dead_source",
+                        "reason": "endpoint retired",
+                    },
+                ),
+            ),
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    assert result.exit_failure is True
+    assert result.saved == 1
+    assert result.metadata["task_statuses"] == {
+        "partial": "degraded",
+        "dead": "degraded",
+    }
+    records = {
+        kwargs["task_name"]: kwargs
+        for call, kwargs in store.calls
+        if call == "task"
+    }
+    assert records["partial"]["retained"] == 1
+    assert records["dead"]["retained"] == 12
+    assert records["dead"]["failed"] == 1
+
+
+_CROSS_SYMBOLS = (
+    "600000.SH",
+    "000001.SZ",
+    "300001.SZ",
+    "688001.SH",
+    "830799.BJ",
+)
+
+
+def _quotes(
+    overrides: Mapping[str, dict[str, float]] | None = None,
+) -> dict[str, dict[str, float]]:
+    quotes = {
+        symbol: {"close": 10.0, "volume": 1000.0} for symbol in _CROSS_SYMBOLS
+    }
+    quotes.update(overrides or {})
+    return quotes
+
+
+@dataclass
+class FakeVerifier:
+    primary: dict[str, dict[str, float]]
+    reference: dict[str, dict[str, float]]
+    source_name: str = "em_backup"
+    supported_boards: frozenset[str] = frozenset(CROSS_SOURCE_BOARDS)
+    primary_calls: list[tuple[str, ...]] = field(default_factory=list)
+    reference_calls: list[tuple[str, ...]] = field(default_factory=list)
+    reference_error: Exception | None = None
+
+    def primary_quotes(
+        self,
+        symbols: tuple[str, ...],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, float]]:
+        self.primary_calls.append(tuple(symbols))
+        return {
+            symbol: self.primary[symbol]
+            for symbol in symbols
+            if symbol in self.primary
+        }
+
+    def reference_quotes(
+        self,
+        symbols: tuple[str, ...],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, float]]:
+        if self.reference_error is not None:
+            raise self.reference_error
+        self.reference_calls.append(tuple(symbols))
+        return {
+            symbol: self.reference[symbol]
+            for symbol in symbols
+            if symbol in self.reference
+        }
+
+
+@dataclass
+class CrossCheckedAdapter:
+    """Full-market adapter whose targeted retry republishes reference values."""
+
+    task_name: str
+    verifier: FakeVerifier
+    changed: tuple[str, ...] = _CROSS_SYMBOLS
+    fix_on_retry: bool = True
+    calls: list[RefreshContext] = field(default_factory=list)
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        self.calls.append(context)
+        if context.symbols is None:
+            return _adapter_result(self.task_name, changed_symbols=self.changed)
+        if self.fix_on_retry:
+            for symbol in context.symbols:
+                self.verifier.primary[symbol] = dict(self.verifier.reference[symbol])
+        return _adapter_result(
+            self.task_name,
+            changed_symbols=tuple(context.symbols),
+        )
+
+
+def _cross_orchestrator(
+    adapter: CrossCheckedAdapter,
+    verifier: FakeVerifier,
+    store: RecordingStore,
+) -> RefreshOrchestrator:
+    return RefreshOrchestrator(
+        specs=(_spec("bars", supports_symbols=True),),
+        adapters={"bars": adapter},
+        store=store,
+        cross_source=CrossSourceCheckConfig(
+            task_name="bars",
+            tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+        ),
+        verifier=verifier,
+    )
+
+
+def _task_record(store: RecordingStore) -> dict[str, Any]:
+    return next(kwargs for call, kwargs in store.calls if call == "task")
+
+
+def test_cross_source_sample_is_persisted_in_task_metadata_and_deterministic() -> None:
+    samples: list[tuple[str, ...]] = []
+    for _ in range(2):
+        store = RecordingStore()
+        verifier = FakeVerifier(primary=_quotes(), reference=_quotes())
+        adapter = CrossCheckedAdapter("bars", verifier)
+
+        result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+        assert result.status is TaskStatus.SUCCESS
+        assert len(adapter.calls) == 1
+        summary = _task_record(store)["metadata"]["cross_source"]
+        assert summary["source"] == "em_backup"
+        assert summary["mismatched"] == ()
+        samples.append(summary["sampled"])
+
+    assert samples[0] == samples[1]
+    expected = stratified_cross_source_sample(
+        _CROSS_SYMBOLS,
+        target_date="2026-07-27",
+        supported_boards=frozenset(CROSS_SOURCE_BOARDS),
+    )
+    assert samples[0] == expected.symbols
+
+
+def test_cross_source_mismatch_retries_only_mismatched_symbols_once() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(
+            {
+                "300001.SZ": {"close": 10.5, "volume": 1000.0},
+                "688001.SH": {"close": 10.0, "volume": 1500.0},
+            }
+        ),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 2
+    assert adapter.calls[0].symbols is None
+    assert adapter.calls[1].symbols == ("300001.SZ", "688001.SH")
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["mismatched"] == ("300001.SZ", "688001.SH")
+    assert summary["retried_symbols"] == ("300001.SZ", "688001.SH")
+    assert summary["still_mismatched"] == ()
+
+
+def test_cross_source_retry_failure_degrades_without_full_market_rerun() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier, fix_on_retry=False)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    assert result.metadata["task_statuses"] == {"bars": "degraded"}
+    # Exactly one targeted retry; no third attempt and never a full-market
+    # rerun after the initial fetch.
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1].symbols == ("300001.SZ",)
+    record = _task_record(store)
+    assert record["status"] == "degraded"
+    # Accepted old data is retained: the record keeps the original counts.
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert summary["still_mismatched"] == ("300001.SZ",)
+
+
+def test_cross_source_verifier_error_degrades_and_retains_old_data() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        reference_error=ConnectionError("backup source down"),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    # No targeted retry when the comparison itself failed: one full fetch,
+    # never a full-market delete or rerun.
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "degraded"
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert "backup source down" in summary["error"]
+
+
+def test_cross_source_excludes_unsupported_backup_markets_explicitly() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        supported_boards=frozenset({"shanghai", "shenzhen", "chinext", "star"}),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["excluded_boards"] == ("beijing",)
+    assert "830799.BJ" not in summary["sampled"]
+    for batch in verifier.reference_calls:
+        assert "830799.BJ" not in batch
+    for batch in verifier.primary_calls:
+        assert "830799.BJ" not in batch
+
+
+def test_cross_source_config_requires_matching_verifier() -> None:
+    with pytest.raises(ValueError, match="cross-source"):
+        RefreshOrchestrator(
+            specs=(_spec("bars"),),
+            adapters={"bars": RecordingAdapter("bars", [])},
+            store=RecordingStore(),
+            cross_source=CrossSourceCheckConfig(
+                task_name="bars",
+                tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+            ),
+        )

@@ -517,3 +517,130 @@ def update_finance_flow(db: DatabaseInterface) -> dict:
     )
     logger.info(f"\n🏁 资金流向与行情数据更新完成，共保存 {total_saved} 条")
     return {"saved": total_saved, "details": results}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_south_flow_records() -> list[dict]:
+    """收盘刷新专用：抓取南向资金全历史并归一化（历史型源，适配器挑选回看分区）。
+
+    权威空返回 []；源异常直接上抛，由适配器/编排器落实保留旧数据。
+    """
+    df = ak.stock_hsgt_hist_em(symbol="南向资金")
+    if df is None or df.empty:
+        return []
+    col_map = {
+        "日期": "trade_date",
+        "板块": "market",
+        "当日成交净买额": "net_buy_amount",
+        "买入成交额": "buy_amount",
+        "卖出成交额": "sell_amount",
+        "历史累计净买额": "cumulative_net_buy",
+    }
+    rename = {k: v for k, v in col_map.items() if k in df.columns}
+    df = df.rename(columns=rename)
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "trade_date": str(row.get("trade_date", ""))[:10],
+                "market": str(row.get("market", "") or "南向").strip(),
+                "net_buy_amount": _to_float(row.get("net_buy_amount")),
+                "buy_amount": _to_float(row.get("buy_amount")),
+                "sell_amount": _to_float(row.get("sell_amount")),
+                "cumulative_net_buy": _to_float(row.get("cumulative_net_buy")),
+                "data_source": "akshare",
+            }
+        )
+    return records
+
+
+def fetch_ah_premium_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取 A/H 溢价即时快照并盖调用方指定交易日。
+
+    权威空返回 []；源异常直接上抛（不走 fallback 合成，刷新语义要求显式失败）。
+    """
+    df = ak.stock_zh_ah_spot_em()
+    if df is None or df.empty:
+        return []
+    col_map = {
+        "A股代码": "ts_code",
+        "H股代码": "h_code",
+        "代码": "ts_code",
+        "名称": "name",
+        "最新价-HKD": "h_price",
+        "最新价(HKD)": "h_price",
+        "最新价-RMB": "a_price",
+        "最新价": "a_price",
+        "溢价": "premium",
+        "溢价率": "premium",
+    }
+    rename = {k: v for k, v in col_map.items() if k in df.columns}
+    df = df.rename(columns=rename)
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "trade_date": trade_date,
+                "ts_code": str(row.get("ts_code", "")).strip(),
+                "h_code": str(row.get("h_code", "")).strip(),
+                "name": str(row.get("name", "")).strip(),
+                "h_price": _to_float(row.get("h_price")),
+                "a_price": _to_float(row.get("a_price")),
+                "premium": _to_float(row.get("premium")),
+                "data_source": "akshare",
+            }
+        )
+    return records
+
+
+def fetch_etf_daily_records(code: str, name: str, trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取单只 ETF 目标交易日日线并归一化。
+
+    只请求目标日单日窗口（绝不重写历史）；目标日无数据返回 []；
+    源异常直接上抛（不走雪球 fallback，刷新语义要求显式失败）。
+    """
+    compact = trade_date.replace("-", "")
+    df = ak.fund_etf_hist_em(
+        symbol=code,
+        period="daily",
+        start_date=compact,
+        end_date=compact,
+        adjust="qfq",
+    )
+    if df is None or df.empty:
+        return []
+    col_map = {
+        "日期": "trade_date",
+        "开盘": "open",
+        "最高": "high",
+        "最低": "low",
+        "收盘": "close",
+        "成交量": "volume",
+        "成交额": "amount",
+    }
+    rename = {k: v for k, v in col_map.items() if k in df.columns}
+    df = df.rename(columns=rename)
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        row_date = str(row.get("trade_date", ""))[:10]
+        if row_date != trade_date:
+            continue
+        records.append(
+            {
+                "trade_date": row_date,
+                "ts_code": code,
+                "name": name,
+                "open": _to_float(row.get("open")),
+                "high": _to_float(row.get("high")),
+                "low": _to_float(row.get("low")),
+                "close": _to_float(row.get("close")),
+                "volume": _to_float(row.get("volume")),
+                "amount": _to_float(row.get("amount")),
+                "data_source": "akshare",
+            }
+        )
+    return records

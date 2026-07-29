@@ -1721,3 +1721,374 @@ def test_fetch_em_spot_pagination():
         result = concept_board.update_concept_board(db)
     assert mock_session.get.call_count == 2
     assert result["board_saved"] == 150
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 7）：valuation_chain 派生任务
+# ===========================================================================
+
+_REFRESH_TARGET = "2026-07-27"
+
+
+def _create_valuation_refresh_db(db_path: str) -> None:
+    """建 fundamentals + stock_list 最小表结构（临时 SQLite）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE fundamentals (
+            ts_code TEXT, trade_date TEXT, pe_ttm REAL, pb REAL, ps_ttm REAL,
+            dividend_yield REAL, roe REAL, revenue_growth REAL,
+            profit_growth REAL, market_cap REAL)"""
+    )
+    conn.execute("CREATE TABLE stock_list (code TEXT, industry TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def _seed_refresh_fundamental(
+    db_path: str,
+    code: str,
+    trade_date: str = _REFRESH_TARGET,
+    pe: float = 10.0,
+    dividend_yield: float | None = 1.5,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO fundamentals (ts_code, trade_date, pe_ttm, pb, ps_ttm,"
+        " dividend_yield, roe, revenue_growth, profit_growth, market_cap)"
+        " VALUES (?, ?, ?, 1.2, 2.4, ?, 0.1, 0.2, 0.3, 1e9)",
+        (code, trade_date, pe, dividend_yield),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestFetchHistoricalValuationRowsForRefresh:
+    """fetch_historical_valuation_rows_for_refresh：只读目标日分区，不写库。"""
+
+    def test_reads_only_target_partition(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "600000", pe=20.0)
+        _seed_refresh_fundamental(db_path, "000001", trade_date="2026-07-24", pe=99.0)
+
+        rows = fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert {row["ts_code"] for row in rows} == {"000001", "600000"}
+        assert all(row["trade_date"] == _REFRESH_TARGET for row in rows)
+        assert all(
+            set(row) == {"ts_code", "trade_date", "pe_ttm", "pb", "ps_ttm", "dividend_yield"}
+            for row in rows
+        )
+        by_code = {row["ts_code"]: row for row in rows}
+        assert by_code["000001"]["pe_ttm"] == 10.0
+        assert by_code["000001"]["dividend_yield"] == 1.5
+
+    def test_deduplicates_codes(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "000001", pe=11.0)
+
+        rows = fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert len(rows) == 1
+
+    def test_empty_partition_returns_empty(self, tmp_path: Path):
+        from tasks.valuation_chain import fetch_historical_valuation_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+
+        assert fetch_historical_valuation_rows_for_refresh(db_path, _REFRESH_TARGET) == []
+
+
+class TestComputeSectorIndustryRowsForRefresh:
+    """compute_sector_industry_rows_for_refresh：只聚合目标日分区，不写库。"""
+
+    def test_aggregates_target_partition(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "000001", pe=10.0)
+        _seed_refresh_fundamental(db_path, "600000", pe=20.0)
+        _seed_refresh_fundamental(db_path, "600519", pe=30.0)
+        # 历史分区不得参与聚合
+        _seed_refresh_fundamental(db_path, "000001", trade_date="2026-07-24", pe=999.0)
+        conn = sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO stock_list (code, industry) VALUES (?, ?)",
+            [("000001", "银行"), ("600000", "银行"), ("600519", "白酒")],
+        )
+        conn.commit()
+        conn.close()
+
+        rows = compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        by_industry = {row["industry_name"]: row for row in rows}
+        assert set(by_industry) == {"银行", "白酒"}
+        assert by_industry["银行"]["avg_pe"] == pytest.approx(15.0)
+        assert by_industry["白酒"]["avg_pe"] == pytest.approx(30.0)
+        assert by_industry["银行"]["total_market_cap"] == pytest.approx(2e9)
+        assert all(row["trade_date"] == _REFRESH_TARGET for row in rows)
+        # 刷新模式不做 sector_fund_flow 模糊映射，排名置空
+        assert all(row["fund_inflow_rank"] is None for row in rows)
+        assert all(row["data_source"] == "derived" for row in rows)
+
+    def test_unknown_industry_bucket(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+        _seed_refresh_fundamental(db_path, "300001", pe=40.0)
+
+        rows = compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET)
+
+        assert [row["industry_name"] for row in rows] == ["未知行业"]
+
+    def test_empty_partition_returns_empty(self, tmp_path: Path):
+        from tasks.valuation_chain import compute_sector_industry_rows_for_refresh
+
+        db_path = str(tmp_path / "refresh.db")
+        _create_valuation_refresh_db(db_path)
+
+        assert compute_sector_industry_rows_for_refresh(db_path, _REFRESH_TARGET) == []
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+_T9_TARGET = "2026-07-27"
+
+
+def test_fetch_south_flow_records_full_history_shape():
+    """南向资金全历史归一化；market 空回退"南向"；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_hsgt_hist_em.return_value = pd.DataFrame(
+        [
+            {"日期": "2026-07-27", "板块": "港股通(沪)", "当日成交净买额": 10.0,
+             "买入成交额": 60.0, "卖出成交额": 50.0, "历史累计净买额": 1000.0},
+            {"日期": "2026-07-24", "板块": "", "当日成交净买额": 5.0,
+             "买入成交额": 30.0, "卖出成交额": 25.0, "历史累计净买额": 990.0},
+        ]
+    )
+    with patch.object(finance_flow, "ak", fake_ak):
+        records = finance_flow.fetch_south_flow_records()
+
+    fake_ak.stock_hsgt_hist_em.assert_called_once_with(symbol="南向资金")
+    assert len(records) == 2
+    assert records[0]["trade_date"] == "2026-07-27"
+    assert records[0]["market"] == "港股通(沪)"
+    assert records[1]["market"] == "南向"
+    assert records[0]["net_buy_amount"] == 10.0
+
+    fake_ak.stock_hsgt_hist_em.side_effect = ConnectionError("em down")
+    with patch.object(finance_flow, "ak", fake_ak), pytest.raises(ConnectionError):
+        finance_flow.fetch_south_flow_records()
+
+
+def test_fetch_ah_premium_records_stamps_target_date():
+    """A/H 溢价即时快照 → trade_date 用调用方指定日期；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_ah_spot_em.return_value = pd.DataFrame(
+        [{"代码": "601318", "名称": "中国平安", "H股代码": "02318",
+          "最新价": 50.0, "最新价-HKD": 40.0, "溢价率": 25.0}]
+    )
+    with patch.object(finance_flow, "ak", fake_ak):
+        records = finance_flow.fetch_ah_premium_records(_T9_TARGET)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["trade_date"] == _T9_TARGET
+    assert rec["ts_code"] == "601318"
+    assert rec["h_code"] == "02318"
+    assert rec["premium"] == 25.0
+
+    fake_ak.stock_zh_ah_spot_em.side_effect = ConnectionError("em down")
+    with patch.object(finance_flow, "ak", fake_ak), pytest.raises(ConnectionError):
+        finance_flow.fetch_ah_premium_records(_T9_TARGET)
+
+
+def test_fetch_etf_daily_records_single_target_day():
+    """单只 ETF 只抓目标日；命中返回单行 legacy 形状；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.fund_etf_hist_em.return_value = pd.DataFrame(
+        [{"日期": "2026-07-27", "开盘": 1.0, "最高": 1.2, "最低": 0.9,
+          "收盘": 1.1, "成交量": 100.0, "成交额": 110.0}]
+    )
+    with patch.object(finance_flow, "ak", fake_ak):
+        records = finance_flow.fetch_etf_daily_records("510050", "上证50ETF", _T9_TARGET)
+
+    fake_ak.fund_etf_hist_em.assert_called_once_with(
+        symbol="510050", period="daily",
+        start_date="20260727", end_date="20260727", adjust="qfq",
+    )
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["ts_code"] == "510050"
+    assert rec["name"] == "上证50ETF"
+    assert rec["trade_date"] == _T9_TARGET
+    assert rec["close"] == 1.1
+
+    fake_ak.fund_etf_hist_em.return_value = pd.DataFrame()
+    with patch.object(finance_flow, "ak", fake_ak):
+        assert finance_flow.fetch_etf_daily_records("510050", "上证50ETF", _T9_TARGET) == []
+
+    fake_ak.fund_etf_hist_em.side_effect = ConnectionError("em down")
+    with patch.object(finance_flow, "ak", fake_ak), pytest.raises(ConnectionError):
+        finance_flow.fetch_etf_daily_records("510050", "上证50ETF", _T9_TARGET)
+
+
+def test_fetch_index_daily_records_all_indices_full_history():
+    """四大指数全历史归一化（供适配器挑选回看分区）；任一指数异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_zh_index_daily_tx.return_value = pd.DataFrame(
+        [
+            {"date": "2026-07-24", "open": 1.0, "high": 2.0, "low": 0.5,
+             "close": 1.5, "volume": 100.0},
+            {"date": "2026-07-27", "open": 1.5, "high": 2.5, "low": 1.0,
+             "close": 2.0, "volume": 200.0},
+        ]
+    )
+    with patch.object(index_chain, "ak", fake_ak):
+        records = index_chain.fetch_index_daily_records()
+
+    assert fake_ak.stock_zh_index_daily_tx.call_count == 4
+    assert len(records) == 8  # 4 指数 × 2 日
+    codes = {r["index_code"] for r in records}
+    assert codes == {"sh000001", "sz399001", "sz399006", "sh000688"}
+    dates = {r["trade_date"] for r in records}
+    assert dates == {"2026-07-24", "2026-07-27"}
+    assert all(r["close"] is not None for r in records)
+
+    fake_ak.stock_zh_index_daily_tx.side_effect = ConnectionError("tx down")
+    with patch.object(index_chain, "ak", fake_ak), pytest.raises(ConnectionError):
+        index_chain.fetch_index_daily_records()
+
+
+def test_fetch_market_valuation_records_merges_by_date():
+    """PE/PB/股债利差按日期合并；带 data_source 与 data_date；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_a_ttm_lyr.return_value = pd.DataFrame(
+        [{"date": "2026-07-27", "middlePETTM": 30.0,
+          "quantileInAllHistoryMiddlePeTtm": 0.6, "middlePELYR": 32.0}]
+    )
+    fake_ak.stock_a_all_pb.return_value = pd.DataFrame(
+        [{"date": "2026-07-27", "middlePB": 2.5,
+          "quantileInAllHistoryMiddlePB": 0.4}]
+    )
+    fake_ak.stock_ebs_lg.return_value = pd.DataFrame(
+        [{"日期": "2026-07-27", "沪深300指数": 4000.0,
+          "股债利差": 0.05, "股债利差均线": 0.04}]
+    )
+    with patch.object(market_valuation, "ak", fake_ak):
+        records = market_valuation.fetch_market_valuation_records(_T9_TARGET)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["date"] == "2026-07-27"
+    assert rec["pe_median"] == 30.0
+    assert rec["pb_median"] == 2.5
+    assert rec["equity_bond_spread"] == 0.05
+    assert rec["data_date"] == _T9_TARGET
+    assert rec["data_source"] == "legu"
+
+    fake_ak.stock_a_ttm_lyr.side_effect = ConnectionError("legu down")
+    with patch.object(market_valuation, "ak", fake_ak), pytest.raises(ConnectionError):
+        market_valuation.fetch_market_valuation_records(_T9_TARGET)
+
+
+def test_fetch_cb_quotation_records_stamps_updated_at():
+    """可转债行情快照 → 附 updated_at；空快照返回 []；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.bond_cb_jsl.return_value = pd.DataFrame(
+        [{"代码": "113001", "转债名称": "测试转债", "现价": 110.0,
+          "转股溢价率": 5.0, "双低": 115.0, "到期时间": "2030-01-01"}]
+    )
+    stamp = "2026-07-27T16:30:00+08:00"
+    with patch.object(convertible_bond, "ak", fake_ak):
+        records = convertible_bond.fetch_cb_quotation_records(stamp)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["ts_code"] == "113001"
+    assert rec["price"] == 110.0
+    assert rec["updated_at"] == stamp
+
+    fake_ak.bond_cb_jsl.return_value = pd.DataFrame()
+    with patch.object(convertible_bond, "ak", fake_ak):
+        assert convertible_bond.fetch_cb_quotation_records(stamp) == []
+
+    fake_ak.bond_cb_jsl.side_effect = ConnectionError("jsl down")
+    with patch.object(convertible_bond, "ak", fake_ak), pytest.raises(ConnectionError):
+        convertible_bond.fetch_cb_quotation_records(stamp)
+
+
+def test_fetch_cb_redeem_records_stamps_updated_at():
+    """可转债强赎快照 → 附 updated_at；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.bond_cb_redeem_jsl.return_value = pd.DataFrame(
+        [{"代码": "113001", "名称": "测试转债", "强赎状态": "已公告强赎",
+          "强赎价": 100.5, "最后交易日": "2026-08-10"}]
+    )
+    stamp = "2026-07-27T16:30:00+08:00"
+    with patch.object(convertible_bond, "ak", fake_ak):
+        records = convertible_bond.fetch_cb_redeem_records(stamp)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["ts_code"] == "113001"
+    assert rec["redeem_flag"] == "已公告强赎"
+    assert rec["updated_at"] == stamp
+
+    fake_ak.bond_cb_redeem_jsl.side_effect = ConnectionError("jsl down")
+    with patch.object(convertible_bond, "ak", fake_ak), pytest.raises(ConnectionError):
+        convertible_bond.fetch_cb_redeem_records(stamp)
+
+
+def test_fetch_cb_index_records_full_history():
+    """可转债等权指数全历史归一化；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.bond_cb_index_jsl.return_value = pd.DataFrame(
+        [
+            {"price_dt": "2026-07-24", "price": 2000.0, "volume": 500.0},
+            {"price_dt": "2026-07-27", "price": 2010.0, "volume": 520.0},
+        ]
+    )
+    with patch.object(convertible_bond, "ak", fake_ak):
+        records = convertible_bond.fetch_cb_index_records()
+
+    assert len(records) == 2
+    assert records[1]["trade_date"] == "2026-07-27"
+    assert records[1]["index_code"] == "JSL_EW"
+    assert records[1]["close"] == 2010.0
+
+    fake_ak.bond_cb_index_jsl.side_effect = ConnectionError("jsl down")
+    with patch.object(convertible_bond, "ak", fake_ak), pytest.raises(ConnectionError):
+        convertible_bond.fetch_cb_index_records()
+
+
+def test_fetch_concept_board_records_overrides_trade_date():
+    """概念板块快照 → trade_date 覆写为目标日；源异常上抛。"""
+    spot = [
+        {"trade_date": "2026-07-28", "concept_code": "BK0001", "concept_name": "AI",
+         "pct_change": 1.0, "turnover": 2.0, "up_count": 10, "down_count": 5,
+         "data_source": "em"},
+    ]
+    with patch.object(concept_board, "_fetch_em_spot", return_value=spot):
+        records = concept_board.fetch_concept_board_records(_T9_TARGET)
+
+    assert len(records) == 1
+    assert records[0]["trade_date"] == _T9_TARGET
+    assert records[0]["concept_code"] == "BK0001"
+
+    with patch.object(
+        concept_board, "_fetch_em_spot", side_effect=ConnectionError("em down")
+    ), pytest.raises(ConnectionError):
+        concept_board.fetch_concept_board_records(_T9_TARGET)

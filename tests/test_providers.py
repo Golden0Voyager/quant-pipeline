@@ -1,6 +1,8 @@
 """Tests for providers.py with mocked dependencies."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pandas as pd
 
 
@@ -208,3 +210,20 @@ def test_loader_provider_with_params():
     provider = SmartMoneyLoaderProvider(use_cache=False)
     result = provider.get_daily_bars("000001.SZ", start_date="20240101", end_date="20240131")
     assert result is not None
+
+
+def test_loader_provider_forwards_use_cache_to_data_loader():
+    """use_cache 必须透传到本地 DataLoader 适配层（收盘刷新依赖非缓存构造）。"""
+    import providers
+
+    captured: list[bool] = []
+
+    class RecordingDataLoader:
+        def __init__(self, use_cache: bool = True):
+            captured.append(use_cache)
+
+    with patch.object(providers, "DataLoader", RecordingDataLoader):
+        providers.SmartMoneyLoaderProvider(use_cache=False)
+        providers.SmartMoneyLoaderProvider()
+
+    assert captured == [False, True]

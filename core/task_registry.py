@@ -50,6 +50,39 @@ class EmptyPolicy(StrEnum):
     FAIL = "fail"
 
 
+class RefreshKind(StrEnum):
+    """How a task safely replaces its close-refresh output."""
+
+    REMOTE_DATE_SNAPSHOT = "remote_date_snapshot"
+    REMOTE_KEYED_UPSERT = "remote_keyed_upsert"
+    DERIVED_RECOMPUTE = "derived_recompute"
+    COMPOSITE_ATOMIC = "composite_atomic"
+    REMOTE_RUN_SNAPSHOT = "remote_run_snapshot"
+
+
+class DateStrategy(StrEnum):
+    """Which date boundary validates a close-refresh result."""
+
+    EXACT_TARGET = "exact_target"
+    LATEST_AVAILABLE_WITHIN_LOOKBACK = "latest_available_within_lookback"
+    RUN_SNAPSHOT = "run_snapshot"
+
+
+@dataclass(frozen=True)
+class RefreshPolicy:
+    """Explicit close-refresh contract for one trading-day task."""
+
+    kind: RefreshKind
+    date_strategy: DateStrategy
+    natural_keys: Mapping[str, tuple[str, ...]]
+    required_fields: Mapping[str, tuple[str, ...]]
+    dependencies: tuple[str, ...] = ()
+    supports_symbols: bool = False
+    minimum_coverage: float | None = None
+    cache_namespace: str | None = None
+    lookback_days: int = 0
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     """Descriptor for one pipeline task.
@@ -89,6 +122,7 @@ class TaskSpec:
     fallback_sources: tuple[str, ...] = ()
     grace_period_days: int = 3
     display_label: str = ""
+    refresh_policy: RefreshPolicy | None = None
 
 
 # ── derived views (computed from TASK_REGISTRY) ────────────────────────
@@ -120,6 +154,15 @@ def table_date_columns() -> dict[str, str]:
     return out
 
 
+def refreshable_trading_tasks() -> tuple[TaskSpec, ...]:
+    """Return the trading-day tasks explicitly eligible for close refresh."""
+    return tuple(
+        spec
+        for spec in TASK_REGISTRY
+        if spec.cadence is Cadence.TRADING_DAY and spec.refresh_policy is not None
+    )
+
+
 # ── registry ───────────────────────────────────────────────────────────
 
 # fmt: off
@@ -144,6 +187,15 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW_ON_NON_TRADING_DAY,
         primary_source="akshare",
         display_label="日线行情",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"daily_bars": ("ts_code", "trade_date")},
+            {"daily_bars": ("ts_code", "trade_date", "open", "high", "low", "close", "volume", "amount")},
+            supports_symbols=True,
+            minimum_coverage=0.8,
+            cache_namespace="daily_bars",
+        ),
     ),
     TaskSpec(
         name="update_indicators",
@@ -154,6 +206,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW_ON_NON_TRADING_DAY,
         primary_source="akshare",
         display_label="技术指标",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.DERIVED_RECOMPUTE,
+            DateStrategy.EXACT_TARGET,
+            {"indicators": ("ts_code", "trade_date")},
+            {"indicators": ("ts_code", "trade_date")},
+            dependencies=("update_bars",),
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_fundamentals",
@@ -164,6 +224,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="基本面数据",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"fundamentals": ("ts_code", "trade_date")},
+            {"fundamentals": ("ts_code", "trade_date")},
+            supports_symbols=True,
+            minimum_coverage=0.8,
+        ),
     ),
     TaskSpec(
         name="update_market_snapshot",
@@ -174,6 +242,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="xueqiu",
         display_label="行情快照",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"fundamentals": ("ts_code", "trade_date")},
+            {"fundamentals": ("ts_code", "trade_date")},
+            dependencies=("update_fundamentals",),
+            minimum_coverage=0.4,
+        ),
     ),
     TaskSpec(
         name="update_fund_flow",
@@ -184,6 +260,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="资金流向",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"fund_flow": ("trade_date", "ts_code")},
+            {"fund_flow": ("trade_date", "ts_code")},
+            supports_symbols=True,
+            minimum_coverage=0.8,
+        ),
     ),
     TaskSpec(
         name="update_margin_trading",
@@ -194,6 +278,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="融资融券",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"margin_trading": ("trade_date", "ts_code")},
+            {"margin_trading": ("trade_date", "ts_code")},
+            supports_symbols=True,
+            lookback_days=3,
+        ),
     ),
     TaskSpec(
         name="update_dragon_tiger",
@@ -204,6 +296,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="龙虎榜",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"dragon_tiger": ("source_record_key",)},
+            {"dragon_tiger": ("source_record_key", "trade_date", "ts_code")},
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_block_trade",
@@ -214,6 +313,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="大宗交易",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"block_trade": ("source_record_key",)},
+            {"block_trade": ("source_record_key", "trade_date", "ts_code")},
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_sector_fund_flow",
@@ -224,6 +330,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="板块资金",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_RUN_SNAPSHOT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"sector_fund_flow": ("trade_date", "sector_name")},
+            {"sector_fund_flow": ("trade_date", "sector_name")},
+        ),
     ),
     TaskSpec(
         name="update_shareholder_count",
@@ -264,6 +376,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="历史估值",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.DERIVED_RECOMPUTE,
+            DateStrategy.EXACT_TARGET,
+            {"historical_valuation": ("ts_code", "trade_date")},
+            {"historical_valuation": ("ts_code", "trade_date")},
+            dependencies=("update_fundamentals", "update_market_snapshot"),
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_sector_industry",
@@ -274,6 +394,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="行业对比",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.DERIVED_RECOMPUTE,
+            DateStrategy.EXACT_TARGET,
+            {"sector_industry": ("trade_date", "industry_name")},
+            {"sector_industry": ("trade_date", "industry_name")},
+            dependencies=("update_fundamentals",),
+        ),
     ),
     TaskSpec(
         name="update_industry",
@@ -295,6 +422,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="北向资金",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"north_flow": ("trade_date", "market")},
+            {"north_flow": ("trade_date", "market")},
+        ),
     ),
     TaskSpec(
         name="update_north_hold",
@@ -315,6 +448,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="南向资金",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"south_flow": ("trade_date", "market")},
+            {"south_flow": ("trade_date", "market")},
+            lookback_days=3,
+        ),
     ),
     TaskSpec(
         name="update_ah_premium",
@@ -325,6 +465,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="AH溢价",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_RUN_SNAPSHOT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"ah_premium": ("trade_date", "ts_code")},
+            {"ah_premium": ("trade_date", "ts_code")},
+        ),
     ),
     TaskSpec(
         name="update_etf_daily",
@@ -335,6 +481,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="ETF日线",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"etf_daily": ("ts_code", "trade_date")},
+            {"etf_daily": ("ts_code", "trade_date", "close")},
+            minimum_coverage=0.8,
+        ),
     ),
     TaskSpec(
         name="update_index_daily",
@@ -345,6 +498,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="指数日线",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"index_daily": ("trade_date", "index_code")},
+            {"index_daily": ("trade_date", "index_code", "close")},
+            lookback_days=3,
+        ),
     ),
     # ── Convertible bonds ──────────────────────────────────────────
     TaskSpec(
@@ -356,6 +516,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="可转债行情",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_RUN_SNAPSHOT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"cb_quotation": ("ts_code",)},
+            {"cb_quotation": ("ts_code", "price")},
+        ),
     ),
     TaskSpec(
         name="update_cb_redeem",
@@ -366,6 +532,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="可转债强赎",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_RUN_SNAPSHOT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"cb_redeem": ("ts_code",)},
+            {"cb_redeem": ("ts_code", "redeem_flag")},
+        ),
     ),
     TaskSpec(
         name="update_cb_index",
@@ -376,6 +548,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="可转债指数",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"cb_index": ("trade_date", "index_code")},
+            {"cb_index": ("trade_date", "index_code", "close")},
+            lookback_days=3,
+        ),
     ),
     # ── Corporate actions ──────────────────────────────────────────
     TaskSpec(
@@ -407,6 +586,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="涨跌停",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"limit_up_down": ("trade_date", "ts_code")},
+            {"limit_up_down": ("trade_date", "ts_code")},
+        ),
     ),
     TaskSpec(
         name="update_dividend_summary",
@@ -513,6 +698,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="概念板块",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_RUN_SNAPSHOT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"concept_board": ("trade_date", "concept_code")},
+            {"concept_board": ("trade_date", "concept_code")},
+        ),
     ),
     TaskSpec(
         name="update_concept_member",
@@ -544,20 +735,42 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="大盘估值",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"market_valuation": ("date",)},
+            {"market_valuation": ("date", "data_source")},
+            lookback_days=3,
+        ),
     ),
     # ── Sector derivatives ─────────────────────────────────────────
     TaskSpec(
         name="update_sector_derivatives",
         callable=None,
-        tables=("sector_daily", "sector_valuation"),
+        tables=("sector_daily", "sector_valuation", "index_futures_basis"),
         cadence=Cadence.TRADING_DAY,
         date_columns={
             "sector_daily": "trade_date",
             "sector_valuation": "trade_date",
+            "index_futures_basis": "trade_date",
         },
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="行业衍生",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.COMPOSITE_ATOMIC,
+            DateStrategy.EXACT_TARGET,
+            {
+                "sector_daily": ("sector_name", "trade_date"),
+                "sector_valuation": ("sector_name", "trade_date"),
+                "index_futures_basis": ("trade_date", "futures_code"),
+            },
+            {
+                "sector_daily": ("sector_name", "trade_date", "close"),
+                "sector_valuation": ("sector_name", "trade_date"),
+                "index_futures_basis": ("trade_date", "futures_code", "basis"),
+            },
+        ),
     ),
     # ── Option sentiment (Phase 2) ─────────────────────────────────
     TaskSpec(
@@ -569,6 +782,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="期权情绪",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            DateStrategy.EXACT_TARGET,
+            {"option_sentiment": ("trade_date",)},
+            {"option_sentiment": ("trade_date",)},
+        ),
     ),
     # ── Phase-2 event signals ──────────────────────────────────────
     TaskSpec(
@@ -580,6 +799,12 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="股票回购",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_KEYED_UPSERT,
+            DateStrategy.RUN_SNAPSHOT,
+            {"stock_repurchase": ("source_record_key",)},
+            {"stock_repurchase": ("source_record_key", "trade_date", "stock_code")},
+        ),
     ),
     TaskSpec(
         name="update_institution_survey",
@@ -590,6 +815,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="机构调研",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_KEYED_UPSERT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"institution_survey": ("source_record_key",)},
+            {"institution_survey": ("source_record_key", "trade_date", "stock_code")},
+            lookback_days=30,
+        ),
     ),
     TaskSpec(
         name="update_stock_pledge",
@@ -600,6 +832,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="股权质押",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.REMOTE_KEYED_UPSERT,
+            DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK,
+            {"stock_pledge": ("source_record_key",)},
+            {"stock_pledge": ("source_record_key", "trade_date", "stock_code")},
+            lookback_days=30,
+        ),
     ),
     # ── Chip distribution ──────────────────────────────────────────
     TaskSpec(
@@ -611,6 +850,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="筹码分布",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.DERIVED_RECOMPUTE,
+            DateStrategy.EXACT_TARGET,
+            {"chip_distribution": ("ts_code", "trade_date")},
+            {"chip_distribution": ("ts_code", "trade_date")},
+            dependencies=("update_bars",),
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_chip_distribution_em",
@@ -621,6 +868,14 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="筹码分布线上",
+        refresh_policy=RefreshPolicy(
+            RefreshKind.DERIVED_RECOMPUTE,
+            DateStrategy.EXACT_TARGET,
+            {"chip_distribution_em": ("ts_code", "trade_date")},
+            {"chip_distribution_em": ("ts_code", "trade_date")},
+            dependencies=("update_bars",),
+            supports_symbols=True,
+        ),
     ),
     TaskSpec(
         name="update_chip_distribution_em_fullmarket",

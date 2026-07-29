@@ -1048,7 +1048,7 @@ def test_migration_009_rebuilds_source_record_tables_and_removes_old_unique_key(
     engine.apply_pending(target_version=8)
     _create_legacy_source_record_tables(str(tmp_db))
 
-    result = engine.apply_pending()
+    result = engine.apply_pending(target_version=9)
 
     assert [item["version"] for item in result] == [9]
     repurchase_second = {
@@ -1163,3 +1163,618 @@ def test_migration_009_rolls_back_table_rebuild_when_key_generation_fails(
     assert "source_record_key" not in repurchase_columns
     assert repurchase_count == 1
     assert version_9 == (0,)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 010 (close-refresh run audit)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_migration_010_creates_refresh_audit_tables_on_fresh_database(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+
+    result = engine.apply_pending(target_version=10)
+
+    assert result[-1]["version"] == 10
+    with sqlite3.connect(str(tmp_db)) as conn:
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_runs)")
+        }
+        task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_task_runs)")
+        }
+        task_primary_key = tuple(
+            row[1]
+            for row in sorted(
+                conn.execute("PRAGMA table_info(refresh_task_runs)"),
+                key=lambda row: row[5],
+            )
+            if row[5] > 0
+        )
+    assert run_columns == {
+        "run_id",
+        "target_date",
+        "started_at",
+        "finished_at",
+        "status",
+        "symbols_json",
+    }
+    assert task_columns == {
+        "run_id",
+        "task_name",
+        "policy_kind",
+        "requested_date",
+        "as_of_date",
+        "status",
+        "fetched",
+        "validated",
+        "replaced",
+        "retained",
+        "failed",
+        "metadata_json",
+    }
+    assert task_primary_key == ("run_id", "task_name")
+
+
+def test_migration_010_indexes_refresh_run_target_date_and_task_status(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        run_indexes = {
+            row[1]: tuple(
+                column[2]
+                for column in conn.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in conn.execute("PRAGMA index_list(refresh_runs)")
+            if row[2] == 0
+        }
+        task_indexes = {
+            row[1]: tuple(
+                column[2]
+                for column in conn.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in conn.execute("PRAGMA index_list(refresh_task_runs)")
+            if row[2] == 0
+        }
+
+    assert run_indexes["idx_refresh_runs_target_date"] == ("target_date",)
+    assert task_indexes["idx_refresh_task_runs_status"] == ("status",)
+
+
+def test_migration_010_refresh_upgrade_preserves_existing_ingestion_tables(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=9)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        columns_before = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)")
+        )
+        conn.execute(
+            """INSERT INTO ingestion_runs
+               (run_id, task_name, status, started_at, finished_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "legacy-ingestion-run",
+                "update_bars",
+                "success",
+                "2026-07-28T08:00:00+00:00",
+                "2026-07-28T08:05:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    result = engine.apply_pending(target_version=10)
+
+    assert [item["version"] for item in result] == [10]
+    with sqlite3.connect(str(tmp_db)) as conn:
+        columns_after = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)")
+        )
+        legacy_row = conn.execute(
+            """SELECT run_id, task_name, status
+               FROM ingestion_runs WHERE run_id = ?""",
+            ("legacy-ingestion-run",),
+        ).fetchone()
+    assert columns_after == columns_before
+    assert legacy_row == ("legacy-ingestion-run", "update_bars", "success")
+
+
+def test_migration_010_refresh_upgrade_is_idempotent(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+
+    first = engine.apply_pending(target_version=10)
+    second = engine.apply_pending(target_version=10)
+
+    assert first[-1]["version"] == 10
+    assert second == []
+    with sqlite3.connect(str(tmp_db)) as conn:
+        applied = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 10"
+        ).fetchone()[0]
+    assert applied == 1
+
+
+def test_migration_010_refresh_failure_rolls_back_partial_schema(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=9)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute("CREATE TABLE refresh_task_runs (legacy_only TEXT)")
+        conn.commit()
+
+    with pytest.raises(MigrationError, match="no such column: status"):
+        engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        refresh_runs = conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'table' AND name = 'refresh_runs'"""
+        ).fetchone()
+        legacy_columns = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(refresh_task_runs)")
+        )
+        failure = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 10"
+        ).fetchone()
+    assert refresh_runs is None
+    assert legacy_columns == ("legacy_only",)
+    assert failure == (0,)
+
+
+def test_migration_010_refresh_status_checks_reject_invalid_states(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                """INSERT INTO refresh_runs
+                   (run_id, target_date, started_at, status)
+                   VALUES (?, ?, ?, ?)""",
+                ("invalid-run", "2026-07-27", "2026-07-28T08:00:00Z", "succes"),
+            )
+        conn.execute(
+            """INSERT INTO refresh_runs
+               (run_id, target_date, started_at, status)
+               VALUES (?, ?, ?, ?)""",
+            ("refresh-1", "2026-07-27", "2026-07-28T08:00:00Z", "running"),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                """INSERT INTO refresh_task_runs
+                   (run_id, task_name, policy_kind, requested_date, status)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    "refresh-1",
+                    "update_bars",
+                    "remote_date_snapshot",
+                    "2026-07-27",
+                    "running",
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fetched", -1),
+        ("validated", -1),
+        ("replaced", -1),
+        ("retained", -1),
+        ("failed", -1),
+        ("fetched", 1.5),
+        ("validated", 1.5),
+        ("replaced", 1.5),
+        ("retained", 1.5),
+        ("failed", 1.5),
+    ],
+)
+def test_migration_010_refresh_counter_checks_require_nonnegative_integers(
+    tmp_db,
+    field,
+    value,
+):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            """INSERT INTO refresh_runs
+               (run_id, target_date, started_at, status)
+               VALUES (?, ?, ?, ?)""",
+            ("refresh-1", "2026-07-27", "2026-07-28T08:00:00Z", "running"),
+        )
+        conn.execute(
+            """INSERT INTO refresh_task_runs
+               (run_id, task_name, policy_kind, requested_date, status)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "refresh-1",
+                "update_bars",
+                "remote_date_snapshot",
+                "2026-07-27",
+                "success",
+            ),
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            conn.execute(
+                f"UPDATE refresh_task_runs SET {field} = ?",
+                (value,),
+            )
+
+        stored = conn.execute(
+            f"SELECT {field} FROM refresh_task_runs"
+        ).fetchone()[0]
+    assert stored == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Validation — migration 011 (refresh event keys)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _create_legacy_event_tables(db_path: str) -> None:
+    """Recreate the production event-table schemas that collide on legal events."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("""
+            CREATE TABLE dragon_tiger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                close_price REAL,
+                pct_change REAL,
+                net_buy_amount REAL,
+                buy_amount REAL,
+                sell_amount REAL,
+                turnover_rate REAL,
+                market_cap REAL,
+                reason TEXT,
+                data_source TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ts_code, trade_date)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO dragon_tiger
+                (ts_code, trade_date, close_price, pct_change, net_buy_amount,
+                 buy_amount, sell_amount, turnover_rate, market_cap, reason,
+                 data_source)
+            VALUES ('600000', '2026-07-21', 10.0, 1.0, 5.0, 8.0, 3.0, 2.0,
+                    100.0, '涨幅偏离', 'akshare')
+        """)
+        conn.execute("""
+            CREATE TABLE block_trade (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                deal_price REAL,
+                close_price REAL,
+                discount_rate REAL,
+                volume REAL,
+                amount REAL,
+                buyer_branch TEXT,
+                seller_branch TEXT,
+                data_source TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ts_code, trade_date)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO block_trade
+                (ts_code, trade_date, deal_price, close_price, discount_rate,
+                 volume, amount, buyer_branch, seller_branch, data_source)
+            VALUES ('600000', '2026-07-21', 10.0, 9.5, -5.0, 100.0, 1000.0,
+                    'A', 'B', 'akshare')
+        """)
+        conn.execute("""
+            CREATE TABLE stock_pledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT,
+                stock_code TEXT,
+                stock_name TEXT,
+                pledger TEXT,
+                pledge_amount REAL,
+                pledge_ratio REAL,
+                pledge_org TEXT,
+                UNIQUE(trade_date, stock_code, pledger)
+            )
+        """)
+        # NULL pledger 在 SQLite UNIQUE 中互不相等 → 历史库积累了重复行
+        conn.execute("""
+            INSERT INTO stock_pledge
+                (trade_date, stock_code, stock_name, pledger, pledge_amount,
+                 pledge_ratio, pledge_org)
+            VALUES ('2026-07-21', '000001', '平安银行', NULL, 1000000.0, 0.05, NULL)
+        """)
+        conn.execute("""
+            INSERT INTO stock_pledge
+                (trade_date, stock_code, stock_name, pledger, pledge_amount,
+                 pledge_ratio, pledge_org)
+            VALUES ('2026-07-21', '000001', '平安银行', NULL, 1000000.0, 0.06, NULL)
+        """)
+        conn.commit()
+
+
+def _unique_index_columns(conn, table: str) -> dict[str, tuple[str, ...]]:
+    return {
+        row[1]: tuple(
+            column[2] for column in conn.execute(f"PRAGMA index_info({row[1]})")
+        )
+        for row in conn.execute(f"PRAGMA index_list({table})")
+        if row[2] == 1
+    }
+
+
+def test_migration_011_preserves_legal_same_stock_same_day_events(tmp_db):
+    from core.source_record_key import (
+        block_trade_source_key,
+        dragon_tiger_source_key,
+    )
+
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+    _create_legacy_event_tables(str(tmp_db))
+
+    result = engine.apply_pending(target_version=11)
+
+    assert [item["version"] for item in result] == [11]
+    second_dragon = {
+        "ts_code": "600000",
+        "trade_date": "2026-07-21",
+        "close_price": 10.0,
+        "pct_change": 1.0,
+        "net_buy_amount": 5.0,
+        "buy_amount": 8.0,
+        "sell_amount": 3.0,
+        "turnover_rate": 2.0,
+        "market_cap": 100.0,
+        "reason": "换手率达20%",
+    }
+    second_block = {
+        "ts_code": "600000",
+        "trade_date": "2026-07-21",
+        "deal_price": 9.8,
+        "close_price": 9.5,
+        "discount_rate": -3.0,
+        "volume": 200.0,
+        "amount": 1960.0,
+        "buyer_branch": "C",
+        "seller_branch": "D",
+    }
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            """INSERT INTO dragon_tiger
+               (source_record_key, ts_code, trade_date, close_price, pct_change,
+                net_buy_amount, buy_amount, sell_amount, turnover_rate,
+                market_cap, reason, data_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'akshare')""",
+            (
+                dragon_tiger_source_key(second_dragon),
+                second_dragon["ts_code"],
+                second_dragon["trade_date"],
+                second_dragon["close_price"],
+                second_dragon["pct_change"],
+                second_dragon["net_buy_amount"],
+                second_dragon["buy_amount"],
+                second_dragon["sell_amount"],
+                second_dragon["turnover_rate"],
+                second_dragon["market_cap"],
+                second_dragon["reason"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO block_trade
+               (source_record_key, ts_code, trade_date, deal_price, close_price,
+                discount_rate, volume, amount, buyer_branch, seller_branch,
+                data_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'akshare')""",
+            (
+                block_trade_source_key(second_block),
+                second_block["ts_code"],
+                second_block["trade_date"],
+                second_block["deal_price"],
+                second_block["close_price"],
+                second_block["discount_rate"],
+                second_block["volume"],
+                second_block["amount"],
+                second_block["buyer_branch"],
+                second_block["seller_branch"],
+            ),
+        )
+        dragon_count = conn.execute(
+            "SELECT COUNT(*) FROM dragon_tiger WHERE ts_code = '600000' "
+            "AND trade_date = '2026-07-21'"
+        ).fetchone()[0]
+        block_count = conn.execute(
+            "SELECT COUNT(*) FROM block_trade WHERE ts_code = '600000' "
+            "AND trade_date = '2026-07-21'"
+        ).fetchone()[0]
+        dragon_indexes = _unique_index_columns(conn, "dragon_tiger")
+        block_indexes = _unique_index_columns(conn, "block_trade")
+
+    assert dragon_count == 2
+    assert block_count == 2
+    assert dragon_indexes["idx_dragon_tiger_source_key"] == ("source_record_key",)
+    assert block_indexes["idx_block_trade_source_key"] == ("source_record_key",)
+
+
+def test_migration_011_rejects_duplicate_source_record_key(tmp_db):
+    from core.source_record_key import dragon_tiger_source_key
+
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=11)
+
+    record = {
+        "ts_code": "600000",
+        "trade_date": "2026-07-21",
+        "close_price": 10.0,
+        "pct_change": 1.0,
+        "net_buy_amount": 5.0,
+        "buy_amount": 8.0,
+        "sell_amount": 3.0,
+        "turnover_rate": 2.0,
+        "market_cap": 100.0,
+        "reason": "涨幅偏离",
+    }
+    insert_sql = """INSERT INTO dragon_tiger
+        (source_record_key, ts_code, trade_date, close_price, pct_change,
+         net_buy_amount, buy_amount, sell_amount, turnover_rate, market_cap,
+         reason, data_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'akshare')"""
+    params = (
+        dragon_tiger_source_key(record),
+        record["ts_code"], record["trade_date"], record["close_price"],
+        record["pct_change"], record["net_buy_amount"], record["buy_amount"],
+        record["sell_amount"], record["turnover_rate"], record["market_cap"],
+        record["reason"],
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(insert_sql, params)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(insert_sql, params)
+
+
+def test_migration_011_quarantines_null_pledger_duplicates(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+    _create_legacy_event_tables(str(tmp_db))
+
+    engine.apply_pending(target_version=11)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        survivors = conn.execute(
+            """SELECT pledger, pledge_ratio FROM stock_pledge
+               WHERE trade_date = '2026-07-21' AND stock_code = '000001'"""
+        ).fetchall()
+        quarantined = conn.execute(
+            """SELECT original_id, pledge_ratio, quarantine_reason
+               FROM stock_pledge_quarantine"""
+        ).fetchall()
+        pledge_indexes = _unique_index_columns(conn, "stock_pledge")
+
+    # 后写入的行（last write wins）保留，先前的重复行进隔离表而非静默删除
+    assert survivors == [(None, 0.06)]
+    assert quarantined == [(1, 0.05, "duplicate_source_record_key")]
+    assert pledge_indexes["idx_stock_pledge_source_key"] == ("source_record_key",)
+
+
+def test_migration_011_creates_event_tables_on_fresh_database(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+
+    result = engine.apply_pending(target_version=11)
+
+    assert result[-1]["version"] == 11
+    with sqlite3.connect(str(tmp_db)) as conn:
+        for table in ("dragon_tiger", "block_trade", "stock_pledge"):
+            columns = {
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            assert "source_record_key" in columns, table
+            indexes = _unique_index_columns(conn, table)
+            assert indexes[f"idx_{table}_source_key"] == ("source_record_key",)
+
+
+def test_migration_011_body_is_idempotent_on_migrated_schema(tmp_db):
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+    _create_legacy_event_tables(str(tmp_db))
+    engine.apply_pending(target_version=11)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        counts_before = tuple(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("dragon_tiger", "block_trade", "stock_pledge",
+                          "stock_pledge_quarantine")
+        )
+        # 强制重跑迁移体：清掉版本记录，模拟同一脚本第二次执行
+        conn.execute("DELETE FROM schema_migrations WHERE version = 11")
+        conn.commit()
+
+    second = engine.apply_pending(target_version=11)
+
+    assert [item["version"] for item in second] == [11]
+    with sqlite3.connect(str(tmp_db)) as conn:
+        counts_after = tuple(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("dragon_tiger", "block_trade", "stock_pledge",
+                          "stock_pledge_quarantine")
+        )
+    assert counts_after == counts_before
+
+
+def test_migration_011_rolls_back_rebuild_when_key_generation_fails(
+    tmp_db,
+    monkeypatch,
+):
+    import core.source_record_key as key_module
+
+    engine = MigrationEngine(
+        db_path=str(tmp_db),
+        migrations_dir=_real_migrations_dir(),
+    )
+    engine.apply_pending(target_version=10)
+    _create_legacy_event_tables(str(tmp_db))
+
+    def fail_key(record, fields):
+        raise RuntimeError("injected event key failure")
+
+    monkeypatch.setattr(key_module, "source_record_key", fail_key)
+
+    with pytest.raises(MigrationError, match="injected event key failure"):
+        engine.apply_pending(target_version=11)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        temp_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name LIKE '%__v11'"
+        ).fetchone()
+        dragon_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(dragon_tiger)")
+        }
+        pledge_count = conn.execute(
+            "SELECT COUNT(*) FROM stock_pledge"
+        ).fetchone()[0]
+        version_11 = conn.execute(
+            "SELECT success FROM schema_migrations WHERE version = 11"
+        ).fetchone()
+
+    assert temp_table is None
+    assert "source_record_key" not in dragon_columns
+    assert pledge_count == 2
+    assert version_11 == (0,)

@@ -25,7 +25,10 @@ from smartmoney_hunter.indicators import IndicatorCalculator
 from core.source_record_key import (
     INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
     STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
+    block_trade_source_key,
+    dragon_tiger_source_key,
     source_record_key,
+    stock_pledge_source_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -544,14 +547,14 @@ class SmartMoneyDBProvider:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS stock_pledge (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT,
-                        stock_code TEXT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
                         stock_name TEXT,
                         pledger TEXT,
                         pledge_amount REAL,
                         pledge_ratio REAL,
                         pledge_org TEXT,
-                        UNIQUE(trade_date, stock_code, pledger)
+                        source_record_key TEXT NOT NULL
                     )
                 """)
         except Exception as e:
@@ -591,14 +594,14 @@ class SmartMoneyDBProvider:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS stock_pledge (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT,
-                        stock_code TEXT,
+                        trade_date TEXT NOT NULL,
+                        stock_code TEXT NOT NULL,
                         stock_name TEXT,
                         pledger TEXT,
                         pledge_amount REAL,
                         pledge_ratio REAL,
                         pledge_org TEXT,
-                        UNIQUE(trade_date, stock_code, pledger)
+                        source_record_key TEXT NOT NULL
                     )
                 """)
                 conn.commit()
@@ -866,7 +869,49 @@ class SmartMoneyDBProvider:
         self._db.save_dragon_tiger(symbol, data)
 
     def save_dragon_tiger_batch(self, records: list[dict[str, Any]]) -> int:
-        return self._db.save_dragon_tiger_batch(records)
+        """批量保存龙虎榜数据（稳定事件键 UPSERT，同股同日多事件共存）。"""
+        valid_records = [r for r in records if r.get("trade_date") and r.get("ts_code")]
+        if not valid_records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT INTO dragon_tiger
+                        (source_record_key, ts_code, trade_date, close_price,
+                         pct_change, net_buy_amount, buy_amount, sell_amount,
+                         turnover_rate, market_cap, reason, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        ts_code = excluded.ts_code,
+                        trade_date = excluded.trade_date,
+                        close_price = excluded.close_price,
+                        pct_change = excluded.pct_change,
+                        net_buy_amount = excluded.net_buy_amount,
+                        buy_amount = excluded.buy_amount,
+                        sell_amount = excluded.sell_amount,
+                        turnover_rate = excluded.turnover_rate,
+                        market_cap = excluded.market_cap,
+                        reason = excluded.reason,
+                        data_source = excluded.data_source,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    [
+                        (r.get("source_record_key") or dragon_tiger_source_key(r),
+                         r.get("ts_code"), r.get("trade_date"), r.get("close_price"),
+                         r.get("pct_change"), r.get("net_buy_amount"),
+                         r.get("buy_amount"), r.get("sell_amount"),
+                         r.get("turnover_rate"), r.get("market_cap"),
+                         r.get("reason"), r.get("data_source", "akshare"))
+                        for r in valid_records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger.warning(f"⚠️ 龙虎榜批量保存失败: {e}")
+            return 0
 
     def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
@@ -988,7 +1033,48 @@ class SmartMoneyDBProvider:
         self._db.save_block_trade(symbol, data)
 
     def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
-        return self._db.save_block_trade_batch(records)
+        """批量保存大宗交易数据（稳定事件键 UPSERT，同股同日多笔交易共存）。"""
+        valid_records = [r for r in records if r.get("trade_date") and r.get("ts_code")]
+        if not valid_records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT INTO block_trade
+                        (source_record_key, ts_code, trade_date, deal_price,
+                         close_price, discount_rate, volume, amount,
+                         buyer_branch, seller_branch, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        ts_code = excluded.ts_code,
+                        trade_date = excluded.trade_date,
+                        deal_price = excluded.deal_price,
+                        close_price = excluded.close_price,
+                        discount_rate = excluded.discount_rate,
+                        volume = excluded.volume,
+                        amount = excluded.amount,
+                        buyer_branch = excluded.buyer_branch,
+                        seller_branch = excluded.seller_branch,
+                        data_source = excluded.data_source,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    [
+                        (r.get("source_record_key") or block_trade_source_key(r),
+                         r.get("ts_code"), r.get("trade_date"), r.get("deal_price"),
+                         r.get("close_price"), r.get("discount_rate"),
+                         r.get("volume"), r.get("amount"),
+                         r.get("buyer_branch"), r.get("seller_branch"),
+                         r.get("data_source", "akshare"))
+                        for r in valid_records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger.warning(f"⚠️ 大宗交易批量保存失败: {e}")
+            return 0
 
     def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
@@ -2013,9 +2099,23 @@ class SmartMoneyDBProvider:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 conn.executemany(
-                    "INSERT OR REPLACE INTO stock_pledge (trade_date, stock_code, stock_name, pledger, pledge_amount, pledge_ratio, pledge_org) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    """
+                    INSERT INTO stock_pledge
+                        (source_record_key, trade_date, stock_code, stock_name,
+                         pledger, pledge_amount, pledge_ratio, pledge_org)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        trade_date = excluded.trade_date,
+                        stock_code = excluded.stock_code,
+                        stock_name = excluded.stock_name,
+                        pledger = excluded.pledger,
+                        pledge_amount = excluded.pledge_amount,
+                        pledge_ratio = excluded.pledge_ratio,
+                        pledge_org = excluded.pledge_org
+                    """,
                     [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
+                        (r.get("source_record_key") or stock_pledge_source_key(r),
+                         r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
                          r.get("pledger"), r.get("pledge_amount"),
                          r.get("pledge_ratio"), r.get("pledge_org"))
                         for r in valid_records

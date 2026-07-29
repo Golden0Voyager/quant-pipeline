@@ -540,9 +540,14 @@ class ProviderFactory:
         return cls._db_provider
 
     @classmethod
-    def get_loader(cls) -> DataLoaderInterface:
+    def get_loader(cls, use_cache: bool = True) -> DataLoaderInterface:
         if cls._loader_provider is None:
             raise RuntimeError("Provider not configured. Call ProviderFactory.configure() first.")
+        if not use_cache:
+            # 收盘刷新等场景需要绕过本地缓存：每次返回全新的非缓存 loader，
+            # 不改变 configure() 设定的缓存单例。
+            from providers import SmartMoneyLoaderProvider
+            return SmartMoneyLoaderProvider(use_cache=False)
         return cls._loader_provider
 
     @classmethod

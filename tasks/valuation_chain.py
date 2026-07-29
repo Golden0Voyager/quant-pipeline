@@ -149,6 +149,104 @@ def update_fundamentals(
 
 
 # ===========================================================================
+# 收盘刷新 helper（Task 6）：只抓取/归一化，不写库
+# ===========================================================================
+
+
+def fetch_fundamentals_snapshot(
+    target_date: str,
+    *,
+    session=None,
+    page_size: int = 500,
+) -> list[dict]:
+    """收盘刷新专用：只抓目标日估值快照并归一化为写库记录形状。
+
+    与 update_fundamentals 不同：无 5000 行完成阈值、无日期回退、不写库；
+    源端异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    if session is None:
+        session = get_default_client().get_session("eastmoney")
+
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    raw_records: list[dict] = []
+    page = 1
+    while True:
+        params = {
+            "sortColumns": "TRADE_DATE,SECURITY_CODE",
+            "sortTypes": "-1,1",
+            "pageSize": str(page_size),
+            "pageNumber": str(page),
+            "reportName": "RPT_VALUEANALYSIS_DET",
+            "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CLOSE_PRICE,TOTAL_MARKET_CAP,PE_TTM,PB_MRQ,PE_LAR,PEG_CAR,PS_TTM",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(TRADE_DATE='{target_date}')",
+        }
+        resp = session.get(url, params=params, timeout=15)
+        data = resp.json()
+        if not (data.get("success") and data.get("result") and data["result"].get("data")):
+            break
+        raw_records.extend(data["result"]["data"])
+        total_count = data["result"].get("count", 0)
+        if page * page_size >= total_count:
+            break
+        page += 1
+
+    records: list[dict] = []
+    for rec in raw_records:
+        code = str(rec.get("SECURITY_CODE", "")).strip()
+        if not code:
+            continue
+        records.append({
+            "ts_code": code,
+            "trade_date": str(rec.get("TRADE_DATE", target_date))[:10],
+            "pe_ttm": rec.get("PE_TTM"),
+            "pb": rec.get("PB_MRQ"),
+            "ps_ttm": rec.get("PS_TTM"),
+            "dividend_yield": None,
+            "roe": None,
+            "roa": None,
+            "gross_margin": None,
+            "net_margin": None,
+            "debt_ratio": None,
+            "revenue_growth": None,
+            "profit_growth": None,
+            "eps_growth": None,
+            "peg": rec.get("PEG_CAR"),
+            "market_cap": rec.get("TOTAL_MARKET_CAP"),
+        })
+    return records
+
+
+def fetch_market_snapshot_quotes(
+    codes: list[str],
+    *,
+    batch_size: int = 50,
+    sleep_seconds: float = 0.05,
+) -> list[dict]:
+    """收盘刷新专用：批量拉取雪球行情报价，不写库。
+
+    无 Token 直接抛错（源端不可用 → 保留旧数据）；单批失败静默降级，
+    覆盖率是否达标由适配器把关。北交所代码在此过滤（雪球不支持）。
+    """
+    from smartmoney_hunter import xueqiu as xq
+
+    if xq._get_token() is None:
+        raise RuntimeError("XUEQIU_TOKEN is not configured")
+
+    eligible = [code for code in codes if not is_beijing_stock(code)]
+    quotes: list[dict] = []
+    for i in range(0, len(eligible), batch_size):
+        chunk = eligible[i : i + batch_size]
+        try:
+            quotes.extend(xq.get_batch_quotes(chunk))
+        except Exception as e:
+            logger.debug(f"  收盘刷新批次 {i // batch_size + 1} 失败: {e}")
+        time.sleep(sleep_seconds)
+    return quotes
+
+
+# ===========================================================================
 # 任务 3.5: 雪球 token 落地 — 批量补充实时行情指标
 # ===========================================================================
 
@@ -586,3 +684,110 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
     except Exception as e:
         logger.error(f"❌ 行业对比数据生成失败: {e}")
         return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 收盘刷新 helpers（Task 7）：派生任务只读目标日分区，不写库
+# ===========================================================================
+
+
+def fetch_historical_valuation_rows_for_refresh(
+    db_path: str, target_date: str
+) -> list[dict]:
+    """收盘刷新专用：读取 fundamentals 目标日分区为历史估值快照行。
+
+    每行恰好 6 键（ts_code/trade_date/pe_ttm/pb/ps_ttm/dividend_yield），
+    按 ts_code 去重；分区为空返回 []（由适配器决定保留旧快照）。
+    """
+    import sqlite3  # 局部导入：保持本文件其余部分零改动（append-only）
+
+    conn = sqlite3.connect(db_path)
+    try:
+        fetched = conn.execute(
+            "SELECT ts_code, pe_ttm, pb, ps_ttm, dividend_yield"
+            " FROM fundamentals WHERE trade_date = ?",
+            (target_date,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for code, pe_ttm, pb, ps_ttm, dividend_yield in fetched:
+        code = str(code).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        rows.append({
+            "ts_code": code,
+            "trade_date": target_date,
+            "pe_ttm": pe_ttm,
+            "pb": pb,
+            "ps_ttm": ps_ttm,
+            "dividend_yield": dividend_yield,
+        })
+    return rows
+
+
+def compute_sector_industry_rows_for_refresh(
+    db_path: str, target_date: str
+) -> list[dict]:
+    """收盘刷新专用：由目标日 fundamentals + stock_list 聚合行业对比行。
+
+    只聚合目标日分区；无行业归属的股票计入“未知行业”。刷新模式
+    不做 sector_fund_flow 模糊映射：fund_inflow_rank 置空，
+    data_source 固定为 "derived"；分区为空返回 []。
+    """
+    import sqlite3  # 局部导入：保持本文件其余部分零改动（append-only）
+
+    conn = sqlite3.connect(db_path)
+    try:
+        fund = pd.read_sql_query(
+            "SELECT ts_code, pe_ttm, pb, ps_ttm, roe, revenue_growth,"
+            " profit_growth, market_cap FROM fundamentals WHERE trade_date = ?",
+            conn,
+            params=(target_date,),
+        )
+        stock = pd.read_sql_query("SELECT code, industry FROM stock_list", conn)
+    finally:
+        conn.close()
+
+    if fund.empty:
+        return []
+
+    merged = fund.merge(stock, left_on="ts_code", right_on="code", how="left")
+    merged["industry"] = merged["industry"].fillna("未知行业")
+    merged.loc[
+        merged["industry"].astype(str).str.strip() == "", "industry"
+    ] = "未知行业"
+
+    grouped = merged.groupby("industry").agg(
+        avg_pe=("pe_ttm", "mean"),
+        avg_pb=("pb", "mean"),
+        avg_ps=("ps_ttm", "mean"),
+        avg_roe=("roe", "mean"),
+        avg_revenue_growth=("revenue_growth", "mean"),
+        avg_profit_growth=("profit_growth", "mean"),
+        total_market_cap=("market_cap", "sum"),
+    ).reset_index()
+
+    def _scalar_or_none(value: object) -> float | None:
+        """NaN / None → None（SQLite 不接受 NaN）。"""
+        return None if value is None or value != value else float(value)
+
+    rows: list[dict] = []
+    for _, row in grouped.iterrows():
+        rows.append({
+            "industry_name": str(row["industry"]),
+            "trade_date": target_date,
+            "avg_pe": _scalar_or_none(row["avg_pe"]),
+            "avg_pb": _scalar_or_none(row["avg_pb"]),
+            "avg_ps": _scalar_or_none(row["avg_ps"]),
+            "avg_roe": _scalar_or_none(row["avg_roe"]),
+            "avg_revenue_growth": _scalar_or_none(row["avg_revenue_growth"]),
+            "avg_profit_growth": _scalar_or_none(row["avg_profit_growth"]),
+            "total_market_cap": _scalar_or_none(row["total_market_cap"]),
+            "fund_inflow_rank": None,
+            "data_source": "derived",
+        })
+    return rows

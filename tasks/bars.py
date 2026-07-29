@@ -183,6 +183,69 @@ def _has_real_db_path(db: DatabaseInterface) -> bool:
     return is_real_db_path(getattr(db, "db_path", None))
 
 
+# ===========================================================================
+# 收盘刷新 helpers（Task 6）：不落库的抓取 / 归一化
+# 供 core/refresh_adapters.py 使用；不改变 update_bars 的任何行为。
+# ===========================================================================
+
+_REFRESH_REQUIRED_FIELDS = ("open", "high", "low", "close", "volume", "amount")
+
+
+def fetch_bars_for_refresh(
+    loader: DataLoaderInterface, symbol: str, target_date: str
+) -> pd.DataFrame:
+    """收盘刷新专用抓取：只请求目标日窗口，不走任何完成快捷路径。"""
+    compact = target_date.replace("-", "")
+    return loader.get_daily_bars(symbol, start_date=compact, end_date=compact)
+
+
+def normalize_bar_row_for_refresh(
+    df: pd.DataFrame, symbol: str, target_date: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """校验并归一化目标日单行日线，不写库。
+
+    Returns:
+        (行字典, None) 校验通过；(None, 拒绝原因) 校验失败。
+        拒绝规则：无目标日数据 / 目标日重复行 / yfinance 来源 /
+        必填字段缺失 / OHLC 不变量违规 / 负 volume/amount。
+    """
+    if df is None or df.empty:
+        return None, "source returned no rows"
+    if "trade_date" not in df.columns:
+        return None, "source rows missing trade_date"
+
+    normalized_dates = df["trade_date"].map(_normalize_trade_date)
+    target_rows = df[normalized_dates == target_date]
+    if target_rows.empty:
+        return None, f"no row for target date {target_date}"
+    if len(target_rows) > 1:
+        return None, f"duplicate rows for target date {target_date}"
+
+    raw = target_rows.iloc[0]
+    source = raw.get("data_source")
+    if source is not None and not pd.isna(source) and str(source) == "yfinance":
+        return None, "rows sourced from yfinance are not publishable"
+
+    row: dict[str, Any] = {"ts_code": symbol, "trade_date": target_date}
+    for field in _REFRESH_REQUIRED_FIELDS:
+        value = raw.get(field)
+        if value is None or pd.isna(value):
+            return None, f"required field {field} is missing"
+        row[field] = float(value)
+
+    if (
+        row["high"] < max(row["open"], row["close"])
+        or row["low"] > min(row["open"], row["close"])
+        or row["high"] < row["low"]
+    ):
+        return None, "OHLC invariants violated"
+    if row["volume"] < 0 or row["amount"] < 0:
+        return None, "negative volume or amount"
+
+    row["data_source"] = None if source is None or pd.isna(source) else str(source)
+    return row, None
+
+
 def _bars_result(
     *,
     success: int,

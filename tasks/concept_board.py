@@ -295,3 +295,20 @@ def update_concept_member(
     results["status"] = "success" if (saved_member + pit_saved) > 0 else "no_data"
 
     return dict(results)
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_concept_board_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取概念板块实时快照并覆写 trade_date 为目标日。
+
+    ``_fetch_em_spot`` 本身即 raise 版（HTTP 错误直接上抛）；快照的
+    自然日戳统一覆写为调用方指定的目标交易日。权威空返回 []。
+    """
+    records = _fetch_em_spot()
+    for record in records:
+        record["trade_date"] = trade_date
+    return records

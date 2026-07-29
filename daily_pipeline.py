@@ -25,6 +25,8 @@ import time
 from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 # 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
 _CODE_DIR = os.path.expanduser("~/Code")
@@ -35,6 +37,7 @@ if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
     sys.path.insert(0, _HUNTER_SRC)
 
 # ── Core module re-exports ──
+from core.calendar import get_expected_latest_trading_day
 from core.config import (
     BATCH_SIZE_VAL as BATCH_SIZE,  # noqa: F401
 )
@@ -56,8 +59,11 @@ from core.config import (
 from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
+from core.refresh import RefreshAdapter, RefreshContext, RefreshOrchestrator
+from core.refresh_adapters import build_all_refresh_adapters
+from core.refresh_store import SQLiteRefreshStore
 from core.runner import safe_task
-from core.task_registry import Cadence, lookup_task
+from core.task_registry import Cadence, lookup_task, refreshable_trading_tasks
 from core.task_result import TaskResult, normalize_task_result
 from core.utils import (
     infer_market as _infer_market,  # noqa: F401
@@ -157,6 +163,8 @@ except ImportError:
 from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 # ── Backward compat aliases ──
 _acquire_lock = ProcessLock.acquire
@@ -460,6 +468,64 @@ def run_all(
 
 
 # ===========================================================================
+# 收盘刷新（--refresh-today）
+# ===========================================================================
+
+def _build_refresh_adapters(
+    *,
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    store: SQLiteRefreshStore,
+) -> dict[str, RefreshAdapter]:
+    """任务名 → 刷新适配器映射；装配全部 29 个收盘刷新适配器。"""
+    return build_all_refresh_adapters(db=db, loader=loader, engine=engine, store=store)
+
+
+def _build_refresh_orchestrator(db_path: str) -> RefreshOrchestrator:
+    """构建默认的收盘刷新编排器（非缓存 loader + SQLite 审计存储）。"""
+    db = ProviderFactory.get_db()
+    engine = ProviderFactory.get_indicator_engine()
+    # 收盘刷新必须绕过本地缓存，确保拉到收盘后的最终数据
+    loader = ProviderFactory.get_loader(use_cache=False)
+    # 适配器与编排器共用同一 store 实例：前者发布数据，后者记录审计
+    store = SQLiteRefreshStore(db_path)
+    return RefreshOrchestrator(
+        specs=refreshable_trading_tasks(),
+        adapters=_build_refresh_adapters(
+            db=db, loader=loader, engine=engine, store=store
+        ),
+        store=store,
+    )
+
+
+def run_close_refresh(
+    db_path: str,
+    *,
+    symbols: list[str] | None = None,
+    force: bool = False,
+    orchestrator: RefreshOrchestrator | None = None,
+) -> TaskResult:
+    """执行一次收盘后刷新，返回聚合 TaskResult。
+
+    16:00 前的拦截由编排器自身的 pre-close 闸门完成，
+    --force 仅映射为 allow_pre_close=True，不在 CLI 层重复门控逻辑。
+    """
+    if orchestrator is None:
+        orchestrator = _build_refresh_orchestrator(db_path)
+    # 单次读取上海时钟：闸门、started_at 与目标交易日共用同一时间基准
+    now = datetime.now(_SHANGHAI_TZ)
+    context = RefreshContext(
+        target_date=get_expected_latest_trading_day(now=now),
+        started_at=now,
+        run_id=str(uuid4()),
+        symbols=tuple(symbols) if symbols else None,
+        allow_pre_close=force,
+    )
+    return orchestrator.run(context)
+
+
+# ===========================================================================
 # CLI 入口
 # ===========================================================================
 
@@ -467,8 +533,13 @@ def main():
     parser = argparse.ArgumentParser(description="SmartMoney 日常数据管道（解耦版 + 断点续传）")
     parser.add_argument(
         "--task",
-        default="all",
+        default=None,
         help="要执行的任务 (默认: all)",
+    )
+    parser.add_argument(
+        "--refresh-today",
+        action="store_true",
+        help="收盘后刷新当日数据（与 --task / --resume 互斥）",
     )
     parser.add_argument("--limit", type=int, default=None, help="测试模式：只处理前 N 只股票")
     parser.add_argument("--force", action="store_true", help="强制运行（忽略交易日检查）")
@@ -492,6 +563,13 @@ def main():
 
     args = parser.parse_args()
 
+    # --refresh-today 是独立的顶层模式；未指定任何模式时仍走 legacy all
+    if args.refresh_today and args.task is not None:
+        parser.error("--task 不能与 --refresh-today 同时使用")
+    if args.refresh_today and args.resume:
+        parser.error("--resume 不能与 --refresh-today 同时使用")
+    task = args.task if args.task is not None else "all"
+
     symbols_arg = args.symbols
     symbols: list[str] | None = None
     if symbols_arg:
@@ -504,18 +582,32 @@ def main():
         else:
             symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
+    if args.refresh_today:
+        # 与 legacy all 共用同一把全局写锁，避免与常规管道并发写库
+        _acquire_lock()
+        try:
+            ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
+            result = run_close_refresh(args.db_path, symbols=symbols, force=args.force)
+        except KeyboardInterrupt:
+            # 刷新路径不同于 legacy：中断必须非零退出，供调度/TUI 感知 aborted
+            logger.info("收到中断信号，正在退出...")
+            sys.exit(1)
+        if result.exit_failure:
+            sys.exit(1)
+        return
+
     task_lock_name: str | None = None
     db = None
     try:
         # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
         # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
-        if args.task in ("all", "update_daily_core"):
+        if task in ("all", "update_daily_core"):
             _acquire_lock()
-        elif args.task != "health_check":
-            if not TaskLock.acquire(args.task):
-                print(f"❌ 任务 {args.task} 已在运行，请勿重复启动")
+        elif task != "health_check":
+            if not TaskLock.acquire(task):
+                print(f"❌ 任务 {task} 已在运行，请勿重复启动")
                 sys.exit(1)
-            task_lock_name = args.task
+            task_lock_name = task
 
         # 初始化 provider
         ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
@@ -529,26 +621,26 @@ def main():
             def _should_update():
                 return True
 
-        if args.task == "all":
+        if task == "all":
             results = run_all(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
-        elif args.task == "update_daily_core":
+        elif task == "update_daily_core":
             results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
-        elif args.task in _TASK_CALLABLES:
+        elif task in _TASK_CALLABLES:
             raw = _run_registry_task(
-                args.task, db, loader, engine,
+                task, db, loader, engine,
                 symbols=symbols, limit=args.limit,
                 resume=args.resume, force=args.force,
             )
             if isinstance(raw, dict | TaskResult):
-                result = normalize_task_result(args.task, raw)
+                result = normalize_task_result(task, raw)
                 if result.exit_failure:
                     sys.exit(1)
         else:
-            logger.error("未知任务: %s", args.task)
+            logger.error("未知任务: %s", task)
             sys.exit(1)
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在退出...")

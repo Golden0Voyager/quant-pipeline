@@ -11,6 +11,7 @@ import time  # noqa: F401
 from datetime import datetime
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.source_record_key import block_trade_source_key, dragon_tiger_source_key
 from interface import DatabaseInterface, DataLoaderInterface
 
 try:
@@ -87,6 +88,45 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
     except Exception as e:
         logger.error(f"❌ 资金流向获取失败: {e}")
         return {"saved": 0, "total": 0, "error": str(e)}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 6）：只抓取/归一化，不写库
+# ===========================================================================
+
+_FUND_FLOW_NUMERIC_FIELDS = (
+    "main_net_inflow",
+    "main_net_inflow_pct",
+    "super_large_net_inflow",
+    "super_large_net_inflow_pct",
+    "large_net_inflow",
+    "large_net_inflow_pct",
+)
+
+
+def fetch_fund_flow_records(loader: DataLoaderInterface, trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取全市场资金流并归一化为 legacy 记录形状，不写库。
+
+    跳过空 code 与六个数值字段全空的行；部分 NaN 转为 None；
+    loader 异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    df = loader.get_market_fund_flow()
+    if df is None or df.empty:
+        return []
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        code = str(row.get("code", "")).strip()
+        if not code:
+            continue
+        values = {
+            field: (None if pd.isna(row.get(field)) else float(row.get(field)))
+            for field in _FUND_FLOW_NUMERIC_FIELDS
+        }
+        if all(value is None for value in values.values()):
+            continue
+        records.append({"symbol": code, "date": trade_date, **values, "simulated": False})
+    return records
 
 
 # ===========================================================================
@@ -205,7 +245,7 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
                 code = str(row.get("代码", "")).strip()
                 if not code:
                     continue
-                batch_records.append({
+                record = {
                     "ts_code": code,
                     "trade_date": target_date,
                     "close_price": row.get("收盘价"),
@@ -217,7 +257,10 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
                     "market_cap": row.get("流通市值"),
                     "reason": row.get("上榜原因", ""),
                     "data_source": "akshare",
-                })
+                }
+                # 稳定事件键：同股同日不同上榜原因的合法多事件互异
+                record["source_record_key"] = dragon_tiger_source_key(record)
+                batch_records.append(record)
             except Exception:
                 continue
 
@@ -265,7 +308,7 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
                 code = str(row.get("证券代码", "")).strip()
                 if not code:
                     continue
-                batch_records.append({
+                record = {
                     "ts_code": code,
                     "trade_date": target_date,
                     "deal_price": row.get("成交价"),
@@ -276,7 +319,10 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
                     "buyer_branch": row.get("买方营业部", ""),
                     "seller_branch": row.get("卖方营业部", ""),
                     "data_source": "akshare",
-                })
+                }
+                # 稳定事件键：同股同日不同价/量的合法多笔交易互异
+                record["source_record_key"] = block_trade_source_key(record)
+                batch_records.append(record)
             except Exception:
                 continue
 
@@ -362,3 +408,139 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
     saved = db.save_sector_fund_flow_batch(batch_records) if batch_records else 0
     logger.info(f"✅ 板块资金流向保存完成: {saved}/{len(df)}")
     return {"saved": saved, "total": len(df), "source": "ths"}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def _refresh_float(value) -> float | None:
+    """NaN/None → None，其余转 float（SQLite 不接受 NaN）。"""
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def fetch_margin_trading_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取指定交易日沪深两市融资融券明细并归一化。
+
+    Length mismatch（AkShare 空日返回）视为该市当日无数据；
+    其他源异常直接上抛，由适配器/编排器落实保留旧数据。
+    """
+    compact = trade_date.replace("-", "")
+    records: list[dict] = []
+    for exchange, fetcher in [("sh", ak.stock_margin_detail_sse), ("sz", ak.stock_margin_detail_szse)]:
+        df = _safe_fetch_margin_detail(fetcher, compact, exchange)
+        if df is None:
+            continue
+        code_col = "标的证券代码" if exchange == "sh" else "证券代码"
+        for _, row in df.iterrows():
+            code = str(row.get(code_col, "")).strip()
+            if not code:
+                continue
+            records.append({
+                "ts_code": code,
+                "trade_date": trade_date,
+                "margin_balance": _refresh_float(row.get("融资余额")),
+                "margin_buy": _refresh_float(row.get("融资买入额")),
+                "margin_repay": _refresh_float(row.get("融资偿还额")) if exchange == "sh" else None,
+                "short_balance": _refresh_float(row.get("融券余量")),
+                "short_sell": _refresh_float(row.get("融券卖出量")),
+                "short_repay": _refresh_float(row.get("融券偿还量")) if exchange == "sh" else None,
+                "total_balance": _refresh_float(row.get("融资融券余额")),
+                "data_source": "akshare",
+            })
+    return records
+
+
+def fetch_dragon_tiger_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取指定交易日龙虎榜并附稳定事件键。
+
+    权威空榜返回 []（空榜 ≠ 源失败）；源异常直接上抛。
+    """
+    compact = trade_date.replace("-", "")
+    df = ak.stock_lhb_detail_em(start_date=compact, end_date=compact)
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip()
+        if not code:
+            continue
+        record = {
+            "ts_code": code,
+            "trade_date": trade_date,
+            "close_price": _refresh_float(row.get("收盘价")),
+            "pct_change": _refresh_float(row.get("涨跌幅")),
+            "net_buy_amount": _refresh_float(row.get("龙虎榜净买额")),
+            "buy_amount": _refresh_float(row.get("龙虎榜买入额")),
+            "sell_amount": _refresh_float(row.get("龙虎榜卖出额")),
+            "turnover_rate": _refresh_float(row.get("换手率")),
+            "market_cap": _refresh_float(row.get("流通市值")),
+            "reason": str(row.get("上榜原因", "") or ""),
+            "data_source": "akshare",
+        }
+        # 稳定事件键：同股同日不同上榜原因的合法多事件互异
+        record["source_record_key"] = dragon_tiger_source_key(record)
+        records.append(record)
+    return records
+
+
+def fetch_block_trade_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取指定交易日大宗交易并附稳定事件键。
+
+    权威空榜返回 []；源异常直接上抛。
+    """
+    compact = trade_date.replace("-", "")
+    df = ak.stock_dzjy_mrmx(symbol="A股", start_date=compact, end_date=compact)
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        code = str(row.get("证券代码", "")).strip()
+        if not code:
+            continue
+        record = {
+            "ts_code": code,
+            "trade_date": trade_date,
+            "deal_price": _refresh_float(row.get("成交价")),
+            "close_price": _refresh_float(row.get("收盘价")),
+            "discount_rate": _refresh_float(row.get("折溢率")),
+            "volume": _refresh_float(row.get("成交量")),
+            "amount": _refresh_float(row.get("成交额")),
+            "buyer_branch": str(row.get("买方营业部", "") or ""),
+            "seller_branch": str(row.get("卖方营业部", "") or ""),
+            "data_source": "akshare",
+        }
+        # 稳定事件键：同股同日不同价/量的合法多笔交易互异
+        record["source_record_key"] = block_trade_source_key(record)
+        records.append(record)
+    return records
+
+
+def fetch_sector_fund_flow_records(trade_date: str) -> list[dict]:
+    """收盘刷新专用：抓取同花顺行业资金流即时快照并归一化。
+
+    同花顺仅提供即时快照，trade_date 由调用方指定；源异常直接上抛。
+    """
+    df = ak.stock_fund_flow_industry()
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        sector = str(row.get("行业", "")).strip()
+        if not sector:
+            continue
+        records.append({
+            "sector_name": sector,
+            "trade_date": trade_date,
+            "main_net_inflow": _refresh_float(row.get("净额")),
+            "main_net_inflow_pct": _refresh_float(row.get("行业-涨跌幅")),
+            "super_large_net_inflow": None,
+            "large_net_inflow": _refresh_float(row.get("流入资金")),
+            "medium_net_inflow": _refresh_float(row.get("流出资金")),
+            "small_net_inflow": None,
+            "data_source": "ths",
+        })
+    return records

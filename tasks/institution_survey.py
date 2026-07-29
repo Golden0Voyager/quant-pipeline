@@ -119,3 +119,47 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
     saved = db.save_institution_survey_batch(validated_records)
     logger.info(f"✅ 机构调研数据保存完成: {saved}/{raw_count} 条")
     return {"saved": saved, "total": raw_count}
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_institution_survey_records(start_date: str) -> list[dict]:
+    """收盘刷新专用：抓取 start_date 起的机构调研统计并归一化，附 64 位稳定源键。
+
+    权威空返回 []；源异常直接上抛（保留旧数据的语义由适配器/编排器落实）。
+    """
+    from core.source_record_key import INSTITUTION_SURVEY_SOURCE_KEY_FIELDS, source_record_key
+
+    df = ak.stock_jgdy_tj_em(date=start_date.replace("-", ""))
+    if df is None or df.empty:
+        return []
+
+    df = df.rename(columns=_COLUMN_MAP)
+    keep = {"trade_date", "stock_code", "stock_name", "survey_org", "survey_type", "survey_count"}
+    available = [c for c in keep if c in df.columns]
+    df = df[available].drop_duplicates()
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        df = df[df["trade_date"].notna()]
+        df["trade_date"] = df["trade_date"].dt.strftime("%Y-%m-%d")
+
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        trade_date = row.get("trade_date")
+        stock_code = _to_text(row.get("stock_code"))
+        if not trade_date or not stock_code:
+            continue
+        record = {
+            "trade_date": trade_date,
+            "stock_code": stock_code,
+            "stock_name": _to_text(row.get("stock_name")),
+            "survey_org": _to_text(row.get("survey_org")) or None,
+            "survey_type": _to_text(row.get("survey_type")) or None,
+            "survey_count": _to_int(row.get("survey_count")),
+        }
+        record["source_record_key"] = source_record_key(record, INSTITUTION_SURVEY_SOURCE_KEY_FIELDS)
+        records.append(record)
+    return records

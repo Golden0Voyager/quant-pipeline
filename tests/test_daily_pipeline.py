@@ -8,11 +8,14 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
 import daily_pipeline
+from core.refresh import RefreshOrchestrator
+from core.task_result import ErrorKind, TaskResult
 
 
 # ===========================================================================
@@ -374,6 +377,98 @@ class TestUpdateChipDistributionEm:
             "processed": 0,
             "aborted": False,
         }
+
+
+# ===========================================================================
+# fetch_chip_em_record_for_refresh（Task 7 收盘刷新 helper）
+# ===========================================================================
+class TestFetchChipEmRecordForRefresh:
+    """只抽目标日一行，绝不调用随机目标选择器，不写库。"""
+
+    @staticmethod
+    def _em_df(dates: list[str], profit: float = 0.5, avg: float = 10.0) -> pd.DataFrame:
+        n = len(dates)
+        return pd.DataFrame({
+            "trade_date": dates,
+            "profit_ratio": [profit] * n,
+            "avg_cost": [avg] * n,
+            "cost_90_low": [9.0] * n,
+            "cost_90_high": [11.0] * n,
+            "concentration_90": [0.2] * n,
+            "cost_70_low": [9.5] * n,
+            "cost_70_high": [10.5] * n,
+            "concentration_70": [0.1] * n,
+        })
+
+    def test_returns_only_target_date_record(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-23", "2026-07-24", "2026-07-27"])
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+
+        assert reason is None
+        assert record["ts_code"] == "000001.SZ"
+        assert record["trade_date"] == "2026-07-27"
+        assert record["profit_ratio"] == 0.5
+        assert record["avg_cost"] == 10.0
+        # EM 源没有 chip_concentration 列，不得捆绑写入
+        assert "chip_concentration" not in record
+
+    def test_fetch_failure_reason(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: None
+        )
+        assert record is None
+        assert reason == "fetch_failed"
+
+    def test_missing_target_date(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-23", "2026-07-24"])
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "missing_target"
+
+    def test_all_zero_target_row_is_invalid(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"], profit=0.0, avg=0.0)
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "invalid"
+
+    def test_nan_target_row_is_invalid(self):
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"], profit=float("nan"))
+        record, reason = fetch_chip_em_record_for_refresh(
+            "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+        )
+        assert record is None
+        assert reason == "invalid"
+
+    def test_never_calls_random_target_selector(self):
+        """刷新模式下绝不调用 _get_chip_em_target_symbols（随机兼底）。"""
+        from tasks.index_chain import fetch_chip_em_record_for_refresh
+
+        df = self._em_df(["2026-07-27"])
+        with patch(
+            "tasks.index_chain._get_chip_em_target_symbols",
+            side_effect=AssertionError("random selector must not be called"),
+        ):
+            record, reason = fetch_chip_em_record_for_refresh(
+                "000001.SZ", "2026-07-27", fetch=lambda symbol: df
+            )
+        assert reason is None
+        assert record["trade_date"] == "2026-07-27"
 
 
 # ===========================================================================
@@ -997,6 +1092,213 @@ class TestMain:
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
             mock_fn.assert_called_once_with(db, loader)
+
+
+# ===========================================================================
+# run_close_refresh / --refresh-today
+# ===========================================================================
+class _RecordingRefreshStore:
+    """Recording fake for the refresh run store — 不落盘、不联网。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def start_run(self, **kwargs):
+        self.calls.append(("start", kwargs))
+
+    def record_task_result(self, **kwargs):
+        self.calls.append(("task", kwargs))
+
+    def finish_run(self, **kwargs):
+        self.calls.append(("finish", kwargs))
+
+
+def _shanghai_now(mock_dt, hour: int, minute: int = 0) -> None:
+    mock_dt.now.return_value = datetime(
+        2026, 7, 28, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+
+
+def _empty_orchestrator(store: _RecordingRefreshStore) -> RefreshOrchestrator:
+    return RefreshOrchestrator(specs=(), adapters={}, store=store)
+
+
+class TestRunCloseRefresh:
+    def test_context_uses_expected_trading_day_and_shanghai_clock(self, tmp_path):
+        captured: list = []
+
+        class FakeOrchestrator:
+            def run(self, context):
+                captured.append(context)
+                return TaskResult.success("refresh_today", saved=0)
+
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27") as expected, \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                symbols=["000001.SZ"],
+                orchestrator=FakeOrchestrator(),
+            )
+        expected.assert_called_once_with(now=mock_dt.now.return_value)
+        # 目标日计算与 started_at 共用同一次上海时钟读取
+        mock_dt.now.assert_called_once_with(daily_pipeline._SHANGHAI_TZ)
+        assert result.exit_failure is False
+        ctx = captured[0]
+        assert ctx.target_date == "2026-07-27"
+        assert ctx.symbols == ("000001.SZ",)
+        assert ctx.bypass_cache is True
+        assert ctx.run_id
+        assert ctx.started_at is mock_dt.now.return_value
+        assert ctx.started_at.tzinfo is not None
+
+    def test_pre_close_fails_without_force_and_never_starts_run(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 10, 0)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"), orchestrator=_empty_orchestrator(store)
+            )
+        assert result.exit_failure is True
+        assert "16:00" in (result.error or "")
+        assert store.calls == []
+
+    def test_pre_close_force_allows_run(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 10, 0)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                force=True,
+                orchestrator=_empty_orchestrator(store),
+            )
+        assert result.exit_failure is False
+        assert [name for name, _ in store.calls] == ["start", "finish"]
+
+    def test_post_close_dispatches_orchestrator(self, tmp_path):
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"), orchestrator=_empty_orchestrator(store)
+            )
+        assert result.exit_failure is False
+        assert store.calls[0][0] == "start"
+        assert store.calls[0][1]["target_date"] == "2026-07-27"
+        assert store.calls[-1][0] == "finish"
+
+    def test_default_wiring_requests_uncached_loader(self, tmp_path):
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_loader.return_value = MagicMock()
+            orchestrator = daily_pipeline._build_refresh_orchestrator(str(tmp_path / "audit.db"))
+        factory.get_loader.assert_called_once_with(use_cache=False)
+        assert isinstance(orchestrator, RefreshOrchestrator)
+
+    def test_cli_orchestrator_wires_every_refresh_adapter(self, tmp_path):
+        """CLI 构建的编排器必须装配全部 29 个适配器，_topological_specs 不再缺适配器。"""
+        from core.task_registry import refreshable_trading_tasks
+
+        class FakeDb:
+            """只提供 db_path 的手写 db fake（构造期不联网、不落盘）。"""
+
+            def __init__(self, db_path: str):
+                self.db_path = db_path
+
+        db_path = str(tmp_path / "refresh.db")
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_db.return_value = FakeDb(db_path)
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            orchestrator = daily_pipeline._build_refresh_orchestrator(db_path)
+
+        expected = {spec.name for spec in refreshable_trading_tasks()}
+        assert set(orchestrator._adapters) == expected
+        # 修复前 _topological_specs 会对全部 29 个 spec 抛 "missing adapter"
+        ordered = orchestrator._topological_specs()
+        assert {spec.name for spec in ordered} == expected
+
+
+class TestRefreshTodayCLI:
+    def test_no_flags_still_runs_legacy_all(self, weekday_mock):
+        with patch.object(sys, "argv", ["daily_pipeline.py"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.run_close_refresh") as refresh, \
+             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as run_all_mock:
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        run_all_mock.assert_called_once()
+        refresh.assert_not_called()
+
+    def test_task_conflicts_with_refresh_today(self, capsys):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--task", "update_bars"]), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--task 不能与 --refresh-today 同时使用" in capsys.readouterr().err
+
+    def test_resume_conflicts_with_refresh_today(self, capsys):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--resume"]), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--resume 不能与 --refresh-today 同时使用" in capsys.readouterr().err
+
+    def test_refresh_today_dispatches_and_never_calls_run_all(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh, \
+             patch("daily_pipeline.run_all") as run_all_mock:
+            daily_pipeline.main()
+        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=False)
+        run_all_mock.assert_not_called()
+
+    def test_refresh_today_forwards_force(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--force"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh:
+            daily_pipeline.main()
+        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=True)
+
+    def test_refresh_today_acquires_global_pipeline_lock(self):
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline._acquire_lock") as lock, \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok):
+            daily_pipeline.main()
+        lock.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            TaskResult.degraded("refresh_today", ErrorKind.DATA_QUALITY, "partial"),
+            TaskResult.failed("refresh_today", ErrorKind.NETWORK, "down"),
+            TaskResult.aborted("refresh_today", error="cancelled"),
+        ],
+    )
+    def test_refresh_today_failure_exits_nonzero(self, result):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=result), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
+
+    def test_refresh_today_interrupt_exits_nonzero(self):
+        """收盘刷新路径被中断必须以非零退出码结束，不得静默返回 0。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", side_effect=KeyboardInterrupt), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
 
 
 # ===========================================================================
@@ -3008,3 +3310,56 @@ def test_get_expected_latest_trading_day_monday_before_market():
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
         result = get_expected_latest_trading_day()
         assert result == "2026-06-19"  # previous Friday
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：fetch_limit_pool_records 只抓取不落库
+# ===========================================================================
+
+
+def test_fetch_limit_pool_records_merges_up_and_down():
+    """涨停池 + 跌停池合并为 legacy 形状；limit_type 互异。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.return_value = pd.DataFrame(
+        [{"代码": "600000", "名称": "浦发银行", "涨跌幅": 10.0, "最新价": 11.0,
+          "换手率": 2.0, "连板数": 2, "所属行业": "银行"}]
+    )
+    fake_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame(
+        [{"代码": "000001", "名称": "平安银行", "涨跌幅": -10.0, "最新价": 9.0,
+          "换手率": 1.0, "所属行业": "银行"}]
+    )
+    with patch.object(macro, "ak", fake_ak):
+        records = macro.fetch_limit_pool_records("2026-07-27")
+
+    fake_ak.stock_zt_pool_em.assert_called_once_with(date="20260727")
+    fake_ak.stock_zt_pool_dtgc_em.assert_called_once_with(date="20260727")
+    assert len(records) == 2
+    by_type = {r["limit_type"]: r for r in records}
+    assert by_type["涨停"]["ts_code"] == "600000"
+    assert by_type["涨停"]["board_count"] == 2
+    assert by_type["跌停"]["ts_code"] == "000001"
+    assert by_type["跌停"]["board_count"] is None
+    assert all(r["trade_date"] == "2026-07-27" for r in records)
+
+
+def test_fetch_limit_pool_records_authoritative_empty():
+    """两池均权威空 → 返回 []（空池 ≠ 源失败）。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.return_value = pd.DataFrame()
+    fake_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    with patch.object(macro, "ak", fake_ak):
+        assert macro.fetch_limit_pool_records("2026-07-27") == []
+
+
+def test_fetch_limit_pool_records_propagates_source_error():
+    """任一池源异常直接上抛，不得吞掉后当空池处理。"""
+    import tasks.macro as macro
+
+    fake_ak = MagicMock()
+    fake_ak.stock_zt_pool_em.side_effect = ConnectionError("em down")
+    with patch.object(macro, "ak", fake_ak), pytest.raises(ConnectionError):
+        macro.fetch_limit_pool_records("2026-07-27")

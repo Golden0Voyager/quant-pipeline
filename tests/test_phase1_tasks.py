@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 import tasks.hkscc_holder as hkscc_holder
 import tasks.institution_survey as institution_survey
@@ -157,6 +158,59 @@ class TestStockPledge:
 
         assert result["saved"] == 1
         assert any(call.kwargs.get("date") == "20260630" for call in ak.stock_gpzy_pledge_ratio_em.call_args_list)
+
+    def test_update_stock_pledge_attaches_stable_source_key(self):
+        """任务层记录必须携带稳定 source_record_key（null pledger 容忍）。"""
+        db = MagicMock()
+        db.save_stock_pledge_batch.return_value = 1
+        with patch.object(stock_pledge, "ak", _ak_with(_pledge_df())):
+            stock_pledge.update_stock_pledge(db)
+            first_keys = [
+                r["source_record_key"]
+                for r in db.save_stock_pledge_batch.call_args.args[0]
+            ]
+            stock_pledge.update_stock_pledge(db)
+            second_keys = [
+                r["source_record_key"]
+                for r in db.save_stock_pledge_batch.call_args.args[0]
+            ]
+        assert all(isinstance(k, str) and len(k) == 64 for k in first_keys)
+        # 同一源行重复抓取 → 键稳定不变
+        assert first_keys == second_keys
+
+    def test_provider_null_pledger_rows_dedupe_on_stable_key(self, tmp_path):
+        """真库：null pledger 行写入两次 → 稳定键去重为 1 行且取最新值。"""
+        import sqlite3
+
+        from providers import SmartMoneyDBProvider
+
+        db_path = tmp_path / "pledge_keys_test.db"
+        provider = SmartMoneyDBProvider(db_path=str(db_path))
+        # conftest 的 DatabaseManager mock 固定共享路径，重绑到本用例专属库
+        provider._db.db_path = str(db_path)
+        provider._ensure_wal_mode()
+        provider._ensure_tables()
+        provider._run_versioned_migrations()
+        record = {
+            "trade_date": "2026-07-21",
+            "stock_code": "000001",
+            "stock_name": "平安银行",
+            "pledger": None,
+            "pledge_amount": 1000000.0,
+            "pledge_ratio": 0.05,
+            "pledge_org": None,
+        }
+        try:
+            assert provider.save_stock_pledge_batch([record]) == 1
+            provider.save_stock_pledge_batch([{**record, "pledge_ratio": 0.06}])
+            with sqlite3.connect(str(db_path)) as conn:
+                rows = conn.execute(
+                    """SELECT pledger, pledge_ratio FROM stock_pledge
+                       WHERE trade_date = '2026-07-21' AND stock_code = '000001'"""
+                ).fetchall()
+        finally:
+            provider.close()
+        assert rows == [(None, 0.06)]
 
 
 # ===========================================================================
@@ -498,3 +552,140 @@ def test_hkscc_result_collection_does_not_sleep_per_symbol():
 
     assert result["saved"] == 3
     sleep.assert_not_called()
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+_T9_TARGET = "2026-07-27"
+
+
+def test_fetch_option_sentiment_record_merges_qvix_and_pcr():
+    """目标日 QVIX 行 + 50ETF PCR 合并为单条记录；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.index_option_50etf_qvix.return_value = pd.DataFrame(
+        [
+            {"date": "2026-07-24", "close": 18.0},
+            {"date": "2026-07-27", "close": 20.5},
+        ]
+    )
+    fake_ak.option_daily_stats_sse.return_value = pd.DataFrame(
+        [{"合约标的代码": "510050", "认沽成交量": 100, "认购成交量": 200,
+          "未平仓认沽合约数": 300, "未平仓认购合约数": 400, "认沽/认购": 0.5}]
+    )
+    with patch.object(option_sentiment, "ak", fake_ak):
+        record = option_sentiment.fetch_option_sentiment_record(_T9_TARGET)
+
+    fake_ak.option_daily_stats_sse.assert_called_once_with(date="20260727")
+    assert record is not None
+    assert record["trade_date"] == _T9_TARGET
+    assert record["qvix"] == 20.5
+    assert record["pcr"] == 0.5
+    assert record["put_volume"] == 100
+    assert record["call_oi"] == 400
+
+    fake_ak.index_option_50etf_qvix.side_effect = ConnectionError("qvix down")
+    with patch.object(option_sentiment, "ak", fake_ak), pytest.raises(ConnectionError):
+        option_sentiment.fetch_option_sentiment_record(_T9_TARGET)
+
+
+def test_fetch_option_sentiment_record_missing_target_day_returns_none():
+    """QVIX 历史无目标日行 → None（是否失败由适配器把关）。"""
+    fake_ak = MagicMock()
+    fake_ak.index_option_50etf_qvix.return_value = pd.DataFrame(
+        [{"date": "2026-07-24", "close": 18.0}]
+    )
+    fake_ak.option_daily_stats_sse.return_value = pd.DataFrame()
+    with patch.object(option_sentiment, "ak", fake_ak):
+        assert option_sentiment.fetch_option_sentiment_record(_T9_TARGET) is None
+
+
+def test_fetch_stock_repurchase_records_attaches_stable_keys():
+    """回购记录归一化并附 64 位稳定键；空返回 []；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_repurchase_em.return_value = pd.DataFrame(
+        [
+            {"股票代码": "600000", "股票简称": "浦发银行", "最新公告日期": "2026-07-27",
+             "已回购金额": 1000.0, "已回购股份价格区间-下限": 9.0,
+             "已回购股份价格区间-上限": 11.0, "已回购股份数量": 100,
+             "实施进度": "实施中"},
+            {"股票代码": "600000", "股票简称": "浦发银行", "最新公告日期": "2026-07-27",
+             "已回购金额": 2000.0, "已回购股份价格区间-下限": 9.0,
+             "已回购股份价格区间-上限": 11.0, "已回购股份数量": 200,
+             "实施进度": "实施中"},
+        ]
+    )
+    with patch.object(stock_repurchase, "ak", fake_ak):
+        records = stock_repurchase.fetch_stock_repurchase_records()
+
+    assert len(records) == 2
+    assert records[0]["stock_code"] == "600000"
+    assert records[0]["trade_date"] == "2026-07-27"
+    assert records[0]["repurchase_price"] == 11.0  # price 缺省取上限
+    keys = [r["source_record_key"] for r in records]
+    assert keys[0] != keys[1]
+    assert all(isinstance(k, str) and len(k) == 64 for k in keys)
+
+    fake_ak.stock_repurchase_em.return_value = pd.DataFrame()
+    with patch.object(stock_repurchase, "ak", fake_ak):
+        assert stock_repurchase.fetch_stock_repurchase_records() == []
+
+    fake_ak.stock_repurchase_em.side_effect = ConnectionError("em down")
+    with patch.object(stock_repurchase, "ak", fake_ak), pytest.raises(ConnectionError):
+        stock_repurchase.fetch_stock_repurchase_records()
+
+
+def test_fetch_institution_survey_records_attaches_stable_keys():
+    """调研记录归一化并附稳定键（同股同日不同机构互异）；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_jgdy_tj_em.return_value = pd.DataFrame(
+        [
+            {"代码": "600000", "名称": "浦发银行", "接待日期": "2026-07-20",
+             "接待方式": "特定对象调研", "接待机构数量": 5},
+            {"代码": "600000", "名称": "浦发银行", "接待日期": "2026-07-20",
+             "接待方式": "现场参观", "接待机构数量": 3},
+        ]
+    )
+    with patch.object(institution_survey, "ak", fake_ak):
+        records = institution_survey.fetch_institution_survey_records("2026-06-27")
+
+    fake_ak.stock_jgdy_tj_em.assert_called_once_with(date="20260627")
+    assert len(records) == 2
+    assert records[0]["stock_code"] == "600000"
+    assert records[0]["survey_count"] == 5
+    keys = [r["source_record_key"] for r in records]
+    assert keys[0] != keys[1]
+    assert all(isinstance(k, str) and len(k) == 64 for k in keys)
+
+    fake_ak.stock_jgdy_tj_em.side_effect = ConnectionError("em down")
+    with patch.object(institution_survey, "ak", fake_ak), pytest.raises(ConnectionError):
+        institution_survey.fetch_institution_survey_records("2026-06-27")
+
+
+def test_fetch_stock_pledge_records_single_date_probe():
+    """单日质押汇总归一化并附稳定键；空日返回 []；异常上抛。"""
+    fake_ak = MagicMock()
+    fake_ak.stock_gpzy_pledge_ratio_em.return_value = pd.DataFrame(
+        [{"股票代码": "600000", "股票简称": "浦发银行", "交易日期": "2026-07-25",
+          "质押比例": "12.5%", "质押股数": 1000.0}]
+    )
+    with patch.object(stock_pledge, "ak", fake_ak):
+        records = stock_pledge.fetch_stock_pledge_records("2026-07-25")
+
+    fake_ak.stock_gpzy_pledge_ratio_em.assert_called_once_with(date="20260725")
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["stock_code"] == "600000"
+    assert rec["trade_date"] == "2026-07-25"
+    assert rec["pledge_ratio"] == 12.5
+    assert rec["pledger"] is None
+    assert isinstance(rec["source_record_key"], str) and len(rec["source_record_key"]) == 64
+
+    fake_ak.stock_gpzy_pledge_ratio_em.return_value = pd.DataFrame()
+    with patch.object(stock_pledge, "ak", fake_ak):
+        assert stock_pledge.fetch_stock_pledge_records("2026-07-25") == []
+
+    fake_ak.stock_gpzy_pledge_ratio_em.side_effect = ConnectionError("em down")
+    with patch.object(stock_pledge, "ak", fake_ak), pytest.raises(ConnectionError):
+        stock_pledge.fetch_stock_pledge_records("2026-07-25")

@@ -191,3 +191,76 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
     results["saved"] = saved
 
     return dict(results)
+
+
+# ===========================================================================
+# 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
+# ===========================================================================
+
+
+def fetch_market_valuation_records(data_date: str) -> list[dict]:
+    """收盘刷新专用：抓取 PE/PB/股债利差三源全历史并按日期合并。
+
+    历史型源，由适配器挑选回看窗口内可接受的目标分区；三源直连
+    akshare 不走 SourceClient（刷新语义要求显式失败），任一源异常
+    直接上抛。每条记录附 data_source/data_date（date 为策略必填键）。
+    """
+    daily_merge: dict[str, dict] = {}
+
+    pe_df = ak.stock_a_ttm_lyr()
+    if pe_df is not None and not pe_df.empty:
+        pe_df = pe_df.rename(columns={
+            "middlePETTM": "pe_median",
+            "quantileInAllHistoryMiddlePeTtm": "pe_quantile",
+            "middlePELYR": "pe_lyr_median",
+        })
+        for _, row in pe_df.iterrows():
+            date_val = str(row.get("date", "")).strip()[:10]
+            if not date_val:
+                continue
+            daily_merge.setdefault(date_val, {"date": date_val}).update({
+                "pe_median": _to_float(row.get("pe_median")),
+                "pe_quantile": _to_float(row.get("pe_quantile")),
+                "pe_lyr_median": _to_float(row.get("pe_lyr_median")),
+            })
+
+    pb_df = ak.stock_a_all_pb()
+    if pb_df is not None and not pb_df.empty:
+        pb_df = pb_df.rename(columns={
+            "middlePB": "pb_median",
+            "quantileInAllHistoryMiddlePB": "pb_quantile",
+        })
+        for _, row in pb_df.iterrows():
+            date_val = str(row.get("date", "")).strip()[:10]
+            if not date_val:
+                continue
+            daily_merge.setdefault(date_val, {"date": date_val}).update({
+                "pb_median": _to_float(row.get("pb_median")),
+                "pb_quantile": _to_float(row.get("pb_quantile")),
+            })
+
+    ebs_df = ak.stock_ebs_lg()
+    if ebs_df is not None and not ebs_df.empty:
+        ebs_df = ebs_df.rename(columns={
+            "日期": "date",
+            "沪深300指数": "csi300_close",
+            "股债利差": "equity_bond_spread",
+            "股债利差均线": "ebs_ma",
+        })
+        for _, row in ebs_df.iterrows():
+            date_val = str(row.get("date", "")).strip()[:10]
+            if not date_val:
+                continue
+            daily_merge.setdefault(date_val, {"date": date_val}).update({
+                "equity_bond_spread": _to_float(row.get("equity_bond_spread")),
+                "ebs_ma": _to_float(row.get("ebs_ma")),
+                "csi300_close": _to_float(row.get("csi300_close")),
+            })
+
+    records: list[dict] = []
+    for date_val in sorted(daily_merge):
+        record = daily_merge[date_val]
+        record["data_source"] = "legu"
+        record["data_date"] = data_date
+        records.append(record)
+    return records

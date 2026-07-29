@@ -32,6 +32,7 @@ A股量化数据自动化抓取管道，支持 AkShare 数据源，具备断点�
 |------|------|
 | `R` | 立即启动完整数据更新 |
 | `M` | 断点续传数据更新 |
+| `U` | 收盘刷新（启动 `daily_pipeline.py --refresh-today`，可选输入股票列表） |
 | `D` | 启动守护进程 |
 | `S` | 停止守护进程 |
 | `H` | 进行数据健康检查 |
@@ -98,6 +99,23 @@ pipe-logs      # 查看最近日志
 pipe-status    # 实时监控（按 Ctrl+C 退出）
 quant-data     # TUI 面板（可视化监控 + 实时日志）
 ```
+
+### 5. 收盘刷新（`--refresh-today`）
+
+收盘后用官方收盘数据整体替换当日盘中抓取的临时数据，覆盖全部 29 个交易日任务，按依赖顺序执行：
+
+```bash
+rtk uv run python daily_pipeline.py --refresh-today
+rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.SH
+```
+
+- **16:00 时间闸门**：北京时间（Asia/Shanghai）16:00 之前运行会被直接拦截，不产生任何写入；确需提前运行时加 `--force`（仅解除时间闸门，数据校验照常执行）。
+- **旧数据保留**：任一任务源端失败或校验失败时，自动重试一次；仍失败则放弃发布，该任务旧数据完整保留，任务标记为 failed/degraded，审计元数据带 `retained_old_data=true`。失败任务的下游任务会被阻断，同样保留旧数据。
+- **运行记录**：每次刷新在主数据库写入一行 `refresh_runs`（run 级别）和每任务一行 `refresh_task_runs`（状态、fetched/validated/replaced/retained/failed 计数与元数据 JSON），可随时回查。
+- **失败队列**：单只股票抓取失败进入 `failed_symbols` 队列并保留旧行；派生任务（指标、筹码分布）只重算日线实际变化的股票，失败股票不重算。
+- **回滚行为**：所有写入先进 staging 校验，再在单个事务内替换目标日分区；复合任务（如 `update_sector_derivatives` 的三张表）任一组件失败则整体回滚，所有表保持原样。
+- **退出码**：任一任务 degraded/failed 时进程以非零码退出，便于脚本与定时任务判断。
+- **TUI 入口**：面板中按 `U`（Close Refresh）确认后即启动收盘刷新。
 
 ---
 
