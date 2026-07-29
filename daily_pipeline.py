@@ -573,8 +573,9 @@ def main():
 
     symbols_arg = args.symbols
     symbols: list[str] | None = None
-    if symbols_arg:
-        if Path(symbols_arg).exists():
+    if symbols_arg is not None:
+        # 空字符串不得进入文件分支：Path("") 会解析为当前目录
+        if symbols_arg and Path(symbols_arg).exists():
             symbols = [
                 line.strip()
                 for line in Path(symbols_arg).read_text(encoding="utf-8").splitlines()
