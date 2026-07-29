@@ -14,7 +14,8 @@ import pandas as pd
 import pytest
 
 import daily_pipeline
-from core.refresh import RefreshOrchestrator
+from core.refresh import CrossSourceCheckConfig, RefreshOrchestrator
+from core.refresh_audit import CrossSourceTolerance
 from core.task_result import ErrorKind, TaskResult
 
 
@@ -1251,6 +1252,103 @@ class TestRunCloseRefresh:
         # 修复前 _topological_specs 会对全部 29 个 spec 抛 "missing adapter"
         ordered = orchestrator._topological_specs()
         assert {spec.name for spec in ordered} == expected
+
+
+# ===========================================================================
+# 跨源抽样校验开关（REFRESH_CROSS_SOURCE，默认关闭）
+# ===========================================================================
+_CROSS_SOURCE_ENV_KEYS = (
+    "REFRESH_CROSS_SOURCE",
+    "REFRESH_CROSS_SOURCE_TASK",
+    "REFRESH_CROSS_SOURCE_SAMPLE_SIZE",
+    "REFRESH_CROSS_SOURCE_PRICE_TOL",
+    "REFRESH_CROSS_SOURCE_VOLUME_TOL",
+)
+
+
+class _FakeCrossSourceVerifier:
+    """手写 CrossSourceVerifier 协议 fake — 只读、不联网。"""
+
+    source_name = "fake_backup"
+    supported_boards = frozenset({"sh_main"})
+
+    def primary_quotes(self, symbols, target_date):
+        return {}
+
+    def reference_quotes(self, symbols, target_date):
+        return {}
+
+
+class TestCrossSourceOptIn:
+    """_build_refresh_orchestrator 的三分支装配：关闭 / 开启+verifier / 开启无 verifier。"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_cross_source_env(self, monkeypatch):
+        for key in _CROSS_SOURCE_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+
+    def _build(self, tmp_path, **kwargs):
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_loader.return_value = MagicMock()
+            return daily_pipeline._build_refresh_orchestrator(
+                str(tmp_path / "audit.db"), **kwargs
+            )
+
+    @pytest.mark.parametrize("flag", [None, "0", "false"])
+    def test_disabled_builds_without_cross_source(self, tmp_path, monkeypatch, flag):
+        """默认（或显式关闭）不装配跨源校验 — 与现状行为完全一致。"""
+        if flag is not None:
+            monkeypatch.setenv("REFRESH_CROSS_SOURCE", flag)
+        orchestrator = self._build(tmp_path)
+        assert orchestrator._cross_source is None
+        assert orchestrator._verifier is None
+
+    def test_enabled_with_injected_verifier_uses_env_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE_TASK", "update_indicators")
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE_SAMPLE_SIZE", "7")
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE_PRICE_TOL", "0.01")
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE_VOLUME_TOL", "0.1")
+        fake = _FakeCrossSourceVerifier()
+        orchestrator = self._build(tmp_path, cross_source_verifier=fake)
+        assert orchestrator._verifier is fake
+        cfg = orchestrator._cross_source
+        assert isinstance(cfg, CrossSourceCheckConfig)
+        assert cfg.task_name == "update_indicators"
+        assert cfg.sample_size == 7
+        assert cfg.tolerance == CrossSourceTolerance(price=0.01, volume=0.1)
+
+    def test_enabled_with_verifier_falls_back_to_defaults(self, tmp_path, monkeypatch):
+        """只开开关时使用默认 task/sample/容差（容差为临时值，待真实数据调参）。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "true")
+        fake = _FakeCrossSourceVerifier()
+        orchestrator = self._build(tmp_path, cross_source_verifier=fake)
+        cfg = orchestrator._cross_source
+        assert cfg.task_name == "update_bars"
+        assert cfg.sample_size == 30
+        assert cfg.tolerance == CrossSourceTolerance(price=0.005, volume=0.05)
+
+    def test_enabled_without_verifier_raises_loudly(self, tmp_path, monkeypatch):
+        """开关打开但没有 verifier 必须大声失败，绝不静默跳过。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+        with pytest.raises(RuntimeError, match="REFRESH_CROSS_SOURCE.*verifier"):
+            self._build(tmp_path)
+
+    def test_run_close_refresh_threads_verifier_to_builder(self, tmp_path):
+        fake = _FakeCrossSourceVerifier()
+        built = MagicMock()
+        built.run.return_value = TaskResult.success("refresh_today", saved=0)
+        with patch("daily_pipeline._build_refresh_orchestrator", return_value=built) as build, \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                cross_source_verifier=fake,
+            )
+        build.assert_called_once_with(
+            str(tmp_path / "refresh.db"), cross_source_verifier=fake
+        )
 
 
 class TestRefreshTodayCLI:

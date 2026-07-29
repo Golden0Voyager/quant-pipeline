@@ -92,6 +92,52 @@ SHARED_DATA_DIR = Path(DB_PATH).parent
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2190"))
 
 # ---------------------------------------------------------------------------
+# 收盘刷新跨源抽样校验（--refresh-today，默认关闭）
+# ---------------------------------------------------------------------------
+# 默认值可为模块常量，但环境变量必须在调用时读取（见 read_cross_source_config），
+# 避免 import 期固化导致测试无法通过 monkeypatch 翻转开关。
+CROSS_SOURCE_TASK_DEFAULT = "update_bars"
+CROSS_SOURCE_SAMPLE_SIZE_DEFAULT = 30
+# 注意：以下容差为临时值，必须先用真实数据调参后才可信任该校验结果（后续第 3 步）。
+CROSS_SOURCE_PRICE_TOL_DEFAULT = 0.005
+CROSS_SOURCE_VOLUME_TOL_DEFAULT = 0.05
+
+
+@dataclass(frozen=True)
+class CrossSourceEnvConfig:
+    """从环境变量读取的跨源校验配置快照。"""
+
+    enabled: bool
+    task_name: str
+    sample_size: int
+    price_tol: float
+    volume_tol: float
+
+
+def read_cross_source_config() -> CrossSourceEnvConfig:
+    """每次调用即时读取环境变量（与 INCLUDE_BJ 相同的布尔约定）。"""
+    return CrossSourceEnvConfig(
+        enabled=os.getenv("REFRESH_CROSS_SOURCE", "0").lower() in ("1", "true", "yes"),
+        task_name=os.getenv("REFRESH_CROSS_SOURCE_TASK", CROSS_SOURCE_TASK_DEFAULT),
+        sample_size=int(
+            os.getenv(
+                "REFRESH_CROSS_SOURCE_SAMPLE_SIZE", str(CROSS_SOURCE_SAMPLE_SIZE_DEFAULT)
+            )
+        ),
+        price_tol=float(
+            os.getenv(
+                "REFRESH_CROSS_SOURCE_PRICE_TOL", str(CROSS_SOURCE_PRICE_TOL_DEFAULT)
+            )
+        ),
+        volume_tol=float(
+            os.getenv(
+                "REFRESH_CROSS_SOURCE_VOLUME_TOL", str(CROSS_SOURCE_VOLUME_TOL_DEFAULT)
+            )
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 日志配置（统一存放到数据目录下）
 # ---------------------------------------------------------------------------
 LOG_DIR = SHARED_DATA_DIR / "logs"
