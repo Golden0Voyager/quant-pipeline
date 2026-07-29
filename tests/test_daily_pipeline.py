@@ -16,6 +16,7 @@ import pytest
 import daily_pipeline
 from core.refresh import CrossSourceCheckConfig, RefreshOrchestrator
 from core.refresh_audit import CrossSourceTolerance
+from core.refresh_cross_source import XueqiuCrossSourceVerifier
 from core.task_result import ErrorKind, TaskResult
 
 
@@ -1263,6 +1264,7 @@ _CROSS_SOURCE_ENV_KEYS = (
     "REFRESH_CROSS_SOURCE_SAMPLE_SIZE",
     "REFRESH_CROSS_SOURCE_PRICE_TOL",
     "REFRESH_CROSS_SOURCE_VOLUME_TOL",
+    "REFRESH_CROSS_SOURCE_REPORT_ONLY",
 )
 
 
@@ -1280,7 +1282,7 @@ class _FakeCrossSourceVerifier:
 
 
 class TestCrossSourceOptIn:
-    """_build_refresh_orchestrator 的三分支装配：关闭 / 开启+verifier / 开启无 verifier。"""
+    """_build_refresh_orchestrator 的装配分支：关闭 / 开启+注入 verifier / 开启默认 verifier。"""
 
     @pytest.fixture(autouse=True)
     def _clean_cross_source_env(self, monkeypatch):
@@ -1317,6 +1319,8 @@ class TestCrossSourceOptIn:
         assert cfg.task_name == "update_indicators"
         assert cfg.sample_size == 7
         assert cfg.tolerance == CrossSourceTolerance(price=0.01, volume=0.1)
+        # 未设 REFRESH_CROSS_SOURCE_REPORT_ONLY 时默认观察模式（安全灰度）
+        assert cfg.report_only is True
 
     def test_enabled_with_verifier_falls_back_to_defaults(self, tmp_path, monkeypatch):
         """只开开关时使用默认 task/sample/容差（容差为临时值，待真实数据调参）。"""
@@ -1327,12 +1331,54 @@ class TestCrossSourceOptIn:
         assert cfg.task_name == "update_bars"
         assert cfg.sample_size == 30
         assert cfg.tolerance == CrossSourceTolerance(price=0.005, volume=0.05)
+        assert cfg.report_only is True
 
-    def test_enabled_without_verifier_raises_loudly(self, tmp_path, monkeypatch):
-        """开关打开但没有 verifier 必须大声失败，绝不静默跳过。"""
+    def test_enabled_without_injected_verifier_builds_default_xueqiu(
+        self, tmp_path, monkeypatch
+    ):
+        """开关打开且未注入 verifier：装配默认雪球 verifier，取代步骤 1 的 RuntimeError。"""
         monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
-        with pytest.raises(RuntimeError, match="REFRESH_CROSS_SOURCE.*verifier"):
-            self._build(tmp_path)
+        db_path = str(tmp_path / "audit.db")
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_loader.return_value = MagicMock()
+            orchestrator = daily_pipeline._build_refresh_orchestrator(db_path)
+        verifier = orchestrator._verifier
+        assert isinstance(verifier, XueqiuCrossSourceVerifier)
+        assert verifier._db_path == db_path
+        cfg = orchestrator._cross_source
+        assert isinstance(cfg, CrossSourceCheckConfig)
+        # 首次启用默认先观察不降级：report_only 默认 True
+        assert cfg.report_only is True
+
+    def test_report_only_env_zero_switches_to_enforce(self, tmp_path, monkeypatch):
+        """显式 REFRESH_CROSS_SOURCE_REPORT_ONLY=0 才进入 enforce（重试+降级）模式。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE_REPORT_ONLY", "0")
+        orchestrator = self._build(tmp_path)
+        assert orchestrator._cross_source.report_only is False
+
+    def test_injected_verifier_takes_precedence_over_default(
+        self, tmp_path, monkeypatch
+    ):
+        """测试接缝保留：注入的 verifier 优先于默认雪球 verifier。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+        fake = _FakeCrossSourceVerifier()
+        orchestrator = self._build(tmp_path, cross_source_verifier=fake)
+        assert orchestrator._verifier is fake
+        assert not isinstance(orchestrator._verifier, XueqiuCrossSourceVerifier)
+
+    def test_falsy_injected_verifier_is_not_replaced(self, tmp_path, monkeypatch):
+        """注入判断必须是 is None 身份检查：假值但有效的 verifier 不得被
+        默认雪球 verifier 静默替换。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+
+        class _FalsyVerifier(_FakeCrossSourceVerifier):
+            def __bool__(self) -> bool:
+                return False
+
+        fake = _FalsyVerifier()
+        orchestrator = self._build(tmp_path, cross_source_verifier=fake)
+        assert orchestrator._verifier is fake
 
     def test_run_close_refresh_threads_verifier_to_builder(self, tmp_path):
         fake = _FakeCrossSourceVerifier()

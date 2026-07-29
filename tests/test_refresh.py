@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -657,6 +658,8 @@ def _cross_orchestrator(
     adapter: CrossCheckedAdapter,
     verifier: FakeVerifier,
     store: RecordingStore,
+    *,
+    report_only: bool = False,
 ) -> RefreshOrchestrator:
     return RefreshOrchestrator(
         specs=(_spec("bars", supports_symbols=True),),
@@ -665,6 +668,7 @@ def _cross_orchestrator(
         cross_source=CrossSourceCheckConfig(
             task_name="bars",
             tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+            report_only=report_only,
         ),
         verifier=verifier,
     )
@@ -802,3 +806,227 @@ def test_cross_source_config_requires_matching_verifier() -> None:
                 tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
             ),
         )
+
+
+def test_cross_source_report_only_mismatch_observes_without_degrade_or_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """report_only 下发现不一致：只记录 + 告警，绝不降级、绝不定向重试。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert result.metadata["task_statuses"] == {"bars": "success"}
+    # 只有初始全市场一次拉取：观察模式绝不触发定向重试
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["report_only"] is True
+    assert summary["mismatched"] == ("300001.SZ",)
+    assert "retried_symbols" not in summary
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("300001.SZ" in message for message in warnings)
+
+
+def test_cross_source_report_only_compare_error_recorded_not_degraded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """report_only 下比对异常：记录 error + 告警，任务状态保持成功。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        reference_error=ConnectionError("backup source down"),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["report_only"] is True
+    assert "backup source down" in summary["error"]
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("backup source down" in message for message in warnings)
+
+
+def test_cross_source_report_only_splits_unverifiable_from_mismatched(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """停牌/无数据样本归入 unverifiable，真实分歧归入 mismatched，两桶分开
+    记录并分别告警；report_only 下两者都绝不触发降级或重试。"""
+    store = RecordingStore()
+    reference = _quotes()
+    reference.pop("688001.SH")  # 停牌：参考源无数据
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=reference,
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 1
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["mismatched"] == ("300001.SZ",)
+    assert summary["unverifiable"] == ("688001.SH",)
+    assert "reference_dead" not in summary
+    assert "retried_symbols" not in summary
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("unverifiable" in m and "688001.SH" in m for m in warnings)
+    assert any("mismatch" in m and "300001.SZ" in m for m in warnings)
+
+
+def test_cross_source_enforce_unverifiable_only_never_retries_or_degrades() -> None:
+    """enforce 下仅部分样本不可校验且无真实分歧：不重试、不降级。"""
+    store = RecordingStore()
+    reference = _quotes()
+    reference.pop("688001.SH")
+    reference.pop("830799.BJ")
+    verifier = FakeVerifier(primary=_quotes(), reference=reference)
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["mismatched"] == ()
+    assert summary["unverifiable"] == ("688001.SH", "830799.BJ")
+    # 未触发重试时两个复核桶也必须预置为空元组，消费方永不 KeyError
+    assert summary["still_mismatched"] == ()
+    assert summary["still_unverifiable"] == ()
+    assert "retried_symbols" not in summary
+    assert "reference_dead" not in summary
+
+
+def test_cross_source_enforce_retry_targets_only_real_mismatches() -> None:
+    """enforce 下定向重试只针对真实分歧股票，unverifiable 绝不参与重试。"""
+    store = RecordingStore()
+    reference = _quotes()
+    reference.pop("688001.SH")
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=reference,
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1].symbols == ("300001.SZ",)
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["mismatched"] == ("300001.SZ",)
+    assert summary["unverifiable"] == ("688001.SH",)
+    assert summary["retried_symbols"] == ("300001.SZ",)
+    assert summary["still_mismatched"] == ()
+
+
+@dataclass
+class ReferenceVanishingAdapter(CrossCheckedAdapter):
+    """定向重试期间参考源对重试股票失去数据（复核时变为不可校验）。"""
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols is not None:
+            for symbol in context.symbols:
+                self.verifier.reference.pop(symbol, None)
+        return super().refresh(context)
+
+
+def test_cross_source_enforce_recheck_unverifiable_is_not_still_mismatched() -> None:
+    """enforce 复核：重试后参考源失去数据的股票归入 still_unverifiable，
+    绝不算 still_mismatched，也绝不因此降级（重试行已过 validate_task）。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = ReferenceVanishingAdapter("bars", verifier, fix_on_retry=False)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert result.metadata["task_statuses"] == {"bars": "success"}
+    # 恰好一次定向重试，绝无全市场重拉
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1].symbols == ("300001.SZ",)
+    record = _task_record(store)
+    assert record["status"] == "success"
+    # 旧数据保留：记录保持原始发布计数
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert summary["retried_symbols"] == ("300001.SZ",)
+    assert summary["still_mismatched"] == ()
+    assert summary["still_unverifiable"] == ("300001.SZ",)
+
+
+def test_cross_source_enforce_dead_reference_degrades_without_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """死参考源守卫：非空样本零覆盖 ⇒ enforce 下降级且绝不定向重试。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(primary=_quotes(), reference={})
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "degraded"
+    # 旧数据保留：记录保持原始发布计数，绝无全市场重拉或删除
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert summary["reference_dead"] is True
+    assert summary["mismatched"] == ()
+    assert len(summary["unverifiable"]) == len(summary["sampled"])
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("no data for any sampled symbol" in m for m in warnings)
+
+
+def test_cross_source_report_only_dead_reference_records_flag_without_degrade(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """report_only 下死参考源：只记 reference_dead + 告警，任务保持成功。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(primary=_quotes(), reference={})
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["reference_dead"] is True
+    assert summary["mismatched"] == ()
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("no data for any sampled symbol" in m for m in warnings)
