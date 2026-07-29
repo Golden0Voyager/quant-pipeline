@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -657,6 +658,8 @@ def _cross_orchestrator(
     adapter: CrossCheckedAdapter,
     verifier: FakeVerifier,
     store: RecordingStore,
+    *,
+    report_only: bool = False,
 ) -> RefreshOrchestrator:
     return RefreshOrchestrator(
         specs=(_spec("bars", supports_symbols=True),),
@@ -665,6 +668,7 @@ def _cross_orchestrator(
         cross_source=CrossSourceCheckConfig(
             task_name="bars",
             tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+            report_only=report_only,
         ),
         verifier=verifier,
     )
@@ -802,3 +806,61 @@ def test_cross_source_config_requires_matching_verifier() -> None:
                 tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
             ),
         )
+
+
+def test_cross_source_report_only_mismatch_observes_without_degrade_or_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """report_only 下发现不一致：只记录 + 告警，绝不降级、绝不定向重试。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert result.metadata["task_statuses"] == {"bars": "success"}
+    # 只有初始全市场一次拉取：观察模式绝不触发定向重试
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["report_only"] is True
+    assert summary["mismatched"] == ("300001.SZ",)
+    assert "retried_symbols" not in summary
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("300001.SZ" in message for message in warnings)
+
+
+def test_cross_source_report_only_compare_error_recorded_not_degraded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """report_only 下比对异常：记录 error + 告警，任务状态保持成功。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        reference_error=ConnectionError("backup source down"),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = _cross_orchestrator(
+            adapter, verifier, store, report_only=True
+        ).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "success"
+    summary = record["metadata"]["cross_source"]
+    assert summary["report_only"] is True
+    assert "backup source down" in summary["error"]
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("backup source down" in message for message in warnings)
