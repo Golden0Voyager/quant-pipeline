@@ -27,6 +27,7 @@ from core.refresh import (
 from core.refresh_store import (
     CompositeReplacement,
     DateSnapshotReplacement,
+    KeyedUpsertReplacement,
     SQLiteRefreshStore,
 )
 from core.task_registry import (
@@ -55,8 +56,10 @@ _SECTOR_VALUATION_COLUMNS = ("sector_name", "trade_date", "pe")
 _BASIS_COLUMNS = ("trade_date", "futures_code", "basis")
 
 # The authoritative close snapshot published by the fake bars adapter.
-# 300750.SZ existed intraday but is absent at close: the partition
-# replacement must remove that ghost row.
+# 300750.SZ existed intraday but is absent from the close feed: keyed
+# upsert intentionally retains rows for symbols it did not fetch, so the
+# intraday row survives (ghost-row cleanup is a separate concern, not
+# bars' responsibility).
 _CLOSE_ROWS: tuple[tuple[object, ...], ...] = (
     ("000001.SZ", _TARGET, 10.0, 10.6, 9.9, 10.5, 1_000.0, 10_500.0, "close"),
     ("600000.SH", _TARGET, 20.0, 20.4, 19.8, 20.2, 2_000.0, 40_400.0, "close"),
@@ -232,22 +235,21 @@ class GenericAdapter:
 
 @dataclass
 class PublishingBarsAdapter:
-    """Publishes the close snapshot through the real atomic store."""
+    """Publishes the close rows through the real atomic keyed upsert."""
 
     store: SQLiteRefreshStore
     rows: tuple[tuple[object, ...], ...] = _CLOSE_ROWS
-    date_value: str | None = None
     contexts: list[RefreshContext] = field(default_factory=list)
 
     def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
         self.contexts.append(context)
-        self.store.replace_date_snapshot(
-            DateSnapshotReplacement(
+        # Mirrors the real BarsRefreshAdapter: per-symbol upsert keyed on
+        # (ts_code, trade_date); never deletes rows it did not fetch.
+        self.store.upsert_keyed_snapshot(
+            KeyedUpsertReplacement(
                 table="daily_bars",
                 columns=_BAR_COLUMNS,
                 rows=self.rows,
-                date_column="trade_date",
-                date_value=self.date_value or context.target_date,
                 natural_keys=("ts_code", "trade_date"),
                 required_fields=("open", "high", "low", "close", "volume", "amount"),
             )
@@ -378,10 +380,10 @@ def _run(
     return orchestrator.run(_context(symbols=symbols))
 
 
-# ── acceptance: close rows replace intraday rows ───────────────────────
+# ── acceptance: close rows upsert fetched symbols only ────────────────────
 
 
-def test_close_rows_replace_intraday_target_partition(
+def test_close_rows_upsert_fetched_symbols_and_retain_absent(
     db_path: Path, store: SQLiteRefreshStore
 ) -> None:
     specs = refreshable_trading_tasks()
@@ -392,10 +394,16 @@ def test_close_rows_replace_intraday_target_partition(
 
     assert result.status is TaskStatus.SUCCESS
     assert result.exit_failure is False
-    assert _target_bar_rows(db_path) == _CLOSE_ROWS
-    # The intraday-only ghost row (300750.SZ) is gone with the partition.
+    # Fetched symbols are overwritten from intraday to close values; the
+    # intraday-only 300750.SZ row is retained because keyed upsert never
+    # deletes rows for symbols absent from the close feed.
+    assert _target_bar_rows(db_path) == (
+        _CLOSE_ROWS[0],
+        ("300750.SZ", _TARGET, 184.0, 186.0, 183.0, 185.0, 100.0, 18500.0, "intraday"),
+        _CLOSE_ROWS[1],
+    )
     sources = {row[-1] for row in _target_bar_rows(db_path)}
-    assert sources == {"close"}
+    assert sources == {"close", "intraday"}
 
 
 def test_historical_rows_are_byte_for_byte_unchanged(
@@ -467,10 +475,10 @@ def test_store_validation_failure_retains_old_rows(
 ) -> None:
     before = _literal_dump(db_path, "daily_bars", _BAR_COLUMNS)
     specs = refreshable_trading_tasks()
-    # Rows dated on a historical day while claiming the target partition:
-    # the real store must refuse to publish them.
+    # Rows with an empty required field: the real store must refuse to
+    # publish them (keyed upsert validates required_fields before staging).
     poisoned = tuple(
-        (row[0], _HISTORY, *row[2:]) for row in _CLOSE_ROWS
+        (*row[:5], None, *row[6:]) for row in _CLOSE_ROWS
     )
     bars = PublishingBarsAdapter(store, rows=poisoned)
     adapters = _build_adapters(specs, {"update_bars": bars})

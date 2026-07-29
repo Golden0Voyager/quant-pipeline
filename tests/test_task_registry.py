@@ -262,7 +262,7 @@ class TestRefreshPolicies:
 
     def test_policies_match_the_approved_strategy_matrix(self):
         expected = {
-            "update_bars": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
+            "update_bars": (RefreshKind.REMOTE_KEYED_UPSERT, DateStrategy.EXACT_TARGET),
             "update_indicators": (RefreshKind.DERIVED_RECOMPUTE, DateStrategy.EXACT_TARGET),
             "update_fundamentals": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
             "update_market_snapshot": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
