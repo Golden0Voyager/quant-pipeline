@@ -915,6 +915,9 @@ def test_cross_source_enforce_unverifiable_only_never_retries_or_degrades() -> N
     summary = record["metadata"]["cross_source"]
     assert summary["mismatched"] == ()
     assert summary["unverifiable"] == ("688001.SH", "830799.BJ")
+    # 未触发重试时两个复核桶也必须预置为空元组，消费方永不 KeyError
+    assert summary["still_mismatched"] == ()
+    assert summary["still_unverifiable"] == ()
     assert "retried_symbols" not in summary
     assert "reference_dead" not in summary
 
@@ -940,6 +943,44 @@ def test_cross_source_enforce_retry_targets_only_real_mismatches() -> None:
     assert summary["unverifiable"] == ("688001.SH",)
     assert summary["retried_symbols"] == ("300001.SZ",)
     assert summary["still_mismatched"] == ()
+
+
+@dataclass
+class ReferenceVanishingAdapter(CrossCheckedAdapter):
+    """定向重试期间参考源对重试股票失去数据（复核时变为不可校验）。"""
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols is not None:
+            for symbol in context.symbols:
+                self.verifier.reference.pop(symbol, None)
+        return super().refresh(context)
+
+
+def test_cross_source_enforce_recheck_unverifiable_is_not_still_mismatched() -> None:
+    """enforce 复核：重试后参考源失去数据的股票归入 still_unverifiable，
+    绝不算 still_mismatched，也绝不因此降级（重试行已过 validate_task）。"""
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = ReferenceVanishingAdapter("bars", verifier, fix_on_retry=False)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert result.metadata["task_statuses"] == {"bars": "success"}
+    # 恰好一次定向重试，绝无全市场重拉
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1].symbols == ("300001.SZ",)
+    record = _task_record(store)
+    assert record["status"] == "success"
+    # 旧数据保留：记录保持原始发布计数
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert summary["retried_symbols"] == ("300001.SZ",)
+    assert summary["still_mismatched"] == ()
+    assert summary["still_unverifiable"] == ("300001.SZ",)
 
 
 def test_cross_source_enforce_dead_reference_degrades_without_retry(
