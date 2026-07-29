@@ -1190,3 +1190,45 @@ class TestNormalizeBarRowForRefresh:
         row, reason = normalize_bar_row_for_refresh(df, "000001", _REFRESH_TARGET)
         assert row is None
         assert reason
+
+    def test_populates_derived_fields_from_source_row(self):
+        """源行带 turnover/pct_change/amplitude → 按 DB 列名带出同源衍生值。
+
+        loader 的 DataFrame 列名为 turnover（换手率）/pct_change（涨跌幅）/
+        amplitude（振幅）；归一化行用 DB 列名 turnover_rate/pct_change/amplitude。
+        """
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(turnover=2.5, pct_change=1.8, amplitude=3.2),
+            "000001",
+            _REFRESH_TARGET,
+        )
+        assert reason is None
+        assert row["turnover_rate"] == 2.5
+        assert row["pct_change"] == 1.8
+        assert row["amplitude"] == 3.2
+
+    def test_missing_derived_fields_become_none_without_rejection(self):
+        """源行缺三个衍生列 → 置 None（写 NULL 可见陈旧），绝不因此拒绝。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(), "000001", _REFRESH_TARGET
+        )
+        assert reason is None
+        assert row["turnover_rate"] is None
+        assert row["pct_change"] is None
+        assert row["amplitude"] is None
+
+    def test_nan_derived_fields_become_none(self):
+        """NaN 衍生值 → None，不把 NaN 写进库。"""
+        row, reason = normalize_bar_row_for_refresh(
+            _refresh_bar_df(
+                turnover=float("nan"),
+                pct_change=float("nan"),
+                amplitude=float("nan"),
+            ),
+            "000001",
+            _REFRESH_TARGET,
+        )
+        assert reason is None
+        assert row["turnover_rate"] is None
+        assert row["pct_change"] is None
+        assert row["amplitude"] is None
