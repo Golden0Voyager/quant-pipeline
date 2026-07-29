@@ -86,7 +86,8 @@ class XueqiuCrossSourceVerifier:
         """逐只读取雪球 qfq 日线的目标日 close/volume（volume 归一为手）。
 
         空 DataFrame（停牌/无数据）或缺目标日行的股票直接跳过不发键；
-        缺键在下游比对中如何计入由 cross_source_mismatches 统一裁决。
+        缺键在下游比对中如何计入由 compare_cross_source_quotes 统一裁决
+        （归入 unverifiable 桶，与真实分歧 mismatched 分开）。
         """
         xq = self._xq_module()
         target = pd.to_datetime(target_date).normalize()
