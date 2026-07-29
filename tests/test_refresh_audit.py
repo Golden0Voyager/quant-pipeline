@@ -278,3 +278,48 @@ def test_dead_source_is_degraded_metadata_and_cannot_claim_replacement() -> None
                 },
             ),
         )
+
+
+def test_dead_source_accepts_attested_empty_baseline() -> None:
+    report = RefreshAudit().validate_task(
+        _spec(),
+        _context(),
+        _result(
+            as_of_date=None,
+            fetched=0,
+            validated=0,
+            replaced=0,
+            retained=0,
+            metadata={
+                "source_status": "dead_source",
+                "reason": "provider endpoint retired",
+                "baseline_empty": True,
+            },
+        ),
+    )
+
+    assert report.degraded is True
+    assert report.dead_source is True
+
+
+@pytest.mark.parametrize("attestation", [{}, {"baseline_empty": 1}], ids=["absent", "truthy-non-bool"])
+def test_dead_source_rejects_zero_retained_without_attestation(
+    attestation: dict[str, object],
+) -> None:
+    with pytest.raises(RefreshAuditError, match="dead source"):
+        RefreshAudit().validate_task(
+            _spec(),
+            _context(),
+            _result(
+                as_of_date=None,
+                fetched=0,
+                validated=0,
+                replaced=0,
+                retained=0,
+                metadata={
+                    "source_status": "dead_source",
+                    "reason": "provider endpoint retired",
+                    **attestation,
+                },
+            ),
+        )
