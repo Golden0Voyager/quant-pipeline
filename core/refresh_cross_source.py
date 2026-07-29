@@ -62,8 +62,9 @@ class XueqiuCrossSourceVerifier:
         if not symbols:
             return {}
         placeholders = ",".join("?" for _ in symbols)
-        # 与 core/refresh_adapters._target_partition_symbols 相同的只读查询模式
-        conn = sqlite3.connect(self._db_path)
+        # 与 core/refresh_adapters._target_partition_symbols 相同的查询模式；
+        # mode=ro 结构性保证只读：连接层面就无法写入或创建库文件
+        conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
             fetched = conn.execute(
                 "SELECT ts_code, close, volume FROM daily_bars"
