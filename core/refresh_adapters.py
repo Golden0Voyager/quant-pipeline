@@ -961,6 +961,7 @@ class MarginTradingRefreshAdapter:
     store: SQLiteRefreshStore
     fetch_records: Callable[[str], list[dict]] = field(default=fetch_margin_trading_records)
     lookback_days: int = 3
+    minimum_coverage: float = 0.8
 
     task_name = "update_margin_trading"
 
@@ -1015,6 +1016,7 @@ class MarginTradingRefreshAdapter:
                     date_column="trade_date",
                     date_value=as_of,
                     natural_keys=("trade_date", "ts_code"),
+                    minimum_coverage=self.minimum_coverage,
                 )
             )
 
@@ -1053,6 +1055,7 @@ class SouthFlowRefreshAdapter:
     store: SQLiteRefreshStore
     fetch_records: Callable[[], list[dict]] = field(default=fetch_south_flow_records)
     lookback_days: int = 3
+    minimum_coverage: float = 0.8
 
     task_name = "update_south_flow"
 
@@ -1084,6 +1087,7 @@ class SouthFlowRefreshAdapter:
                 date_column="trade_date",
                 date_value=as_of,
                 natural_keys=("trade_date", "market"),
+                minimum_coverage=self.minimum_coverage,
             )
         )
 
@@ -1124,6 +1128,7 @@ class IndexDailyRefreshAdapter:
     store: SQLiteRefreshStore
     fetch_records: Callable[[], list[dict]] = field(default=fetch_index_daily_records)
     lookback_days: int = 3
+    minimum_coverage: float = 0.8
 
     task_name = "update_index_daily"
 
@@ -1177,6 +1182,7 @@ class IndexDailyRefreshAdapter:
                 date_value=as_of,
                 natural_keys=("trade_date", "index_code"),
                 required_fields=("close",),
+                minimum_coverage=self.minimum_coverage,
             )
         )
 
@@ -1287,6 +1293,7 @@ class CbIndexRefreshAdapter:
     store: SQLiteRefreshStore
     fetch_records: Callable[[], list[dict]] = field(default=fetch_cb_index_records)
     lookback_days: int = 3
+    minimum_coverage: float = 0.8
 
     task_name = "update_cb_index"
 
@@ -1319,6 +1326,7 @@ class CbIndexRefreshAdapter:
                 date_value=as_of,
                 natural_keys=("trade_date", "index_code"),
                 required_fields=("close",),
+                minimum_coverage=self.minimum_coverage,
             )
         )
 
