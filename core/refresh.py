@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,8 @@ from core.task_result import ErrorKind, TaskResult, TaskStatus
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _CLOSE_TIME = time(16, 0)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,11 +151,18 @@ class CrossSourceVerifier(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CrossSourceCheckConfig:
-    """Which task is cross-checked and with what sampling parameters."""
+    """Which task is cross-checked and with what sampling parameters.
+
+    ``report_only=True`` switches the check to observe-only rollout mode:
+    mismatches (or comparison errors) are recorded in the task metadata and
+    logged as warnings, but the task is never degraded and no targeted
+    retry is issued.
+    """
 
     task_name: str
     tolerance: CrossSourceTolerance
     sample_size: int = 30
+    report_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.task_name:
@@ -526,6 +536,38 @@ class RefreshOrchestrator:
             "still_mismatched": (),
         }
         execution.metadata["cross_source"] = summary
+        if config.report_only:
+            # 观察模式：只记录 + 告警，绝不降级也绝不定向重试，用于在
+            # 真实数据上验证容差与口径假设（如雪球成交量 /100 换算）。
+            summary["report_only"] = True
+            if not sample.symbols:
+                return execution
+            try:
+                mismatched = self._compare_quotes(
+                    verifier, sample.symbols, context.target_date, config.tolerance
+                )
+            except Exception as exc:
+                summary["error"] = str(exc)
+                logger.warning(
+                    "cross-source report-only check for %s against %s failed: %s",
+                    spec.name,
+                    verifier.source_name,
+                    exc,
+                )
+                return execution
+            summary["mismatched"] = mismatched
+            if mismatched:
+                logger.warning(
+                    "cross-source report-only check for %s: %d/%d sampled "
+                    "symbols mismatch %s: %s",
+                    spec.name,
+                    len(mismatched),
+                    len(sample.symbols),
+                    verifier.source_name,
+                    ", ".join(mismatched),
+                )
+            return execution
+
         if not sample.symbols:
             return execution
 
