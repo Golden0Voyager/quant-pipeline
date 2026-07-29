@@ -865,8 +865,12 @@ class SmartMoneyDBProvider:
     def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_margin_trading(symbol, date)
 
-    def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> None:
-        self._db.save_dragon_tiger(symbol, data)
+    def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> int:
+        """单条保存龙虎榜：改走本地 keyed-UPSERT 批量路径（011 后外部写入缺
+        source_record_key 会触发 IntegrityError）。"""
+        return self.save_dragon_tiger_batch(
+            [{**data, "ts_code": data.get("ts_code", symbol)}]
+        )
 
     def save_dragon_tiger_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存龙虎榜数据（稳定事件键 UPSERT，同股同日多事件共存）。"""
@@ -909,6 +913,9 @@ class SmartMoneyDBProvider:
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            # 结构性/约束错误必须外抛：让调用方审计标记失败，而非静默记 0
+            raise
         except Exception as e:
             logger.warning(f"⚠️ 龙虎榜批量保存失败: {e}")
             return 0
@@ -1029,8 +1036,12 @@ class SmartMoneyDBProvider:
         finally:
             conn.close()
 
-    def save_block_trade(self, symbol: str, data: dict[str, Any]) -> None:
-        self._db.save_block_trade(symbol, data)
+    def save_block_trade(self, symbol: str, data: dict[str, Any]) -> int:
+        """单条保存大宗交易：改走本地 keyed-UPSERT 批量路径（011 后外部写入缺
+        source_record_key 会触发 IntegrityError）。"""
+        return self.save_block_trade_batch(
+            [{**data, "ts_code": data.get("ts_code", symbol)}]
+        )
 
     def save_block_trade_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存大宗交易数据（稳定事件键 UPSERT，同股同日多笔交易共存）。"""
@@ -1072,6 +1083,9 @@ class SmartMoneyDBProvider:
                     ],
                 )
                 return self._commit_delta(conn, before_changes)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            # 结构性/约束错误必须外抛：让调用方审计标记失败，而非静默记 0
+            raise
         except Exception as e:
             logger.warning(f"⚠️ 大宗交易批量保存失败: {e}")
             return 0

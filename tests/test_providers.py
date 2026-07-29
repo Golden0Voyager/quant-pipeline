@@ -1,9 +1,11 @@
 """Tests for providers.py with mocked dependencies."""
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 
 def test_smartmoney_db_provider():
@@ -48,8 +50,9 @@ def test_db_provider_methods():
     provider.save_fundamentals("000001.SZ", {"pe": 10})
     provider.save_fund_flow("000001.SZ", {"net_inflow": 1000000})
     provider.save_margin_trading("000001.SZ", {"margin_balance": 5000000})
-    provider.save_dragon_tiger("000001.SZ", {"buy_amount": 100000})
-    provider.save_block_trade("000001.SZ", {"price": 10.5})
+    # 单条事件保存已改走本地 keyed-UPSERT 批量路径：缺 trade_date → 安全 no-op 返回 0
+    assert provider.save_dragon_tiger("000001.SZ", {"buy_amount": 100000}) == 0
+    assert provider.save_block_trade("000001.SZ", {"price": 10.5}) == 0
     provider.save_sector_fund_flow("银行", {"net_inflow": 50000000})
 
     result = provider.get_margin_trading("000001.SZ")
@@ -227,3 +230,163 @@ def test_loader_provider_forwards_use_cache_to_data_loader():
         providers.SmartMoneyLoaderProvider()
 
     assert captured == [False, True]
+
+
+# ===========================================================================
+# 事件写清理（post-merge review #5）：单条方法改走 keyed-UPSERT 批量路径；
+# 批量写的结构性 DB 错误必须外抛（真临时库，同 test_market_flow 事件表 fixture）
+# ===========================================================================
+
+
+def _make_event_provider(tmp_path):
+    """真临时 SQLite 库上的 SmartMoneyDBProvider（conftest 会 mock DatabaseManager，
+    需显式重绑 db_path 后重跑建表与迁移，同 test_market_flow 的事件表 fixture）。"""
+    from providers import SmartMoneyDBProvider
+
+    db_path = tmp_path / "event_write_test.db"
+    provider = SmartMoneyDBProvider(db_path=str(db_path))
+    provider._db.db_path = str(db_path)
+    provider._ensure_wal_mode()
+    provider._ensure_tables()
+    provider._run_versioned_migrations()
+    return provider
+
+
+def _dragon_record() -> dict:
+    return {
+        "trade_date": "2026-07-21",
+        "close_price": 10.0,
+        "pct_change": 1.0,
+        "net_buy_amount": 5.0,
+        "buy_amount": 8.0,
+        "sell_amount": 3.0,
+        "turnover_rate": 2.0,
+        "market_cap": 100.0,
+        "reason": "涨幅偏离",
+        "data_source": "akshare",
+    }
+
+
+def _block_record() -> dict:
+    return {
+        "trade_date": "2026-07-21",
+        "deal_price": 10.0,
+        "close_price": 9.5,
+        "discount_rate": -5.0,
+        "volume": 100.0,
+        "amount": 1000.0,
+        "buyer_branch": "A",
+        "seller_branch": "B",
+        "data_source": "akshare",
+    }
+
+
+def test_save_dragon_tiger_singular_persists_via_batch_path(tmp_path):
+    """单条 save_dragon_tiger 走本地批量 UPSERT：真实落库、生成键、不再委托外部 _db。"""
+    provider = _make_event_provider(tmp_path)
+    try:
+        assert provider.save_dragon_tiger("600000", _dragon_record()) == 1
+        provider._db.save_dragon_tiger.assert_not_called()
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                "SELECT ts_code, source_record_key FROM dragon_tiger"
+            ).fetchall()
+    finally:
+        provider.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "600000"  # symbol 映射为 ts_code
+    assert rows[0][1]  # source_record_key 由键构建器生成，非空
+
+
+def test_save_block_trade_singular_keeps_explicit_ts_code(tmp_path):
+    """单条 save_block_trade：data 里显式 ts_code 优先于 symbol，不再委托外部 _db。"""
+    provider = _make_event_provider(tmp_path)
+    try:
+        record = {**_block_record(), "ts_code": "000001"}
+        assert provider.save_block_trade("600000", record) == 1
+        provider._db.save_block_trade.assert_not_called()
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                "SELECT ts_code, source_record_key FROM block_trade"
+            ).fetchall()
+    finally:
+        provider.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "000001"  # 显式 ts_code 不被 symbol 覆盖
+    assert rows[0][1]
+
+
+def test_save_event_singular_incomplete_data_is_noop(tmp_path):
+    """缺 trade_date 的单条数据被批量路径过滤：返回 0、不落库、不抛错。"""
+    provider = _make_event_provider(tmp_path)
+    try:
+        assert provider.save_dragon_tiger("600000", {"buy_amount": 1.0}) == 0
+        assert provider.save_block_trade("600000", {"deal_price": 10.5}) == 0
+        with sqlite3.connect(provider.db_path) as conn:
+            dragon_count = conn.execute("SELECT COUNT(*) FROM dragon_tiger").fetchone()[0]
+            block_count = conn.execute("SELECT COUNT(*) FROM block_trade").fetchone()[0]
+    finally:
+        provider.close()
+    assert dragon_count == 0
+    assert block_count == 0
+
+
+def test_dragon_tiger_batch_integrity_error_propagates(tmp_path, monkeypatch):
+    """source_record_key 为 NULL 触发 NOT NULL 约束 → IntegrityError 必须外抛，而非静默记 0。"""
+    import providers as providers_module
+
+    provider = _make_event_provider(tmp_path)
+    try:
+        monkeypatch.setattr(
+            providers_module, "dragon_tiger_source_key", lambda _r: None
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            provider.save_dragon_tiger_batch(
+                [{**_dragon_record(), "ts_code": "600000"}]
+            )
+    finally:
+        provider.close()
+
+
+def test_block_trade_batch_integrity_error_propagates(tmp_path, monkeypatch):
+    """大宗交易批量写同理：约束失败外抛，避免调用方误判为空结果。"""
+    import providers as providers_module
+
+    provider = _make_event_provider(tmp_path)
+    try:
+        monkeypatch.setattr(
+            providers_module, "block_trade_source_key", lambda _r: None
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            provider.save_block_trade_batch(
+                [{**_block_record(), "ts_code": "600000"}]
+            )
+    finally:
+        provider.close()
+
+
+def test_event_batch_operational_error_propagates(tmp_path):
+    """表结构损坏（缺表/缺列）→ OperationalError 外抛；正常批量仍返回保存数（回归）。"""
+    provider = _make_event_provider(tmp_path)
+    try:
+        # 回归：合法批量返回保存条数
+        assert provider.save_dragon_tiger_batch(
+            [{**_dragon_record(), "ts_code": "600000"}]
+        ) == 1
+        assert provider.save_block_trade_batch(
+            [{**_block_record(), "ts_code": "600000"}]
+        ) == 1
+        with sqlite3.connect(provider.db_path) as conn:
+            conn.execute("DROP TABLE dragon_tiger")
+            conn.execute("DROP TABLE block_trade")
+            conn.commit()
+        with pytest.raises(sqlite3.OperationalError):
+            provider.save_dragon_tiger_batch(
+                [{**_dragon_record(), "ts_code": "600000"}]
+            )
+        with pytest.raises(sqlite3.OperationalError):
+            provider.save_block_trade_batch(
+                [{**_block_record(), "ts_code": "600000"}]
+            )
+    finally:
+        provider.close()
