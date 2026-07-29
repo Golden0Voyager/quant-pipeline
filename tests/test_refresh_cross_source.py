@@ -118,6 +118,19 @@ def test_primary_quotes_empty_symbols_returns_empty(bars_db) -> None:
     assert _verifier(bars_db).primary_quotes((), _TARGET) == {}
 
 
+def test_primary_quotes_connection_is_read_only(tmp_path) -> None:
+    """mode=ro 结构性保证只读：库不存在时直接报错，绝不创建空库文件。"""
+    missing = tmp_path / "missing.db"
+    verifier = XueqiuCrossSourceVerifier(
+        db_path=str(missing),
+        xq_module=FakeXueqiu(frames={}),
+        throttle_seconds=0.0,
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        verifier.primary_quotes(("000001.SZ",), _TARGET)
+    assert not missing.exists()
+
+
 def test_reference_quotes_maps_symbols_and_normalizes_volume_to_lots(bars_db) -> None:
     """雪球按裸 6 位码请求 qfq 日线；成交量 50000 股必须归一为 500 手。"""
     fake = FakeXueqiu(
