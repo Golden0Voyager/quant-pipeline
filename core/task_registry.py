@@ -188,7 +188,7 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         primary_source="akshare",
         display_label="日线行情",
         refresh_policy=RefreshPolicy(
-            RefreshKind.REMOTE_DATE_SNAPSHOT,
+            RefreshKind.REMOTE_KEYED_UPSERT,
             DateStrategy.EXACT_TARGET,
             {"daily_bars": ("ts_code", "trade_date")},
             {"daily_bars": ("ts_code", "trade_date", "open", "high", "low", "close", "volume", "amount")},
