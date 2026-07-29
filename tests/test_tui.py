@@ -216,6 +216,80 @@ async def test_run_in_background_tracks_current_process():
 
 
 @pytest.mark.asyncio
+async def test_run_in_background_refuses_when_task_running():
+    """有任务在跑时拒绝启动新任务，且不得杀掉正在运行的子进程。"""
+    app = PipelineApp()
+    running_proc = MagicMock()
+    running_proc.pid = 12345
+    running_proc.returncode = None
+    app._current_process = running_proc
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        result = await app._run_in_background("arg1")
+
+    assert result is None
+    mock_exec.assert_not_called()
+    running_proc.terminate.assert_not_called()
+    running_proc.kill.assert_not_called()
+    # 运行中的子进程保持被跟踪，不得被顶掉
+    assert app._current_process is running_proc
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_wait_queues_until_slot_free():
+    """wait=True 时在执行槽上排队：槽被占不启动，槽释放后自动执行。"""
+    app = PipelineApp()
+    mock_proc = MagicMock()
+    wait_future = asyncio.Future()
+    wait_future.set_result(0)
+    mock_proc.wait = MagicMock(return_value=wait_future)
+    mock_proc.returncode = 0
+
+    await app._task_slot.acquire()  # 模拟另一任务占用执行槽
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        queued = asyncio.ensure_future(app._run_in_background("arg1", wait=True))
+        await asyncio.sleep(0.05)
+        mock_exec.assert_not_called()  # 排队中，不得启动
+
+        app._task_slot.release()
+        result = await asyncio.wait_for(queued, timeout=2.0)
+
+    assert result == 0
+    mock_exec.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_in_background_refuses_when_slot_locked():
+    """wait=False 时执行槽被占（即使子进程尚未注册）也拒绝启动。"""
+    app = PipelineApp()
+    await app._task_slot.acquire()
+    try:
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            result = await app._run_in_background("arg1")
+        assert result is None
+        mock_exec.assert_not_called()
+    finally:
+        app._task_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_run_task_group_uses_wait_semantics():
+    """分组队列必须以 wait=True 调用执行器，排队而非拒绝/杀进程。"""
+    app = PipelineApp()
+    calls: list[dict] = []
+
+    async def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return 0
+
+    with patch.object(app, "_run_in_background", side_effect=fake_run):
+        await app._run_task_group("测试组", ["update_north_flow", "update_usd"])
+
+    assert len(calls) == 2
+    assert all(kw.get("wait") is True for kw in calls)
+
+
+@pytest.mark.asyncio
 async def test_stop_current_process_terminates_running_process():
     app = PipelineApp()
     mock_proc = MagicMock()

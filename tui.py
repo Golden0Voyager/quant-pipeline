@@ -1942,6 +1942,9 @@ class PipelineApp(App):
         super().__init__(**kwargs)
         self._background_tasks: set[asyncio.Task] = set()
         self._current_process: asyncio.subprocess.Process | None = None
+        # 全局唯一执行槽：任何时刻只允许一个子任务在跑。
+        # 分组队列用 wait=True 在槽上排队；手动按键默认拒绝，防手滑重复启动
+        self._task_slot = asyncio.Lock()
         self._theme_name = load_theme()
 
     async def on_mount(self) -> None:
@@ -2219,11 +2222,13 @@ class PipelineApp(App):
 
     async def _stop_current_process(self) -> None:
         """终止当前正在运行的子进程及其整个进程组。"""
+        logger = logging.getLogger("quant_pipeline.tui")
         proc = self._current_process
         if proc is None or proc.returncode is not None:
             self.notify("No running task to stop", severity="warning", timeout=3.0)
             return
         try:
+            logger.info("⛔ TUI 停止当前任务子进程 (PID %s)", proc.pid)
             # 杀整个进程组（start_new_session=True 创建的）
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -2232,24 +2237,51 @@ class PipelineApp(App):
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
+                logger.warning("⚠️ 子进程 (PID %s) SIGTERM 超时，升级为 SIGKILL", proc.pid)
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     proc.kill()
                 await proc.wait()
+            logger.info("✅ 子进程 (PID %s) 已退出", proc.pid)
             self.notify("Task stopped", severity="information", timeout=3.0)
         except ProcessLookupError:
             self.notify("Process already exited", severity="information", timeout=3.0)
         finally:
             self._current_process = None
 
-    async def _run_in_background(self, *args: str) -> int | None:
-        """在后台运行子进程，返回其退出码（被外部中断时返回 None）。"""
+    async def _run_in_background(self, *args: str, wait: bool = False) -> int | None:
+        """在后台运行子进程，返回其退出码（被外部中断时返回 None）。
+
+        wait=False（手动按键）：执行槽被占用时拒绝启动，防手滑重复触发；
+        wait=True（分组队列）：在执行槽上排队，等当前任务结束后自动执行。
+        """
         env = get_subprocess_env()
         logger = logging.getLogger("quant_pipeline.tui")
 
-        await self._stop_current_process()
+        # 有任务在跑就拒绝启动，X 键是唯一的停止入口——
+        # 隐式顶掉运行中的任务曾把手动全量更新 SIGKILL 掉（2026-07-29 事故）
+        busy = self._task_slot.locked() or (
+            self._current_process is not None and self._current_process.returncode is None
+        )
+        if busy and not wait:
+            pid = self._current_process.pid if self._current_process else "?"
+            self.notify(
+                f"已有任务在运行 (PID {pid})，请先按 X 停止",
+                severity="warning",
+                timeout=5.0,
+            )
+            return None
 
+        async with self._task_slot:
+            return await self._spawn_and_wait(args, env, logger)
+
+    async def _spawn_and_wait(
+        self,
+        args: tuple[str, ...],
+        env: dict[str, str],
+        logger: logging.Logger,
+    ) -> int | None:
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -2441,13 +2473,20 @@ class PipelineApp(App):
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         failed: list[str] = []
         for task in tasks:
+            if self._task_slot.locked():
+                self.notify(
+                    f"[{label}] {task} 排队等待当前任务结束...",
+                    severity="information",
+                    timeout=3.0,
+                )
             self.notify(
                 f"[{label}] 正在运行: {task}",
                 severity="information",
                 timeout=2.0,
             )
+            # wait=True：在执行槽上排队而非拒绝，多个分组并发点击时自动串行
             returncode = await self._run_in_background(
-                sys.executable, pipeline_path, "--task", task, "--force"
+                sys.executable, pipeline_path, "--task", task, "--force", wait=True
             )
             # returncode 为 None 表示进程被外部中断或发生异常
             if returncode is None or returncode < 0:
