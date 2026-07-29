@@ -55,12 +55,20 @@ from core.config import (
 )
 from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
+    read_cross_source_config,
 )
 from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
-from core.refresh import RefreshAdapter, RefreshContext, RefreshOrchestrator
+from core.refresh import (
+    CrossSourceCheckConfig,
+    CrossSourceVerifier,
+    RefreshAdapter,
+    RefreshContext,
+    RefreshOrchestrator,
+)
 from core.refresh_adapters import build_all_refresh_adapters
+from core.refresh_audit import CrossSourceTolerance
 from core.refresh_store import SQLiteRefreshStore
 from core.runner import safe_task
 from core.task_registry import Cadence, lookup_task, refreshable_trading_tasks
@@ -482,20 +490,47 @@ def _build_refresh_adapters(
     return build_all_refresh_adapters(db=db, loader=loader, engine=engine, store=store)
 
 
-def _build_refresh_orchestrator(db_path: str) -> RefreshOrchestrator:
-    """构建默认的收盘刷新编排器（非缓存 loader + SQLite 审计存储）。"""
+def _build_refresh_orchestrator(
+    db_path: str,
+    *,
+    cross_source_verifier: CrossSourceVerifier | None = None,
+) -> RefreshOrchestrator:
+    """构建默认的收盘刷新编排器（非缓存 loader + SQLite 审计存储）。
+
+    跨源抽样校验由 REFRESH_CROSS_SOURCE 门控（默认关闭）；开启时必须同时
+    提供 verifier，否则大声失败——绝不允许开关打开却静默不校验。
+    """
+    # 调用时读取环境变量（非 import 期固化），便于测试翻转开关
+    cross_cfg = read_cross_source_config()
+    if cross_cfg.enabled and cross_source_verifier is None:
+        raise RuntimeError(
+            "REFRESH_CROSS_SOURCE is enabled but no cross-source verifier is "
+            "configured; the Xueqiu verifier is a pending follow-up. "
+            "Set REFRESH_CROSS_SOURCE=0 or provide a verifier."
+        )
     db = ProviderFactory.get_db()
     engine = ProviderFactory.get_indicator_engine()
     # 收盘刷新必须绕过本地缓存，确保拉到收盘后的最终数据
     loader = ProviderFactory.get_loader(use_cache=False)
     # 适配器与编排器共用同一 store 实例：前者发布数据，后者记录审计
     store = SQLiteRefreshStore(db_path)
+    build_kwargs: dict[str, Any] = {}
+    if cross_cfg.enabled:
+        build_kwargs["cross_source"] = CrossSourceCheckConfig(
+            task_name=cross_cfg.task_name,
+            tolerance=CrossSourceTolerance(
+                price=cross_cfg.price_tol, volume=cross_cfg.volume_tol
+            ),
+            sample_size=cross_cfg.sample_size,
+        )
+        build_kwargs["verifier"] = cross_source_verifier
     return RefreshOrchestrator(
         specs=refreshable_trading_tasks(),
         adapters=_build_refresh_adapters(
             db=db, loader=loader, engine=engine, store=store
         ),
         store=store,
+        **build_kwargs,
     )
 
 
@@ -505,6 +540,7 @@ def run_close_refresh(
     symbols: list[str] | None = None,
     force: bool = False,
     orchestrator: RefreshOrchestrator | None = None,
+    cross_source_verifier: CrossSourceVerifier | None = None,
 ) -> TaskResult:
     """执行一次收盘后刷新，返回聚合 TaskResult。
 
@@ -512,7 +548,9 @@ def run_close_refresh(
     --force 仅映射为 allow_pre_close=True，不在 CLI 层重复门控逻辑。
     """
     if orchestrator is None:
-        orchestrator = _build_refresh_orchestrator(db_path)
+        orchestrator = _build_refresh_orchestrator(
+            db_path, cross_source_verifier=cross_source_verifier
+        )
     # 单次读取上海时钟：闸门、started_at 与目标交易日共用同一时间基准
     now = datetime.now(_SHANGHAI_TZ)
     context = RefreshContext(
