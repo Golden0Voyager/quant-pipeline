@@ -1152,6 +1152,38 @@ class TestRunCloseRefresh:
         assert ctx.started_at is mock_dt.now.return_value
         assert ctx.started_at.tzinfo is not None
 
+    @pytest.mark.parametrize(
+        ("symbols", "expected"),
+        [
+            (None, None),
+            ([], ()),
+            (["000001.SZ"], ("000001.SZ",)),
+        ],
+    )
+    def test_symbols_preserves_none_vs_empty_distinction(self, tmp_path, symbols, expected):
+        """symbols=[] 必须映射为 ()（no-op），不得坍缩为 None（全市场）。"""
+        captured: list = []
+
+        class FakeOrchestrator:
+            def run(self, context):
+                captured.append(context)
+                return TaskResult.success("refresh_today", saved=0)
+
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt:
+            _shanghai_now(mock_dt, 16, 30)
+            daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                symbols=symbols,
+                orchestrator=FakeOrchestrator(),
+            )
+        ctx = captured[0]
+        if expected is None:
+            # None 才是全市场哨兵，() 只是空作用域
+            assert ctx.symbols is None
+        else:
+            assert ctx.symbols == expected
+
     def test_pre_close_fails_without_force_and_never_starts_run(self, tmp_path):
         store = _RecordingRefreshStore()
         with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
@@ -1299,6 +1331,43 @@ class TestRefreshTodayCLI:
              pytest.raises(SystemExit) as exc_info:
             daily_pipeline.main()
         assert exc_info.value.code == 1
+
+    def test_empty_symbols_string_errors_and_never_refreshes(self, capsys):
+        """显式 --symbols 解析为空必须报错退出，禁止静默升级为全市场刷新。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--symbols", ","]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh") as refresh, \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--symbols" in capsys.readouterr().err
+        refresh.assert_not_called()
+
+    def test_blank_symbols_file_errors_and_never_refreshes(self, tmp_path, capsys):
+        """--symbols 指向只含空行的文件同样必须报错，不得回退全市场。"""
+        symbols_file = tmp_path / "symbols.txt"
+        symbols_file.write_text("\n   \n\n", encoding="utf-8")
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--symbols", str(symbols_file)]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh") as refresh, \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--symbols" in capsys.readouterr().err
+        refresh.assert_not_called()
+
+    def test_valid_symbols_still_scope_refresh(self):
+        """回归：正常 --symbols 列表仍按作用域传入 run_close_refresh。"""
+        ok = TaskResult.success("refresh_today", saved=0)
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--symbols", "000001.SZ,600000.SH"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh:
+            daily_pipeline.main()
+        refresh.assert_called_once_with(
+            os.environ["QUANT_DB_PATH"],
+            symbols=["000001.SZ", "600000.SH"],
+            force=False,
+        )
 
 
 # ===========================================================================
