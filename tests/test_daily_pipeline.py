@@ -1187,6 +1187,29 @@ class TestRunCloseRefresh:
         factory.get_loader.assert_called_once_with(use_cache=False)
         assert isinstance(orchestrator, RefreshOrchestrator)
 
+    def test_cli_orchestrator_wires_every_refresh_adapter(self, tmp_path):
+        """CLI 构建的编排器必须装配全部 29 个适配器，_topological_specs 不再缺适配器。"""
+        from core.task_registry import refreshable_trading_tasks
+
+        class FakeDb:
+            """只提供 db_path 的手写 db fake（构造期不联网、不落盘）。"""
+
+            def __init__(self, db_path: str):
+                self.db_path = db_path
+
+        db_path = str(tmp_path / "refresh.db")
+        with patch("daily_pipeline.ProviderFactory") as factory:
+            factory.get_db.return_value = FakeDb(db_path)
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            orchestrator = daily_pipeline._build_refresh_orchestrator(db_path)
+
+        expected = {spec.name for spec in refreshable_trading_tasks()}
+        assert set(orchestrator._adapters) == expected
+        # 修复前 _topological_specs 会对全部 29 个 spec 抛 "missing adapter"
+        ordered = orchestrator._topological_specs()
+        assert {spec.name for spec in ordered} == expected
+
 
 class TestRefreshTodayCLI:
     def test_no_flags_still_runs_legacy_all(self, weekday_mock):
