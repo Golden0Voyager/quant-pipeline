@@ -53,6 +53,7 @@ from core.refresh_adapters import (
     build_core_refresh_adapters,
     build_derived_refresh_adapters,
 )
+from core.refresh_audit import RefreshAudit
 from core.refresh_store import RefreshValidationError, SQLiteRefreshStore
 from core.task_registry import refreshable_trading_tasks
 
@@ -1665,12 +1666,14 @@ class TestSouthFlowRefreshAdapter:
             adapter.refresh(_context())
 
 
+_INDEX_UNIVERSE = ("sh000001", "sz399001", "sz399006", "sh000688")
+
+
 class TestIndexDailyRefreshAdapter:
     def test_accepts_latest_complete_partition(self, market_db_path, store):
-        """目标日缺一个指数 → 回退到最近的完整分区。"""
+        """目标日缺指数 → 回退到最近包含静态全集四指数的完整分区。"""
         fetch = FakeFetcher([
-            _index_record("sh000001", "2026-07-24", close=3300.0),
-            _index_record("sz399001", "2026-07-24", close=10500.0),
+            *(_index_record(code, "2026-07-24") for code in _INDEX_UNIVERSE),
             _index_record("sh000001", TARGET, close=3310.0),
         ])
         adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
@@ -1678,12 +1681,34 @@ class TestIndexDailyRefreshAdapter:
         result = adapter.refresh(_context())
 
         assert result.as_of_date == "2026-07-24"
-        assert result.replaced == 2
+        assert result.replaced == 4
         rows = _query(
             market_db_path,
             "SELECT index_code, trade_date FROM index_daily ORDER BY index_code",
         )
-        assert rows == [("sh000001", "2026-07-24"), ("sz399001", "2026-07-24")]
+        assert rows == [(code, "2026-07-24") for code in sorted(_INDEX_UNIVERSE)]
+
+    def test_missing_index_never_shrinks_existing_partition(self, market_db_path, store):
+        """完整性按静态指数全集判定：源只回 3/4 指数 → 上抛，既有 4 行分区不缩。"""
+        for code in _INDEX_UNIVERSE:
+            _execute(
+                market_db_path,
+                "INSERT INTO index_daily (index_code, index_name, trade_date,"
+                " close, data_source) VALUES (?, ?, '2026-07-24', 3000.0, 'akshare')",
+                (code, f"指数{code}"),
+            )
+        fetch = FakeFetcher([
+            _index_record(code, "2026-07-24") for code in _INDEX_UNIVERSE[:3]
+        ])
+        adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(
+            market_db_path,
+            "SELECT COUNT(*) FROM index_daily WHERE trade_date = '2026-07-24'",
+        ) == [(4,)]
 
     def test_no_complete_partition_within_lookback_raises(self, market_db_path, store):
         fetch = FakeFetcher([
@@ -2291,6 +2316,24 @@ def _cb_redeem_record(code: str, flag: str = "已公告强赎") -> dict:
     }
 
 
+def _seed_cb_quotation(db_path: str, code: str) -> None:
+    _execute(
+        db_path,
+        "INSERT INTO cb_quotation (ts_code, bond_name, price, data_source, updated_at)"
+        " VALUES (?, ?, 99.0, 'akshare', '2026-07-24T16:30:00+08:00')",
+        (code, f"转债{code}"),
+    )
+
+
+def _seed_cb_redeem(db_path: str, code: str) -> None:
+    _execute(
+        db_path,
+        "INSERT INTO cb_redeem (ts_code, bond_name, redeem_flag, data_source, updated_at)"
+        " VALUES (?, ?, '已解除', 'akshare', '2026-07-24T16:30:00+08:00')",
+        (code, f"转债{code}"),
+    )
+
+
 def _repurchase_record(code: str, trade_date: str = "2026-07-25") -> dict:
     return {
         "trade_date": trade_date,
@@ -2442,6 +2485,35 @@ class TestCbQuotationRefreshAdapter:
 
         assert _query(market_db_path, "SELECT COUNT(*) FROM cb_quotation") == [(1,)]
 
+    def test_truncated_snapshot_raises_and_keeps_old(self, market_db_path, store):
+        """残缺快照（覆盖率 < 0.8）→ 上抛，旧快照整表保留。"""
+        for suffix in range(5):
+            _seed_cb_quotation(market_db_path, f"11300{suffix}")
+        fetch = FakeFetcher([
+            _cb_quotation_record("113001"),
+            _cb_quotation_record("113002"),
+        ])
+        adapter = CbQuotationRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM cb_quotation") == [(5,)]
+
+    def test_snapshot_at_coverage_floor_replaces(self, market_db_path, store):
+        """覆盖率恰好 0.8（4/5）→ 正常整表替换。"""
+        for suffix in range(5):
+            _seed_cb_quotation(market_db_path, f"11300{suffix}")
+        fetch = FakeFetcher([
+            _cb_quotation_record(f"11310{suffix}") for suffix in range(4)
+        ])
+        adapter = CbQuotationRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 4
+        assert _query(market_db_path, "SELECT COUNT(*) FROM cb_quotation") == [(4,)]
+
 
 class TestCbRedeemRefreshAdapter:
     def test_replaces_entire_snapshot(self, market_db_path, store):
@@ -2459,6 +2531,33 @@ class TestCbRedeemRefreshAdapter:
         assert result.replaced == 1
         assert result.metadata["run_id"] == "run-test"
         assert _query(market_db_path, "SELECT ts_code FROM cb_redeem") == [("113002",)]
+
+    def test_truncated_snapshot_raises_and_keeps_old(self, market_db_path, store):
+        """残缺快照（覆盖率 < 0.8）→ 上抛，旧快照整表保留。"""
+        for suffix in range(5):
+            _seed_cb_redeem(market_db_path, f"11300{suffix}")
+        adapter = CbRedeemRefreshAdapter(
+            store=store, fetch_records=FakeFetcher([_cb_redeem_record("113001")])
+        )
+
+        with pytest.raises(RefreshValidationError):
+            adapter.refresh(_context())
+
+        assert _query(market_db_path, "SELECT COUNT(*) FROM cb_redeem") == [(5,)]
+
+    def test_snapshot_at_coverage_floor_replaces(self, market_db_path, store):
+        """覆盖率恰好 0.8（4/5）→ 正常整表替换。"""
+        for suffix in range(5):
+            _seed_cb_redeem(market_db_path, f"11300{suffix}")
+        fetch = FakeFetcher([
+            _cb_redeem_record(f"11310{suffix}") for suffix in range(4)
+        ])
+        adapter = CbRedeemRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 4
+        assert _query(market_db_path, "SELECT COUNT(*) FROM cb_redeem") == [(4,)]
 
 
 class TestStockRepurchaseRefreshAdapter:
@@ -2527,6 +2626,23 @@ class TestNorthFlowRefreshAdapter:
 
         assert result.retained == 0
         assert result.metadata["source_status"] == "dead_source"
+
+    def test_empty_table_attests_baseline_and_passes_audit(self, market_db_path, store):
+        """空基线携 baseline_empty=True 声明，并通过编排器的审计路径。"""
+        adapter = NorthFlowRefreshAdapter(store=store, db_path=market_db_path)
+
+        result = adapter.refresh(_context())
+
+        assert result.retained == 0
+        assert result.metadata["baseline_empty"] is True
+        spec = next(
+            spec
+            for spec in refreshable_trading_tasks()
+            if spec.name == "update_north_flow"
+        )
+        report = RefreshAudit().validate_task(spec, _context(), result)
+        assert report.dead_source is True
+        assert report.degraded is True
 
 
 # ===========================================================================
