@@ -8,7 +8,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from core.refresh import RefreshAdapterResult, RefreshContext, RefreshOrchestrator
+import pytest
+
+from core.refresh import (
+    CrossSourceCheckConfig,
+    RefreshAdapterResult,
+    RefreshContext,
+    RefreshOrchestrator,
+)
+from core.refresh_audit import (
+    CROSS_SOURCE_BOARDS,
+    CrossSourceTolerance,
+    stratified_cross_source_sample,
+)
 from core.task_registry import (
     Cadence,
     DateStrategy,
@@ -473,3 +485,233 @@ def test_failed_symbols_and_dead_source_make_run_degraded_and_retain_old_data() 
     assert records["partial"]["retained"] == 1
     assert records["dead"]["retained"] == 12
     assert records["dead"]["failed"] == 1
+
+
+_CROSS_SYMBOLS = (
+    "600000.SH",
+    "000001.SZ",
+    "300001.SZ",
+    "688001.SH",
+    "830799.BJ",
+)
+
+
+def _quotes(
+    overrides: Mapping[str, dict[str, float]] | None = None,
+) -> dict[str, dict[str, float]]:
+    quotes = {
+        symbol: {"close": 10.0, "volume": 1000.0} for symbol in _CROSS_SYMBOLS
+    }
+    quotes.update(overrides or {})
+    return quotes
+
+
+@dataclass
+class FakeVerifier:
+    primary: dict[str, dict[str, float]]
+    reference: dict[str, dict[str, float]]
+    source_name: str = "em_backup"
+    supported_boards: frozenset[str] = frozenset(CROSS_SOURCE_BOARDS)
+    primary_calls: list[tuple[str, ...]] = field(default_factory=list)
+    reference_calls: list[tuple[str, ...]] = field(default_factory=list)
+    reference_error: Exception | None = None
+
+    def primary_quotes(
+        self,
+        symbols: tuple[str, ...],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, float]]:
+        self.primary_calls.append(tuple(symbols))
+        return {
+            symbol: self.primary[symbol]
+            for symbol in symbols
+            if symbol in self.primary
+        }
+
+    def reference_quotes(
+        self,
+        symbols: tuple[str, ...],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, float]]:
+        if self.reference_error is not None:
+            raise self.reference_error
+        self.reference_calls.append(tuple(symbols))
+        return {
+            symbol: self.reference[symbol]
+            for symbol in symbols
+            if symbol in self.reference
+        }
+
+
+@dataclass
+class CrossCheckedAdapter:
+    """Full-market adapter whose targeted retry republishes reference values."""
+
+    task_name: str
+    verifier: FakeVerifier
+    changed: tuple[str, ...] = _CROSS_SYMBOLS
+    fix_on_retry: bool = True
+    calls: list[RefreshContext] = field(default_factory=list)
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        self.calls.append(context)
+        if context.symbols is None:
+            return _adapter_result(self.task_name, changed_symbols=self.changed)
+        if self.fix_on_retry:
+            for symbol in context.symbols:
+                self.verifier.primary[symbol] = dict(self.verifier.reference[symbol])
+        return _adapter_result(
+            self.task_name,
+            changed_symbols=tuple(context.symbols),
+        )
+
+
+def _cross_orchestrator(
+    adapter: CrossCheckedAdapter,
+    verifier: FakeVerifier,
+    store: RecordingStore,
+) -> RefreshOrchestrator:
+    return RefreshOrchestrator(
+        specs=(_spec("bars", supports_symbols=True),),
+        adapters={"bars": adapter},
+        store=store,
+        cross_source=CrossSourceCheckConfig(
+            task_name="bars",
+            tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+        ),
+        verifier=verifier,
+    )
+
+
+def _task_record(store: RecordingStore) -> dict[str, Any]:
+    return next(kwargs for call, kwargs in store.calls if call == "task")
+
+
+def test_cross_source_sample_is_persisted_in_task_metadata_and_deterministic() -> None:
+    samples: list[tuple[str, ...]] = []
+    for _ in range(2):
+        store = RecordingStore()
+        verifier = FakeVerifier(primary=_quotes(), reference=_quotes())
+        adapter = CrossCheckedAdapter("bars", verifier)
+
+        result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+        assert result.status is TaskStatus.SUCCESS
+        assert len(adapter.calls) == 1
+        summary = _task_record(store)["metadata"]["cross_source"]
+        assert summary["source"] == "em_backup"
+        assert summary["mismatched"] == ()
+        samples.append(summary["sampled"])
+
+    assert samples[0] == samples[1]
+    expected = stratified_cross_source_sample(
+        _CROSS_SYMBOLS,
+        target_date="2026-07-27",
+        supported_boards=frozenset(CROSS_SOURCE_BOARDS),
+    )
+    assert samples[0] == expected.symbols
+
+
+def test_cross_source_mismatch_retries_only_mismatched_symbols_once() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(
+            {
+                "300001.SZ": {"close": 10.5, "volume": 1000.0},
+                "688001.SH": {"close": 10.0, "volume": 1500.0},
+            }
+        ),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    assert len(adapter.calls) == 2
+    assert adapter.calls[0].symbols is None
+    assert adapter.calls[1].symbols == ("300001.SZ", "688001.SH")
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["mismatched"] == ("300001.SZ", "688001.SH")
+    assert summary["retried_symbols"] == ("300001.SZ", "688001.SH")
+    assert summary["still_mismatched"] == ()
+
+
+def test_cross_source_retry_failure_degrades_without_full_market_rerun() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes({"300001.SZ": {"close": 10.5, "volume": 1000.0}}),
+        reference=_quotes(),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier, fix_on_retry=False)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    assert result.metadata["task_statuses"] == {"bars": "degraded"}
+    # Exactly one targeted retry; no third attempt and never a full-market
+    # rerun after the initial fetch.
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1].symbols == ("300001.SZ",)
+    record = _task_record(store)
+    assert record["status"] == "degraded"
+    # Accepted old data is retained: the record keeps the original counts.
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert summary["still_mismatched"] == ("300001.SZ",)
+
+
+def test_cross_source_verifier_error_degrades_and_retains_old_data() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        reference_error=ConnectionError("backup source down"),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    # No targeted retry when the comparison itself failed: one full fetch,
+    # never a full-market delete or rerun.
+    assert len(adapter.calls) == 1
+    record = _task_record(store)
+    assert record["status"] == "degraded"
+    assert record["replaced"] == 1
+    summary = record["metadata"]["cross_source"]
+    assert "backup source down" in summary["error"]
+
+
+def test_cross_source_excludes_unsupported_backup_markets_explicitly() -> None:
+    store = RecordingStore()
+    verifier = FakeVerifier(
+        primary=_quotes(),
+        reference=_quotes(),
+        supported_boards=frozenset({"shanghai", "shenzhen", "chinext", "star"}),
+    )
+    adapter = CrossCheckedAdapter("bars", verifier)
+
+    result = _cross_orchestrator(adapter, verifier, store).run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    summary = _task_record(store)["metadata"]["cross_source"]
+    assert summary["excluded_boards"] == ("beijing",)
+    assert "830799.BJ" not in summary["sampled"]
+    for batch in verifier.reference_calls:
+        assert "830799.BJ" not in batch
+    for batch in verifier.primary_calls:
+        assert "830799.BJ" not in batch
+
+
+def test_cross_source_config_requires_matching_verifier() -> None:
+    with pytest.raises(ValueError, match="cross-source"):
+        RefreshOrchestrator(
+            specs=(_spec("bars"),),
+            adapters={"bars": RecordingAdapter("bars", [])},
+            store=RecordingStore(),
+            cross_source=CrossSourceCheckConfig(
+                task_name="bars",
+                tolerance=CrossSourceTolerance(price=0.01, volume=0.10),
+            ),
+        )
