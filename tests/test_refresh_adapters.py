@@ -50,6 +50,7 @@ from core.refresh_adapters import (
     SouthFlowRefreshAdapter,
     StockPledgeRefreshAdapter,
     StockRepurchaseRefreshAdapter,
+    build_all_refresh_adapters,
     build_core_refresh_adapters,
     build_derived_refresh_adapters,
 )
@@ -1303,6 +1304,28 @@ def test_every_refresh_policy_has_runtime_adapter():
     assert set(REFRESH_ADAPTERS) == {
         spec.name for spec in refreshable_trading_tasks()
     }
+
+
+def test_build_all_refresh_adapters_covers_every_refresh_policy(derived_db_path, store):
+    """build_all_refresh_adapters 组装全部 29 个适配器，键与注册表逐一对应。"""
+    db = FakeHistoryDb(derived_db_path, {})
+    loader = FakeBarsLoader({})
+    engine = FakeIndicatorEngine()
+
+    adapters = build_all_refresh_adapters(
+        db=db, loader=loader, engine=engine, store=store
+    )
+
+    expected = {spec.name for spec in refreshable_trading_tasks()}
+    assert set(adapters) == set(REFRESH_ADAPTERS) == expected
+    # 每个值满足 RefreshAdapter 协议：task_name 与键一致且 refresh 可调用
+    for name, adapter in adapters.items():
+        assert adapter.task_name == name
+        assert callable(adapter.refresh)
+    # 复合工厂正确注入依赖到需要它们的适配器
+    assert adapters["update_bars"].loader is loader
+    assert adapters["update_indicators"].engine is engine
+    assert adapters["update_north_flow"].db_path == str(db.db_path)
 
 
 # ===========================================================================
