@@ -272,7 +272,11 @@ class RefreshAudit:
     ) -> RefreshAuditReport:
         if result.replaced:
             raise RefreshAuditError("dead source result cannot claim replacement")
-        if result.retained <= 0:
+        if result.retained < 0:
+            raise RefreshAuditError("dead source retained count must be nonnegative")
+        # retained == 0 is honest only when the adapter attests the baseline
+        # table itself is empty; anything else means old data was lost.
+        if result.retained == 0 and result.metadata.get("baseline_empty") is not True:
             raise RefreshAuditError("dead source result must retain old data")
         reason = result.metadata.get("reason")
         if not isinstance(reason, str) or not reason.strip():
