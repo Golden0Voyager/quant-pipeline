@@ -2482,3 +2482,49 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_north_flow": NorthFlowRefreshAdapter,
     "update_sector_derivatives": SectorDerivativesRefreshAdapter,
 }
+
+
+# ===========================================================================
+# 运行时适配器总装配（CLI 收盘刷新入口，全部 29 个键→实例）
+# ===========================================================================
+
+
+def build_all_refresh_adapters(
+    *,
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    store: SQLiteRefreshStore,
+) -> dict[str, RefreshAdapter]:
+    """装配全部 29 个收盘刷新适配器（键为注册表任务名）。
+
+    复用两个已有工厂（核心远端 4 + 派生 5），并显式接入其余 20 个
+    Task 9 适配器。EM 筹码 throttle 保持生产默认，绝不在此注入测试节流。
+    """
+    db_path = str(db.db_path)
+    adapters: dict[str, RefreshAdapter] = {}
+    adapters.update(build_core_refresh_adapters(db=db, loader=loader, store=store))
+    adapters.update(build_derived_refresh_adapters(db=db, engine=engine, store=store))
+    adapters.update({
+        "update_margin_trading": MarginTradingRefreshAdapter(store=store),
+        "update_south_flow": SouthFlowRefreshAdapter(store=store),
+        "update_index_daily": IndexDailyRefreshAdapter(store=store),
+        "update_market_valuation": MarketValuationRefreshAdapter(store=store),
+        "update_cb_index": CbIndexRefreshAdapter(store=store),
+        "update_institution_survey": InstitutionSurveyRefreshAdapter(store=store),
+        "update_stock_pledge": StockPledgeRefreshAdapter(store=store),
+        "update_etf_daily": EtfDailyRefreshAdapter(store=store),
+        "update_limit_up_down": LimitUpDownRefreshAdapter(store=store),
+        "update_option_sentiment": OptionSentimentRefreshAdapter(store=store),
+        "update_dragon_tiger": DragonTigerRefreshAdapter(store=store),
+        "update_block_trade": BlockTradeRefreshAdapter(store=store),
+        "update_sector_fund_flow": SectorFundFlowRefreshAdapter(store=store),
+        "update_ah_premium": AhPremiumRefreshAdapter(store=store),
+        "update_concept_board": ConceptBoardRefreshAdapter(store=store),
+        "update_cb_quotation": CbQuotationRefreshAdapter(store=store),
+        "update_cb_redeem": CbRedeemRefreshAdapter(store=store),
+        "update_stock_repurchase": StockRepurchaseRefreshAdapter(store=store),
+        "update_north_flow": NorthFlowRefreshAdapter(store=store, db_path=db_path),
+        "update_sector_derivatives": SectorDerivativesRefreshAdapter(store=store),
+    })
+    return adapters
