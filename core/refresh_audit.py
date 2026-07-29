@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import math
+import random
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
@@ -14,6 +16,151 @@ if TYPE_CHECKING:
 
 type AuditRow = Mapping[str, Any]
 type AuditRows = Mapping[str, Sequence[AuditRow]]
+
+# Canonical board order for stratified cross-source sampling. Prefix rules
+# follow AGENTS.md: 6/9 → sh, 0/2/3 → sz, 4/8/920 → bj, with ChiNext (30x)
+# and STAR (68x) carved out as their own strata.
+CROSS_SOURCE_BOARDS: tuple[str, ...] = (
+    "shanghai",
+    "shenzhen",
+    "chinext",
+    "star",
+    "beijing",
+)
+
+
+def classify_board(symbol: str) -> str | None:
+    """Map a symbol to its board, or None when the code is not an A-share."""
+    code = symbol.split(".", 1)[0]
+    if not code or not code.isdigit():
+        return None
+    if code.startswith("920") or code[0] in "48":
+        return "beijing"
+    if code.startswith("68"):
+        return "star"
+    if code[0] in "69":
+        return "shanghai"
+    if code.startswith("30"):
+        return "chinext"
+    if code[0] in "023":
+        return "shenzhen"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class CrossSourceSample:
+    """Deterministic stratified sample plus the explicitly excluded boards."""
+
+    symbols: tuple[str, ...]
+    excluded_boards: tuple[str, ...]
+
+
+def stratified_cross_source_sample(
+    candidates: Sequence[str],
+    *,
+    target_date: str,
+    supported_boards: Collection[str],
+    sample_size: int = 30,
+) -> CrossSourceSample:
+    """Draw ~sample_size symbols spread over the backup source's boards.
+
+    The seed is derived from target_date, so the same date always yields the
+    same sample. Boards the backup source does not support are excluded
+    explicitly and reported, never sampled by luck.
+    """
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+    unknown = set(supported_boards) - set(CROSS_SOURCE_BOARDS)
+    if unknown:
+        raise ValueError(f"unknown boards in supported_boards: {sorted(unknown)}")
+
+    by_board: dict[str, list[str]] = {board: [] for board in CROSS_SOURCE_BOARDS}
+    for symbol in dict.fromkeys(candidates):
+        board = classify_board(symbol)
+        if board is not None:
+            by_board[board].append(symbol)
+
+    excluded = tuple(
+        board for board in CROSS_SOURCE_BOARDS if board not in supported_boards
+    )
+    populated = tuple(
+        board
+        for board in CROSS_SOURCE_BOARDS
+        if board in supported_boards and by_board[board]
+    )
+    if not populated:
+        return CrossSourceSample((), excluded)
+
+    rng = random.Random(f"cross-source-sample:{target_date}")
+    base, extra = divmod(sample_size, len(populated))
+    chosen: list[str] = []
+    for index, board in enumerate(populated):
+        quota = base + (1 if index < extra else 0)
+        pool = sorted(by_board[board])
+        chosen.extend(rng.sample(pool, min(quota, len(pool))))
+    return CrossSourceSample(tuple(chosen), excluded)
+
+
+@dataclass(frozen=True, slots=True)
+class CrossSourceTolerance:
+    """Separately configured relative tolerances for price and volume."""
+
+    price: float
+    volume: float
+
+    def __post_init__(self) -> None:
+        for label, value in (("price", self.price), ("volume", self.volume)):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"{label} tolerance must be a finite nonnegative number"
+                )
+
+
+def cross_source_mismatches(
+    symbols: Sequence[str],
+    primary: Mapping[str, Mapping[str, Any]],
+    reference: Mapping[str, Mapping[str, Any]],
+    tolerance: CrossSourceTolerance,
+) -> tuple[str, ...]:
+    """Return sampled symbols whose close or volume disagrees across sources.
+
+    A missing or unreadable quote on either side counts as a mismatch: absent
+    evidence must not pass a data-quality check.
+    """
+    mismatched: list[str] = []
+    for symbol in symbols:
+        ours = primary.get(symbol)
+        theirs = reference.get(symbol)
+        if ours is None or theirs is None:
+            mismatched.append(symbol)
+            continue
+        close_ok = _within_tolerance(
+            ours.get("close"), theirs.get("close"), tolerance.price
+        )
+        volume_ok = _within_tolerance(
+            ours.get("volume"), theirs.get("volume"), tolerance.volume
+        )
+        if not close_ok or not volume_ok:
+            mismatched.append(symbol)
+    return tuple(mismatched)
+
+
+def _within_tolerance(ours: Any, theirs: Any, tolerance: float) -> bool:
+    try:
+        ours_value = float(ours)
+        theirs_value = float(theirs)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(ours_value) or not math.isfinite(theirs_value):
+        return False
+    if theirs_value == 0:
+        return ours_value == 0
+    return abs(ours_value - theirs_value) <= tolerance * abs(theirs_value)
 
 
 class RefreshAuditError(ValueError):
