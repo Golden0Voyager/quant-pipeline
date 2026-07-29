@@ -1367,6 +1367,19 @@ class TestCrossSourceOptIn:
         assert orchestrator._verifier is fake
         assert not isinstance(orchestrator._verifier, XueqiuCrossSourceVerifier)
 
+    def test_falsy_injected_verifier_is_not_replaced(self, tmp_path, monkeypatch):
+        """注入判断必须是 is None 身份检查：假值但有效的 verifier 不得被
+        默认雪球 verifier 静默替换。"""
+        monkeypatch.setenv("REFRESH_CROSS_SOURCE", "1")
+
+        class _FalsyVerifier(_FakeCrossSourceVerifier):
+            def __bool__(self) -> bool:
+                return False
+
+        fake = _FalsyVerifier()
+        orchestrator = self._build(tmp_path, cross_source_verifier=fake)
+        assert orchestrator._verifier is fake
+
     def test_run_close_refresh_threads_verifier_to_builder(self, tmp_path):
         fake = _FakeCrossSourceVerifier()
         built = MagicMock()
