@@ -1619,6 +1619,62 @@ class TestMarginTradingRefreshAdapter:
 
         assert _query(market_db_path, "SELECT COUNT(*) FROM margin_trading") == [(1,)]
 
+    def test_thin_lookback_partition_below_floor_keeps_old_rows(self, market_db_path, store):
+        """回看日瘦分区（<0.8×旧行数）不得 DELETE 既有完整分区。"""
+        for i in range(5):
+            _execute(
+                market_db_path,
+                "INSERT INTO margin_trading (ts_code, trade_date, margin_balance, data_source)"
+                " VALUES (?, '2026-07-24', 9e7, 'akshare')",
+                (f"00000{i}",),
+            )
+        fetch = FakeDatedFetcher({
+            "2026-07-27": [],
+            "2026-07-26": [],
+            "2026-07-25": [],
+            "2026-07-24": [
+                _margin_record(f"00000{i}", "2026-07-24") for i in range(3)
+            ],
+        })
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError, match="coverage"):
+            adapter.refresh(_context())
+
+        rows = _query(
+            market_db_path,
+            "SELECT ts_code, margin_balance FROM margin_trading ORDER BY ts_code",
+        )
+        assert rows == [(f"00000{i}", 9e7) for i in range(5)]
+
+    def test_lookback_partition_at_floor_replaces_old_rows(self, market_db_path, store):
+        """达到 0.8 覆盖率下限的回看分区仍正常整体替换。"""
+        for i in range(5):
+            _execute(
+                market_db_path,
+                "INSERT INTO margin_trading (ts_code, trade_date, margin_balance, data_source)"
+                " VALUES (?, '2026-07-24', 9e7, 'akshare')",
+                (f"00000{i}",),
+            )
+        fetch = FakeDatedFetcher({
+            "2026-07-27": [],
+            "2026-07-26": [],
+            "2026-07-25": [],
+            "2026-07-24": [
+                _margin_record(f"00000{i}", "2026-07-24") for i in range(4)
+            ],
+        })
+        adapter = MarginTradingRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 4
+        rows = _query(
+            market_db_path,
+            "SELECT ts_code, margin_balance FROM margin_trading ORDER BY ts_code",
+        )
+        assert rows == [(f"00000{i}", 1e8) for i in range(4)]
+
     def test_symbol_scope_upserts_only_requested(self, market_db_path, store):
         """symbols 显式范围只 upsert 请求股票，其余旧行保留。"""
         _execute(
@@ -1688,6 +1744,53 @@ class TestSouthFlowRefreshAdapter:
         with pytest.raises(RefreshValidationError):
             adapter.refresh(_context())
 
+    def test_thin_partition_below_floor_keeps_old_rows(self, market_db_path, store):
+        """接受日瘦分区（<0.8×旧行数）不得删除既有市场行。"""
+        for market in ("沪市港股通", "深市港股通"):
+            _execute(
+                market_db_path,
+                "INSERT INTO south_flow (trade_date, market, net_buy_amount, data_source)"
+                " VALUES ('2026-07-24', ?, 11.0, 'akshare')",
+                (market,),
+            )
+        fetch = FakeFetcher([
+            _south_record("2026-07-24", market="沪市港股通", net=99.0),
+        ])
+        adapter = SouthFlowRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError, match="coverage"):
+            adapter.refresh(_context())
+
+        rows = _query(
+            market_db_path,
+            "SELECT market, net_buy_amount FROM south_flow ORDER BY market",
+        )
+        assert rows == [("沪市港股通", 11.0), ("深市港股通", 11.0)]
+
+    def test_partition_at_floor_replaces_old_rows(self, market_db_path, store):
+        """达到 0.8 覆盖率下限的接受日分区仍正常整体替换。"""
+        for market in ("沪市港股通", "深市港股通"):
+            _execute(
+                market_db_path,
+                "INSERT INTO south_flow (trade_date, market, net_buy_amount, data_source)"
+                " VALUES ('2026-07-24', ?, 11.0, 'akshare')",
+                (market,),
+            )
+        fetch = FakeFetcher([
+            _south_record("2026-07-24", market="沪市港股通", net=99.0),
+            _south_record("2026-07-24", market="深市港股通", net=88.0),
+        ])
+        adapter = SouthFlowRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 2
+        rows = _query(
+            market_db_path,
+            "SELECT market, net_buy_amount FROM south_flow ORDER BY market",
+        )
+        assert rows == [("沪市港股通", 99.0), ("深市港股通", 88.0)]
+
 
 _INDEX_UNIVERSE = ("sh000001", "sz399001", "sz399006", "sh000688")
 
@@ -1744,6 +1847,56 @@ class TestIndexDailyRefreshAdapter:
         with pytest.raises(RefreshValidationError):
             adapter.refresh(_context())
 
+    def test_complete_partition_below_coverage_floor_keeps_old_rows(
+        self, market_db_path, store
+    ):
+        """静态全集完整但 <0.8×旧行数（旧分区含额外指数）→ 保留旧分区。"""
+        for code in (*_INDEX_UNIVERSE, "sh000016", "sz399905"):
+            _execute(
+                market_db_path,
+                "INSERT INTO index_daily (index_code, index_name, trade_date,"
+                " close, data_source) VALUES (?, ?, '2026-07-24', 3000.0, 'akshare')",
+                (code, f"指数{code}"),
+            )
+        fetch = FakeFetcher([
+            _index_record(code, "2026-07-24") for code in _INDEX_UNIVERSE
+        ])
+        adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError, match="coverage"):
+            adapter.refresh(_context())
+
+        assert _query(
+            market_db_path,
+            "SELECT COUNT(*) FROM index_daily WHERE trade_date = '2026-07-24'",
+        ) == [(6,)]
+
+    def test_complete_partition_at_coverage_floor_replaces_old_rows(
+        self, market_db_path, store
+    ):
+        """达到 0.8 覆盖率下限（4/5）的完整分区仍正常整体替换。"""
+        for code in (*_INDEX_UNIVERSE, "sh000016"):
+            _execute(
+                market_db_path,
+                "INSERT INTO index_daily (index_code, index_name, trade_date,"
+                " close, data_source) VALUES (?, ?, '2026-07-24', 3000.0, 'akshare')",
+                (code, f"指数{code}"),
+            )
+        fetch = FakeFetcher([
+            _index_record(code, "2026-07-24") for code in _INDEX_UNIVERSE
+        ])
+        adapter = IndexDailyRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 4
+        rows = _query(
+            market_db_path,
+            "SELECT index_code FROM index_daily WHERE trade_date = '2026-07-24'"
+            " ORDER BY index_code",
+        )
+        assert rows == [(code,) for code in sorted(_INDEX_UNIVERSE)]
+
 
 class TestMarketValuationRefreshAdapter:
     def test_publishes_single_accepted_row_from_history(self, market_db_path, store):
@@ -1793,6 +1946,46 @@ class TestCbIndexRefreshAdapter:
             "SELECT trade_date, index_code, close FROM cb_index",
         )
         assert rows == [("2026-07-25", "JSL_EW", 2101.5)]
+
+    def test_thin_partition_below_floor_keeps_old_rows(self, market_db_path, store):
+        """接受日瘦分区（<0.8×旧行数）不得删除既有指数行。"""
+        for code in ("JSL_EW", "JSL_PRICE"):
+            _execute(
+                market_db_path,
+                "INSERT INTO cb_index (trade_date, index_code, close, data_source)"
+                " VALUES ('2026-07-25', ?, 2000.0, 'akshare')",
+                (code,),
+            )
+        fetch = FakeFetcher([_cb_index_record("2026-07-25", price=2101.5)])
+        adapter = CbIndexRefreshAdapter(store=store, fetch_records=fetch)
+
+        with pytest.raises(RefreshValidationError, match="coverage"):
+            adapter.refresh(_context())
+
+        rows = _query(
+            market_db_path,
+            "SELECT index_code, close FROM cb_index ORDER BY index_code",
+        )
+        assert rows == [("JSL_EW", 2000.0), ("JSL_PRICE", 2000.0)]
+
+    def test_partition_at_floor_replaces_old_rows(self, market_db_path, store):
+        """满足覆盖率下限（1/1）的接受日分区仍正常整体替换。"""
+        _execute(
+            market_db_path,
+            "INSERT INTO cb_index (trade_date, index_code, close, data_source)"
+            " VALUES ('2026-07-25', 'JSL_EW', 2000.0, 'akshare')",
+        )
+        fetch = FakeFetcher([_cb_index_record("2026-07-25", price=2101.5)])
+        adapter = CbIndexRefreshAdapter(store=store, fetch_records=fetch)
+
+        result = adapter.refresh(_context())
+
+        assert result.replaced == 1
+        rows = _query(
+            market_db_path,
+            "SELECT index_code, close FROM cb_index",
+        )
+        assert rows == [("JSL_EW", 2101.5)]
 
 
 # ===========================================================================
