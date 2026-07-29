@@ -464,8 +464,9 @@ def fetch_index_daily_records() -> list[dict]:
     """收盘刷新专用：抓取四大指数全历史日线并归一化（历史型源）。
 
     与 legacy ``_fetch_index_daily`` 不同：返回全部历史行而非仅最后
-    一行，由适配器挑选回看窗口内可接受的目标分区；任一指数源异常
-    直接上抛（部分指数缺失会造成不完整分区，视为源失败）。
+    一行，由适配器挑选回看窗口内可接受的目标分区；指数源报错直接
+    上抛，单指数返回空则跳过不产行，由适配器按静态指数全集
+    （_INDEX_DAILY_REFRESH_INDICES）判定分区不完整并拒绝替换。
     """
     records: list[dict] = []
     for index_code, index_name in _INDEX_DAILY_REFRESH_INDICES.items():
