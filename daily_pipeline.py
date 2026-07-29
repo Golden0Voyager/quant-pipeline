@@ -520,9 +520,12 @@ def _build_refresh_orchestrator(
             sample_size=cross_cfg.sample_size,
             report_only=cross_cfg.report_only,
         )
-        # 注入的 verifier（测试接缝）优先；否则装配默认的只读雪球 verifier
-        build_kwargs["verifier"] = cross_source_verifier or XueqiuCrossSourceVerifier(
-            db_path=db_path
+        # 注入的 verifier（测试接缝）优先；按 is None 身份判断匹配 | None
+        # 契约，假值但有效的注入 verifier 不得被默认雪球 verifier 替换
+        build_kwargs["verifier"] = (
+            XueqiuCrossSourceVerifier(db_path=db_path)
+            if cross_source_verifier is None
+            else cross_source_verifier
         )
     return RefreshOrchestrator(
         specs=refreshable_trading_tasks(),
