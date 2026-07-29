@@ -58,7 +58,11 @@ from tasks.finance_flow import (
     fetch_etf_daily_records,
     fetch_south_flow_records,
 )
-from tasks.index_chain import fetch_chip_em_record_for_refresh, fetch_index_daily_records
+from tasks.index_chain import (
+    _INDEX_DAILY_REFRESH_INDICES,
+    fetch_chip_em_record_for_refresh,
+    fetch_index_daily_records,
+)
 from tasks.institution_survey import fetch_institution_survey_records
 from tasks.macro import fetch_limit_pool_records
 from tasks.market_flow import (
@@ -1129,13 +1133,9 @@ class IndexDailyRefreshAdapter:
         target = context.target_date
 
         records = self.fetch_records()
-        expected = {
-            str(record.get("index_code", "")).strip()
-            for record in records
-            if str(record.get("index_code", "")).strip()
-        }
-        if not expected:
-            raise RefreshValidationError("index daily source returned no index codes")
+        # 完整性以静态指数全集判定：从返回记录推导会让缺失指数把
+        # “期望集”一起缩小，进而用不完整分区替换既有完整分区。
+        expected = set(_INDEX_DAILY_REFRESH_INDICES)
 
         codes_by_date: dict[str, set[str]] = {}
         for record in records:
@@ -2131,6 +2131,7 @@ class CbQuotationRefreshAdapter:
                 rows=_as_store_rows(rows, _CB_QUOTATION_COLUMNS),
                 natural_keys=("ts_code",),
                 required_fields=("price",),
+                minimum_coverage=0.8,
             )
         )
 
@@ -2187,6 +2188,7 @@ class CbRedeemRefreshAdapter:
                 rows=_as_store_rows(rows, _CB_REDEEM_COLUMNS),
                 natural_keys=("ts_code",),
                 required_fields=("redeem_flag",),
+                minimum_coverage=0.8,
             )
         )
 
@@ -2294,6 +2296,8 @@ class NorthFlowRefreshAdapter:
             metadata={
                 "source_status": "dead_source",
                 "reason": _NORTH_FLOW_DEAD_REASON,
+                # 空基线声明：新库 north_flow 本就无历史行，retained=0 属实。
+                "baseline_empty": retained == 0,
             },
         )
 
