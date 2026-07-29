@@ -9,7 +9,14 @@ from datetime import UTC, datetime, time
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
-from core.refresh_audit import RefreshAudit, RefreshAuditError, RefreshAuditReport
+from core.refresh_audit import (
+    CrossSourceTolerance,
+    RefreshAudit,
+    RefreshAuditError,
+    RefreshAuditReport,
+    cross_source_mismatches,
+    stratified_cross_source_sample,
+)
 from core.task_registry import TaskSpec
 from core.task_result import ErrorKind, TaskResult, TaskStatus
 
@@ -110,6 +117,50 @@ class _TaskExecution:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+class CrossSourceVerifier(Protocol):
+    """Read-only comparison against a secondary source; never writes data.
+
+    ``supported_boards`` declares which A-share boards the backup source
+    legitimately quotes; anything else is excluded from sampling explicitly.
+    Backup sources such as yfinance are never authoritative for A-share
+    close data and are only ever read for comparison.
+    """
+
+    source_name: str
+    supported_boards: frozenset[str]
+
+    def primary_quotes(
+        self,
+        symbols: Sequence[str],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, Any]]:
+        """Read close/volume that this run published for the sampled symbols."""
+        ...
+
+    def reference_quotes(
+        self,
+        symbols: Sequence[str],
+        target_date: str,
+    ) -> Mapping[str, Mapping[str, Any]]:
+        """Read close/volume for the same symbols from the backup source."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class CrossSourceCheckConfig:
+    """Which task is cross-checked and with what sampling parameters."""
+
+    task_name: str
+    tolerance: CrossSourceTolerance
+    sample_size: int = 30
+
+    def __post_init__(self) -> None:
+        if not self.task_name:
+            raise ValueError("cross-source task_name must not be empty")
+        if self.sample_size <= 0:
+            raise ValueError("cross-source sample_size must be positive")
+
+
 class RefreshOrchestrator:
     """Run refresh adapters in dependency order and persist their audit trail."""
 
@@ -121,12 +172,20 @@ class RefreshOrchestrator:
         store: RefreshRunStore,
         audit: RefreshAudit | None = None,
         clock: Callable[[], datetime] | None = None,
+        cross_source: CrossSourceCheckConfig | None = None,
+        verifier: CrossSourceVerifier | None = None,
     ) -> None:
+        if (cross_source is None) != (verifier is None):
+            raise ValueError(
+                "cross-source check requires both a config and a verifier"
+            )
         self._specs = tuple(specs)
         self._adapters = dict(adapters)
         self._store = store
         self._audit = audit or RefreshAudit()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._cross_source = cross_source
+        self._verifier = verifier
 
     def run(self, context: RefreshContext) -> TaskResult:
         """Execute one dependency-aware close-refresh run."""
@@ -196,12 +255,14 @@ class RefreshOrchestrator:
             if blocked_by:
                 execution = self._blocked_execution(spec.name, blocked_by)
             else:
+                task_context = self._task_context(spec, context, executions)
                 execution = self._run_task(
                     spec,
-                    self._task_context(spec, context, executions),
+                    task_context,
                     symbols_ignored=context.symbols is not None
                     and not policy.supports_symbols,
                 )
+                execution = self._maybe_cross_check(spec, task_context, execution)
             executions[spec.name] = execution
             self._record_task(context, spec, execution)
 
@@ -402,6 +463,147 @@ class RefreshOrchestrator:
         metadata = {"blocked_by": blocked_by, "retained_old_data": True}
         task_result.metadata = metadata
         return _TaskExecution(task_result=task_result, metadata=metadata)
+
+    def _maybe_cross_check(
+        self,
+        spec: TaskSpec,
+        context: RefreshContext,
+        execution: _TaskExecution,
+    ) -> _TaskExecution:
+        config = self._cross_source
+        verifier = self._verifier
+        if (
+            config is None
+            or verifier is None
+            or spec.name != config.task_name
+            or execution.adapter_result is None
+        ):
+            return execution
+        return self._cross_source_check(spec, context, execution, config, verifier)
+
+    def _cross_source_check(
+        self,
+        spec: TaskSpec,
+        context: RefreshContext,
+        execution: _TaskExecution,
+        config: CrossSourceCheckConfig,
+        verifier: CrossSourceVerifier,
+    ) -> _TaskExecution:
+        adapter_result = execution.adapter_result
+        assert adapter_result is not None
+        sample = stratified_cross_source_sample(
+            adapter_result.changed_symbols,
+            target_date=context.target_date,
+            supported_boards=verifier.supported_boards,
+            sample_size=config.sample_size,
+        )
+        summary: dict[str, Any] = {
+            "source": verifier.source_name,
+            "sampled": sample.symbols,
+            "excluded_boards": sample.excluded_boards,
+            "price_tolerance": config.tolerance.price,
+            "volume_tolerance": config.tolerance.volume,
+            "mismatched": (),
+            "still_mismatched": (),
+        }
+        execution.metadata["cross_source"] = summary
+        if not sample.symbols:
+            return execution
+
+        try:
+            mismatched = self._compare_quotes(
+                verifier, sample.symbols, context.target_date, config.tolerance
+            )
+        except Exception as exc:
+            summary["error"] = str(exc)
+            return self._degrade_cross_source(
+                spec,
+                execution,
+                f"cross-source check against {verifier.source_name} failed: "
+                f"{exc}; old data retained",
+            )
+        summary["mismatched"] = mismatched
+        if not mismatched:
+            return execution
+
+        policy = spec.refresh_policy
+        assert policy is not None
+        if not policy.supports_symbols:
+            # Without per-symbol scoping the only "retry" would be a full
+            # rerun, which the design forbids: degrade instead.
+            return self._degrade_cross_source(
+                spec,
+                execution,
+                f"{len(mismatched)} sampled symbols mismatch "
+                f"{verifier.source_name} and the task cannot retry per "
+                "symbol; old data retained",
+            )
+
+        # Exactly one targeted retry, scoped to the mismatched symbols only.
+        # This is deliberately outside _run_task's two-attempt loop so a
+        # cross-source mismatch can never double-retry or widen back to a
+        # full-market fetch.
+        summary["retried_symbols"] = mismatched
+        retry_context = replace(context, symbols=mismatched)
+        try:
+            retry_result = self._adapters[spec.name].refresh(retry_context)
+            self._audit.validate_task(spec, retry_context, retry_result)
+            still_mismatched = self._compare_quotes(
+                verifier, mismatched, context.target_date, config.tolerance
+            )
+        except Exception as exc:
+            summary["retry_error"] = str(exc)
+            return self._degrade_cross_source(
+                spec,
+                execution,
+                f"cross-source targeted retry failed: {exc}; old data retained",
+            )
+        summary["still_mismatched"] = still_mismatched
+        if still_mismatched:
+            return self._degrade_cross_source(
+                spec,
+                execution,
+                f"{len(still_mismatched)} symbols still mismatch "
+                f"{verifier.source_name} after one targeted retry; "
+                "old data retained",
+            )
+        return execution
+
+    def _compare_quotes(
+        self,
+        verifier: CrossSourceVerifier,
+        symbols: tuple[str, ...],
+        target_date: str,
+        tolerance: CrossSourceTolerance,
+    ) -> tuple[str, ...]:
+        primary = verifier.primary_quotes(symbols, target_date)
+        reference = verifier.reference_quotes(symbols, target_date)
+        return cross_source_mismatches(symbols, primary, reference, tolerance)
+
+    @staticmethod
+    def _degrade_cross_source(
+        spec: TaskSpec,
+        execution: _TaskExecution,
+        reason: str,
+    ) -> _TaskExecution:
+        adapter_result = execution.adapter_result
+        assert adapter_result is not None
+        if execution.task_result.status is TaskStatus.DEGRADED:
+            return execution
+        task_result = TaskResult.degraded(
+            spec.name,
+            ErrorKind.DATA_QUALITY,
+            reason,
+            saved=adapter_result.replaced,
+            attempted=adapter_result.fetched,
+            fetched=adapter_result.fetched,
+            accepted=adapter_result.validated,
+            rejected=len(adapter_result.failed_symbols),
+            source=spec.primary_source,
+        )
+        task_result.metadata = execution.metadata
+        execution.task_result = task_result
+        return execution
 
     def _record_task(
         self,
