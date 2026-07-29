@@ -1356,6 +1356,17 @@ class TestRefreshTodayCLI:
         assert "--symbols" in capsys.readouterr().err
         refresh.assert_not_called()
 
+    def test_empty_string_symbols_errors_and_never_refreshes(self, capsys):
+        """--symbols ""（空字符串，如 shell 变量未赋值）同样必须报错，不得升级为全市场。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--symbols", ""]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh") as refresh, \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--symbols" in capsys.readouterr().err
+        refresh.assert_not_called()
+
     def test_valid_symbols_still_scope_refresh(self):
         """回归：正常 --symbols 列表仍按作用域传入 run_close_refresh。"""
         ok = TaskResult.success("refresh_today", saved=0)
