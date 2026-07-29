@@ -536,6 +536,7 @@ class RefreshOrchestrator:
             "mismatched": (),
             "unverifiable": (),
             "still_mismatched": (),
+            "still_unverifiable": (),
         }
         execution.metadata["cross_source"] = summary
         if config.report_only:
