@@ -625,10 +625,37 @@ def classify_refresh_task_state(record: dict | None) -> str:
     return "retained"
 
 
-def get_latest_refresh_task_states(db_path: str) -> list[dict]:
+def get_latest_refresh_run_id(db_path: str) -> str | None:
+    """读取审计库中最近一次收盘刷新的 run_id（启动前边界快照）。
+
+    审计表不存在或库不可读时返回 None（视为无历史运行），不抛异常。
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        row = conn.execute(
+            "SELECT run_id FROM refresh_runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        return row[0] if row is not None else None
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_latest_refresh_task_states(
+    db_path: str, boundary_run_id: str | None = None
+) -> list[dict]:
     """读取最近一次收盘刷新的每任务审计记录（含结构化状态归类）。
 
     审计表不存在或库不可读时返回空列表，不抛异常。
+    boundary_run_id 为启动前捕获的边界：若最新 run 仍是边界本身（子进程
+    崩溃于写入自身 refresh_runs 行之前），返回空列表，避免把上一次运行
+    的结果误报为本次。
     """
     p = Path(db_path)
     if not p.exists():
@@ -641,6 +668,8 @@ def get_latest_refresh_task_states(db_path: str) -> list[dict]:
             "SELECT run_id FROM refresh_runs ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         if row is None:
+            return []
+        if boundary_run_id is not None and row[0] == boundary_run_id:
             return []
         rows = cur.execute(
             """SELECT task_name, status, fetched, validated, replaced,
@@ -2296,9 +2325,17 @@ class PipelineApp(App):
         self.push_screen(ConfirmRefreshTodayScreen(), _on_dismiss)
 
     async def _run_refresh_today(self, *args: str) -> None:
-        """后台执行收盘刷新，结束后用审计记录汇总通知（区分覆盖/保留）。"""
+        """后台执行收盘刷新，结束后用审计记录汇总通知（区分覆盖/保留）。
+
+        启动前先捕获审计库最新 run 的边界，结束后只汇总严格晚于该边界
+        的新 run；若子进程在写入自身 refresh_runs 行之前崩溃，则退回纯
+        退出码告警，避免把上一次运行的结果误报为本次。
+        """
+        boundary_run_id = get_latest_refresh_run_id(str(DEFAULT_DB_PATH))
         returncode = await self._run_in_background(*args)
-        records = get_latest_refresh_task_states(str(DEFAULT_DB_PATH))
+        records = get_latest_refresh_task_states(
+            str(DEFAULT_DB_PATH), boundary_run_id=boundary_run_id
+        )
         if records:
             severity = "information" if returncode == 0 else "warning"
             self.notify(format_refresh_summary(records), severity=severity, timeout=8.0)
