@@ -578,8 +578,9 @@ def main():
             ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
             result = run_close_refresh(args.db_path, symbols=symbols, force=args.force)
         except KeyboardInterrupt:
+            # 刷新路径不同于 legacy：中断必须非零退出，供调度/TUI 感知 aborted
             logger.info("收到中断信号，正在退出...")
-            return
+            sys.exit(1)
         if result.exit_failure:
             sys.exit(1)
         return
