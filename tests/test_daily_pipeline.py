@@ -1281,6 +1281,15 @@ class TestRefreshTodayCLI:
             daily_pipeline.main()
         assert exc_info.value.code == 1
 
+    def test_refresh_today_interrupt_exits_nonzero(self):
+        """收盘刷新路径被中断必须以非零退出码结束，不得静默返回 0。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today"]), \
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", side_effect=KeyboardInterrupt), \
+             pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
+
 
 # ===========================================================================
 # Direct akshare tasks (patch daily_pipeline.ak)
