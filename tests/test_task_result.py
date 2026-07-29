@@ -90,6 +90,25 @@ class TestNormalizeTaskResult:
         assert result.status is TaskStatus.NO_DATA
         assert result.metadata.get("reason") == "holiday"
 
+    def test_skipped_flag_is_no_data_not_failed(self):
+        """任务显式声明 skipped 时零行属正常，不得判为 failed（2026-07-29 假警报）。"""
+        result = normalize_task_result(
+            "x", {"saved": 0, "total": 0, "skipped": True, "reason": "already complete"}
+        )
+        assert result.status is TaskStatus.NO_DATA
+        assert result.metadata.get("reason") == "already complete"
+        assert result.exit_failure is False
+
+    def test_skipped_flag_without_reason_gets_default(self):
+        result = normalize_task_result("x", {"saved": 0, "skipped": True})
+        assert result.status is TaskStatus.NO_DATA
+        assert "skipped" in result.metadata.get("reason", "")
+
+    def test_skipped_with_saved_rows_still_success(self):
+        """skipped 标记不覆盖已保存行数：有产出仍按 success 处理。"""
+        result = normalize_task_result("x", {"saved": 3, "skipped": True})
+        assert result.status is TaskStatus.SUCCESS
+
     def test_failed_count_creates_degraded(self):
         result = normalize_task_result("x", {"failed": 2, "total": 10})
         assert result.status is TaskStatus.DEGRADED
