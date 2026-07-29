@@ -409,6 +409,43 @@ def test_finish_run_error_does_not_mask_failed_outcome() -> None:
     assert result.metadata["error_type"] == "OperationalError"
 
 
+class InterruptingAdapter:
+    """Adapter fake：refresh 中抛 KeyboardInterrupt，模拟人工中断。"""
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        raise KeyboardInterrupt
+
+
+def test_keyboard_interrupt_finishes_run_aborted_and_propagates() -> None:
+    """中断不得把运行行留在 'running'：落 'aborted' 后原样重抛。"""
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": InterruptingAdapter()},
+        store=store,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        orchestrator.run(_context())
+
+    assert store.calls[0][0] == "start"
+    finishes = [kwargs for call, kwargs in store.calls if call == "finish"]
+    assert [kwargs["status"] for kwargs in finishes] == ["aborted"]
+
+
+def test_finish_run_error_during_interrupt_does_not_mask_interrupt() -> None:
+    """收尾时 store 再报错也不得吞掉或替换原始中断信号。"""
+    store = RecordCrashStore(finish_error=True)
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": InterruptingAdapter()},
+        store=store,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        orchestrator.run(_context())
+
+
 def test_adapter_failure_is_retried_once_then_success_is_audited() -> None:
     calls: list[RefreshContext] = []
     store = RecordingStore()
