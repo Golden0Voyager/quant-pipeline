@@ -234,6 +234,17 @@ class RefreshOrchestrator:
                 "error_type": type(exc).__name__,
             }
             return failure
+        except BaseException:
+            # KeyboardInterrupt / SystemExit 等中断：尽力把运行行落为
+            # 'aborted'（否则永久停在 'running'），随后原样重抛，
+            # 绝不吞掉中断信号；收尾的二次 store 错误不得遮蔽它。
+            with suppress(Exception):
+                self._store.finish_run(
+                    run_id=context.run_id,
+                    finished_at=self._aware_now().isoformat(),
+                    status="aborted",
+                )
+            raise
 
     def _execute(
         self,
