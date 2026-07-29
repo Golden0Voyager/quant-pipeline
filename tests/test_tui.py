@@ -1405,7 +1405,7 @@ async def test_action_refresh_today_cancel_launches_nothing():
 
 
 @pytest.mark.asyncio
-async def test_run_refresh_today_delegates_and_reports_states():
+async def test_run_refresh_today_delegates_and_reports_states(tmp_path):
     """后台执行只透传参数给 _run_in_background，结束后汇总审计状态。"""
     app = PipelineApp()
     records = [
@@ -1413,7 +1413,8 @@ async def test_run_refresh_today_delegates_and_reports_states():
         {"task_name": "update_fund_flow", "state": "retained"},
         {"task_name": "update_indicators", "state": "blocked"},
     ]
-    with patch.object(app, "_run_in_background", return_value=1) as mock_run_bg, \
+    with patch("tui.DEFAULT_DB_PATH", tmp_path / "missing.db"), \
+         patch.object(app, "_run_in_background", return_value=1) as mock_run_bg, \
          patch("tui.get_latest_refresh_task_states", return_value=records), \
          patch.object(app, "notify") as mock_notify:
         await app._run_refresh_today("python", "daily_pipeline.py", "--refresh-today")
@@ -1425,6 +1426,104 @@ async def test_run_refresh_today_delegates_and_reports_states():
     assert "已提交覆盖 1" in message
     assert "保留旧数据 1" in message
     assert mock_notify.call_args.kwargs["severity"] == "warning"
+
+
+def _create_refresh_audit_db_with_prior_run(db_path: str) -> None:
+    """建审计表并写入上一次运行的记录（2 个任务均为保留旧数据）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE refresh_runs (run_id TEXT PRIMARY KEY, target_date TEXT, "
+        "started_at TEXT, finished_at TEXT, status TEXT, symbols_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE refresh_task_runs (run_id TEXT, task_name TEXT, "
+        "policy_kind TEXT, requested_date TEXT, as_of_date TEXT, status TEXT, "
+        "fetched INTEGER, validated INTEGER, replaced INTEGER, "
+        "retained INTEGER, failed INTEGER, metadata_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO refresh_runs VALUES "
+        "('run-prior', '2026-07-27', '2026-07-27T16:05:00+08:00', "
+        "'2026-07-27T16:40:00+08:00', 'failed', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-prior', 'update_bars', "
+        "'full_replace', '2026-07-27', NULL, 'failed', 0, 0, 0, 50, 1, "
+        "'{\"retained_old_data\": true}')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-prior', 'update_fund_flow', "
+        "'full_replace', '2026-07-27', NULL, 'failed', 0, 0, 0, 30, 1, "
+        "'{\"retained_old_data\": true}')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_new_refresh_run(db_path: str) -> None:
+    """模拟本次子进程退出前写入的新 run（1 个任务已提交覆盖）。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO refresh_runs VALUES "
+        "('run-current', '2026-07-28', '2026-07-28T16:05:00+08:00', "
+        "'2026-07-28T16:40:00+08:00', 'success', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-current', 'update_bars', "
+        "'full_replace', '2026-07-28', '2026-07-28', 'success', 100, 100, 100, "
+        "0, 0, '{}')"
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_run_refresh_today_crash_before_persist_no_stale_summary(tmp_path):
+    """子进程在写入自身 refresh_runs 行之前崩溃：不得把上一次运行汇总为本次。
+
+    例如 CLI 16:00 闸门拒绝、--symbols 参数错误、导入失败——审计库里只有
+    上一次 run 的记录，通知必须退回纯退出码告警。
+    """
+    db_path = tmp_path / "audit.db"
+    _create_refresh_audit_db_with_prior_run(str(db_path))
+    app = PipelineApp()
+    with patch("tui.DEFAULT_DB_PATH", db_path), \
+         patch.object(app, "_run_in_background", return_value=2) as mock_run_bg, \
+         patch.object(app, "notify") as mock_notify:
+        await app._run_refresh_today("python", "daily_pipeline.py", "--refresh-today")
+        mock_run_bg.assert_called_once_with(
+            "python", "daily_pipeline.py", "--refresh-today"
+        )
+    assert mock_notify.call_count == 1
+    message = mock_notify.call_args.args[0]
+    # 上一次 run 的保留/覆盖计数不得出现在本次通知中
+    assert "保留旧数据" not in message
+    assert "已提交覆盖" not in message
+    # 退回既有的非零退出码告警路径
+    assert "退出码 2" in message
+    assert mock_notify.call_args.kwargs["severity"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_run_refresh_today_summarizes_run_newer_than_boundary(tmp_path):
+    """子进程写入了严格晚于启动边界的新 run：正常汇总该 run（回归保护）。"""
+    db_path = tmp_path / "audit.db"
+    _create_refresh_audit_db_with_prior_run(str(db_path))
+    app = PipelineApp()
+
+    def _fake_run(*args):
+        _insert_new_refresh_run(str(db_path))
+        return 0
+
+    with patch("tui.DEFAULT_DB_PATH", db_path), \
+         patch.object(app, "_run_in_background", side_effect=_fake_run), \
+         patch.object(app, "notify") as mock_notify:
+        await app._run_refresh_today("python", "daily_pipeline.py", "--refresh-today")
+    message = mock_notify.call_args.args[0]
+    # 只汇总新 run：1 个已提交覆盖，上一次 run 的 2 个保留任务不得混入
+    assert "已提交覆盖 1" in message
+    assert "保留旧数据" not in message
+    assert mock_notify.call_args.kwargs["severity"] == "information"
 
 
 def test_classify_refresh_task_state_distinguishes_retained_from_committed():
