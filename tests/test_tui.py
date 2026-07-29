@@ -1264,3 +1264,273 @@ async def test_action_run_task_group_unknown():
             await app.action_run_task_group("nonexistent")
             await pilot.pause()
         assert any("未知任务分组" in str(call) for call in mock_notify.call_args_list)
+
+
+# ===========================================================================
+# 收盘刷新（--refresh-today）：绑定、确认弹窗、启动命令与结构化状态
+# ===========================================================================
+def _screen_labels_text(screen) -> str:
+    """提取弹窗内所有 Label 的原始 markup 文本（沿用 _Static__content 惯例）。"""
+    from textual.widgets import Label
+    return " ".join(
+        str(getattr(label, "_Static__content", "")) for label in screen.query(Label)
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_today_binding_and_action_exist():
+    """收盘刷新是独立的绑定 + action，与全量更新/断点续传分开。"""
+    app = PipelineApp()
+    async with app.run_test():
+        assert callable(getattr(app, "action_refresh_today", None))
+        refresh_bindings = [b for b in PipelineApp.BINDINGS if b.action == "refresh_today"]
+        assert len(refresh_bindings) == 1
+        # 不与现有绑定共用按键
+        other_keys = {b.key for b in PipelineApp.BINDINGS if b.action != "refresh_today"}
+        assert refresh_bindings[0].key not in other_keys
+
+
+@pytest.mark.asyncio
+async def test_refresh_today_confirmation_displays_date_tasks_and_scope():
+    """确认弹窗必须显示上海目标交易日、29 个任务范围与可选股票范围输入。"""
+    from zoneinfo import ZoneInfo
+
+    from textual.widgets import Input
+
+    from tui import ConfirmRefreshTodayScreen
+
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test() as pilot:
+            with patch(
+                "tui.get_expected_latest_trading_day", return_value="2026-07-28"
+            ) as mock_day:
+                screen = ConfirmRefreshTodayScreen()
+            # 目标日期必须用上海时区的 aware now 计算，不依赖本机时区
+            now_arg = mock_day.call_args.kwargs["now"]
+            assert now_arg.tzinfo == ZoneInfo("Asia/Shanghai")
+
+            app.push_screen(screen)
+            await pilot.pause()
+            text = _screen_labels_text(screen)
+            assert "2026-07-28" in text
+            assert "29" in text
+            # 可选股票范围输入框 + 确认/取消按钮
+            assert screen.query_one("#refresh-symbols", Input) is not None
+            assert screen.query_one("#refresh-confirm") is not None
+            assert screen.query_one("#refresh-cancel") is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_today_confirmation_dismiss_values():
+    """确认返回输入的股票范围（可为空字符串），取消返回 None。"""
+    from textual.widgets import Button, Input
+
+    from tui import ConfirmRefreshTodayScreen
+
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test() as pilot:
+            screen = ConfirmRefreshTodayScreen()
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen.dismiss = MagicMock()
+            screen.query_one("#refresh-symbols", Input).value = " 600000,000001 "
+            screen.on_button_pressed(Button.Pressed(Button(id="refresh-confirm")))
+            screen.dismiss.assert_called_once_with("600000,000001")
+
+            screen.dismiss = MagicMock()
+            screen.on_button_pressed(Button.Pressed(Button(id="refresh-cancel")))
+            screen.dismiss.assert_called_once_with(None)
+
+
+@pytest.mark.asyncio
+async def test_action_refresh_today_accept_launches_exact_command():
+    """确认后精确启动 daily_pipeline.py --refresh-today，无额外 flag。"""
+    from tui import ConfirmRefreshTodayScreen
+
+    app = PipelineApp()
+    expected_pipeline_path = str(
+        Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"
+    )
+    with patch.object(app, "_run_refresh_today") as mock_refresh, \
+         patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
+         patch.object(app, "push_screen") as mock_push_screen:
+        await app.action_refresh_today()
+        assert mock_push_screen.call_count == 1
+        screen, callback = mock_push_screen.call_args[0]
+        assert isinstance(screen, ConfirmRefreshTodayScreen)
+
+        callback("")
+        mock_create_task.assert_called_once()
+        mock_refresh.assert_called_once_with(
+            sys.executable, expected_pipeline_path, "--refresh-today"
+        )
+
+
+@pytest.mark.asyncio
+async def test_action_refresh_today_accept_with_symbols_scope():
+    """输入股票范围时追加 --symbols，且仅追加这一个参数对。"""
+    app = PipelineApp()
+    expected_pipeline_path = str(
+        Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"
+    )
+    with patch.object(app, "_run_refresh_today") as mock_refresh, \
+         patch("asyncio.create_task", side_effect=_close_coro), \
+         patch.object(app, "push_screen") as mock_push_screen:
+        await app.action_refresh_today()
+        _screen, callback = mock_push_screen.call_args[0]
+        callback("600000,000001")
+        mock_refresh.assert_called_once_with(
+            sys.executable, expected_pipeline_path, "--refresh-today",
+            "--symbols", "600000,000001",
+        )
+
+
+@pytest.mark.asyncio
+async def test_action_refresh_today_cancel_launches_nothing():
+    """取消时不得启动任何子进程，也不做延迟调度。"""
+    app = PipelineApp()
+    with patch.object(app, "_run_refresh_today") as mock_refresh, \
+         patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
+         patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
+         patch.object(app, "push_screen") as mock_push_screen:
+        await app.action_refresh_today()
+        _screen, callback = mock_push_screen.call_args[0]
+        callback(None)
+        mock_refresh.assert_not_called()
+        mock_run_bg.assert_not_called()
+        mock_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_refresh_today_delegates_and_reports_states():
+    """后台执行只透传参数给 _run_in_background，结束后汇总审计状态。"""
+    app = PipelineApp()
+    records = [
+        {"task_name": "update_bars", "state": "committed"},
+        {"task_name": "update_fund_flow", "state": "retained"},
+        {"task_name": "update_indicators", "state": "blocked"},
+    ]
+    with patch.object(app, "_run_in_background", return_value=1) as mock_run_bg, \
+         patch("tui.get_latest_refresh_task_states", return_value=records), \
+         patch.object(app, "notify") as mock_notify:
+        await app._run_refresh_today("python", "daily_pipeline.py", "--refresh-today")
+        mock_run_bg.assert_called_once_with(
+            "python", "daily_pipeline.py", "--refresh-today"
+        )
+    message = mock_notify.call_args.args[0]
+    # 展示必须区分「已提交覆盖」与「保留旧数据」
+    assert "已提交覆盖 1" in message
+    assert "保留旧数据 1" in message
+    assert mock_notify.call_args.kwargs["severity"] == "warning"
+
+
+def test_classify_refresh_task_state_distinguishes_retained_from_committed():
+    """结构化状态归类覆盖设计文档要求的六态区分。"""
+    from tui import REFRESH_STATE_LABELS, classify_refresh_task_state
+
+    assert classify_refresh_task_state(None) == "pending"
+
+    committed = {
+        "status": "success", "fetched": 100, "validated": 100,
+        "replaced": 100, "retained": 0, "metadata": {},
+    }
+    retained = {
+        "status": "failed", "fetched": 0, "validated": 0,
+        "replaced": 0, "retained": 50,
+        "metadata": {"retained_old_data": True},
+    }
+    fetched_not_validated = {
+        "status": "failed", "fetched": 80, "validated": 0,
+        "replaced": 0, "retained": 50,
+        "metadata": {"retained_old_data": True},
+    }
+    degraded = {
+        "status": "degraded", "fetched": 100, "validated": 90,
+        "replaced": 90, "retained": 10, "metadata": {},
+    }
+    blocked = {
+        "status": "failed", "fetched": 0, "validated": 0,
+        "replaced": 0, "retained": 0,
+        "metadata": {"blocked_by": ["update_bars"], "retained_old_data": True},
+    }
+
+    assert classify_refresh_task_state(committed) == "committed"
+    assert classify_refresh_task_state(retained) == "retained"
+    assert classify_refresh_task_state(fetched_not_validated) == "fetched_not_validated"
+    assert classify_refresh_task_state(degraded) == "degraded"
+    assert classify_refresh_task_state(blocked) == "blocked"
+
+    # 保留旧数据与已提交覆盖必须是不同的展示标签
+    labels = [REFRESH_STATE_LABELS[state] for state in (
+        "pending", "fetched_not_validated", "committed",
+        "retained", "degraded", "blocked",
+    )]
+    assert len(set(labels)) == 6
+    assert REFRESH_STATE_LABELS["committed"] != REFRESH_STATE_LABELS["retained"]
+
+
+def test_get_latest_refresh_task_states_reads_latest_run(tmp_path):
+    """从 refresh_runs/refresh_task_runs 审计表读取最近一次运行并归类。"""
+    from tui import get_latest_refresh_task_states
+
+    db_path = str(tmp_path / "audit.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE refresh_runs (run_id TEXT PRIMARY KEY, target_date TEXT, "
+        "started_at TEXT, finished_at TEXT, status TEXT, symbols_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE refresh_task_runs (run_id TEXT, task_name TEXT, "
+        "policy_kind TEXT, requested_date TEXT, as_of_date TEXT, status TEXT, "
+        "fetched INTEGER, validated INTEGER, replaced INTEGER, "
+        "retained INTEGER, failed INTEGER, metadata_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO refresh_runs VALUES "
+        "('run-old', '2026-07-27', '2026-07-27T16:05:00+08:00', NULL, 'success', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_runs VALUES "
+        "('run-new', '2026-07-28', '2026-07-28T16:05:00+08:00', NULL, 'degraded', '[]')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-old', 'update_bars', 'full_replace', "
+        "'2026-07-27', '2026-07-27', 'success', 10, 10, 10, 0, 0, '{}')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-new', 'update_bars', 'full_replace', "
+        "'2026-07-28', '2026-07-28', 'success', 100, 100, 100, 0, 0, '{}')"
+    )
+    conn.execute(
+        "INSERT INTO refresh_task_runs VALUES ('run-new', 'update_fund_flow', 'full_replace', "
+        "'2026-07-28', NULL, 'failed', 0, 0, 0, 50, 1, "
+        "'{\"retained_old_data\": true}')"
+    )
+    conn.commit()
+    conn.close()
+
+    records = get_latest_refresh_task_states(db_path)
+    states = {r["task_name"]: r["state"] for r in records}
+    # 只读最近一次 run，且区分覆盖/保留
+    assert states == {"update_bars": "committed", "update_fund_flow": "retained"}
+
+    # 表不存在 / 库不存在时返回空，不抛异常
+    assert get_latest_refresh_task_states(str(tmp_path / "missing.db")) == []
+
+
+def test_format_refresh_summary_counts_states():
+    from tui import format_refresh_summary
+
+    records = [
+        {"state": "committed"},
+        {"state": "committed"},
+        {"state": "retained"},
+        {"state": "degraded"},
+    ]
+    summary = format_refresh_summary(records)
+    assert "已提交覆盖 2" in summary
+    assert "保留旧数据 1" in summary
+    assert "部分降级 1" in summary
