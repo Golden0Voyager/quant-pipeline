@@ -19,6 +19,7 @@ from core.refresh import (
 from core.refresh_audit import (
     CROSS_SOURCE_BOARDS,
     CrossSourceTolerance,
+    RefreshAuditError,
     stratified_cross_source_sample,
 )
 from core.task_registry import (
@@ -429,6 +430,55 @@ def test_adapter_failure_is_retried_once_then_success_is_audited() -> None:
     assert len(calls) == 2
     record = next(kwargs for call, kwargs in store.calls if call == "task")
     assert record["metadata"]["attempts"] == 2
+
+
+class FailingAudit:
+    """Audit fake：适配器发布后必抛，模拟发布后审计失败。"""
+
+    def validate_task(self, spec, context, adapter_result):
+        raise RefreshAuditError("bars coverage 0.500 is below minimum 0.800")
+
+
+def test_publish_then_audit_failure_does_not_claim_retained_old_data() -> None:
+    """已发布行后审计才失败 → 不得谎称 retained_old_data，如实记部分写入。"""
+    store = RecordingStore()
+    calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", calls)},
+        store=store,
+        audit=FailingAudit(),
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    record = _task_record(store)
+    assert record["status"] == "failed"
+    metadata = record["metadata"]
+    assert metadata["retained_old_data"] is False
+    assert metadata["partial_write"] is True
+    assert metadata["published_rows"] == 1
+
+
+def test_failure_before_any_write_claims_retained_old_data() -> None:
+    """两次尝试均在写入前失败 → retained_old_data=True 仍成立。"""
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={
+            "bars": RecordingAdapter("bars", [], failures_before_success=2),
+        },
+        store=store,
+    )
+
+    result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    record = _task_record(store)
+    assert record["status"] == "failed"
+    assert record["metadata"]["retained_old_data"] is True
+    assert "partial_write" not in record["metadata"]
 
 
 def test_failed_symbols_and_dead_source_make_run_degraded_and_retain_old_data() -> None:
