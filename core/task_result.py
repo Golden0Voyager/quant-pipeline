@@ -331,6 +331,17 @@ def normalize_task_result(
             data_date=value.get("data_date"),
         )
 
+    # 显式 skipped 标记：任务自行判断无须执行（数据已最新、凭证缺失等），
+    # 零行属正常结果，不得落入下方的 unqualified-zero 失败分支
+    if value.get("skipped"):
+        return TaskResult.no_data(
+            task_name,
+            reason=str(value.get("reason", "task skipped: already up to date")),
+            attempted=value.get("attempted", 0),
+            source=value.get("source"),
+            data_date=value.get("data_date"),
+        )
+
     # Everything else — unqualified zero → failure
     return TaskResult.failed(
         task_name,
