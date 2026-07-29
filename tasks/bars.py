@@ -190,6 +190,17 @@ def _has_real_db_path(db: DatabaseInterface) -> bool:
 
 _REFRESH_REQUIRED_FIELDS = ("open", "high", "low", "close", "volume", "amount")
 
+# 可选衍生字段：DB 列名 → loader DataFrame 列名。
+# DataLoader 统一把东财/新浪的「换手率」命名为 turnover（入库时才映射为
+# daily_bars.turnover_rate），「涨跌幅」/「振幅」则直接是 pct_change/amplitude。
+# 缺失或 NaN → None（写 NULL），使陈旧可见而非静默残留盘中旧值；
+# 它们不是必填字段，缺失绝不导致拒绝。
+_REFRESH_OPTIONAL_FIELDS = (
+    ("turnover_rate", "turnover"),
+    ("pct_change", "pct_change"),
+    ("amplitude", "amplitude"),
+)
+
 
 def fetch_bars_for_refresh(
     loader: DataLoaderInterface, symbol: str, target_date: str
@@ -241,6 +252,13 @@ def normalize_bar_row_for_refresh(
         return None, "OHLC invariants violated"
     if row["volume"] < 0 or row["amount"] < 0:
         return None, "negative volume or amount"
+
+    for field, source_name in _REFRESH_OPTIONAL_FIELDS:
+        value = raw.get(source_name)
+        try:
+            row[field] = None if value is None or pd.isna(value) else float(value)
+        except (TypeError, ValueError):
+            row[field] = None
 
     row["data_source"] = None if source is None or pd.isna(source) else str(source)
     return row, None

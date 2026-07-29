@@ -519,7 +519,8 @@ def run_close_refresh(
         target_date=get_expected_latest_trading_day(now=now),
         started_at=now,
         run_id=str(uuid4()),
-        symbols=tuple(symbols) if symbols else None,
+        # 保留 None（全市场）与 ()（no-op）的区分：空列表绝不得升级为全市场
+        symbols=None if symbols is None else tuple(symbols),
         allow_pre_close=force,
     )
     return orchestrator.run(context)
@@ -572,8 +573,9 @@ def main():
 
     symbols_arg = args.symbols
     symbols: list[str] | None = None
-    if symbols_arg:
-        if Path(symbols_arg).exists():
+    if symbols_arg is not None:
+        # 空字符串不得进入文件分支：Path("") 会解析为当前目录
+        if symbols_arg and Path(symbols_arg).exists():
             symbols = [
                 line.strip()
                 for line in Path(symbols_arg).read_text(encoding="utf-8").splitlines()
@@ -581,6 +583,9 @@ def main():
             ]
         else:
             symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
+        # 显式给出 --symbols 却解析为空：输入必然有误，禁止静默回退为全市场
+        if not symbols:
+            parser.error("--symbols 已指定但未解析出任何有效代码，请检查输入")
 
     if args.refresh_today:
         # 与 legacy all 共用同一把全局写锁，避免与常规管道并发写库

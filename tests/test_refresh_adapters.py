@@ -73,7 +73,9 @@ def _create_refresh_db(db_path: str) -> None:
         """CREATE TABLE daily_bars (
             ts_code TEXT NOT NULL, trade_date TEXT NOT NULL,
             open REAL, high REAL, low REAL, close REAL,
-            volume REAL, amount REAL, data_source TEXT,
+            volume REAL, amount REAL,
+            turnover_rate REAL, pct_change REAL, amplitude REAL,
+            data_source TEXT,
             UNIQUE(ts_code, trade_date))"""
     )
     conn.execute(
@@ -164,11 +166,12 @@ def _bar_frame(close: float = 10.5, **overrides) -> pd.DataFrame:
 
 
 def _seed_bar(db_path: str, code: str, close: float = 9.0) -> None:
+    # 盘中旧行带非空衍生列，供回归测试断言收盘刷新后不再残留盘中值
     _execute(
         db_path,
         "INSERT INTO daily_bars (ts_code, trade_date, open, high, low, close,"
-        " volume, amount, data_source)"
-        " VALUES (?, ?, 9.0, 9.5, 8.5, ?, 500.0, 4500.0, 'akshare')",
+        " volume, amount, turnover_rate, pct_change, amplitude, data_source)"
+        " VALUES (?, ?, 9.0, 9.5, 8.5, ?, 500.0, 4500.0, 9.9, 9.8, 9.7, 'akshare')",
         (code, TARGET, close),
     )
 
@@ -339,6 +342,64 @@ class TestBarsRefreshAdapter:
         assert (result.fetched, result.validated, result.replaced) == (0, 0, 0)
         assert result.as_of_date == TARGET
         assert result.changed_symbols == ()
+
+    def test_refresh_overwrites_stale_intraday_derived_metrics(self, db_path, store):
+        """核心回归：收盘重抓后衍生列与 OHLCV 同 vintage。
+
+        盘中旧行带非空 turnover_rate/pct_change/amplitude；源提供收盘后
+        衍生值（loader 列名 turnover/pct_change/amplitude）时，落库行必须
+        携带源值，绝不残留盘中陈旧值。
+        """
+        _seed_bar(db_path, "000001")
+        loader = FakeBarsLoader({
+            "000001": _bar_frame(close=10.5, turnover=2.5, pct_change=1.8, amplitude=3.2),
+        })
+        adapter = BarsRefreshAdapter(store=store, db=FakeDb(db_path), loader=loader)
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.changed_symbols == ("000001",)
+        rows = _query(
+            db_path,
+            "SELECT close, turnover_rate, pct_change, amplitude FROM daily_bars"
+            " WHERE ts_code = '000001' AND trade_date = ?",
+            (TARGET,),
+        )
+        assert rows == [(10.5, 2.5, 1.8, 3.2)]
+
+    def test_refresh_nulls_derived_metrics_when_source_omits_them(self, db_path, store):
+        """源未提供衍生列 → 写 NULL 使陈旧可见，而非保留盘中旧值。"""
+        _seed_bar(db_path, "000001")
+        loader = FakeBarsLoader({"000001": _bar_frame(close=10.5)})
+        adapter = BarsRefreshAdapter(store=store, db=FakeDb(db_path), loader=loader)
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.changed_symbols == ("000001",)
+        rows = _query(
+            db_path,
+            "SELECT close, turnover_rate, pct_change, amplitude FROM daily_bars"
+            " WHERE ts_code = '000001' AND trade_date = ?",
+            (TARGET,),
+        )
+        assert rows == [(10.5, None, None, None)]
+
+    def test_failed_symbol_retains_old_derived_metrics(self, db_path, store):
+        """失败股旧行整行保留，含盘中衍生列（不局部置空）。"""
+        _seed_bar(db_path, "000001", close=8.8)
+        loader = FakeBarsLoader({"000001": ConnectionError("akshare down")})
+        adapter = BarsRefreshAdapter(store=store, db=FakeDb(db_path), loader=loader)
+
+        result = adapter.refresh(_context(symbols=("000001",)))
+
+        assert result.failed_symbols == ("000001",)
+        rows = _query(
+            db_path,
+            "SELECT close, turnover_rate, pct_change, amplitude FROM daily_bars"
+            " WHERE ts_code = '000001' AND trade_date = ?",
+            (TARGET,),
+        )
+        assert rows == [(8.8, 9.9, 9.8, 9.7)]
 
     def test_full_market_uses_stock_list_and_skips_beijing(self, db_path, store):
         """symbols=None → 全市场（stock_list），北交所按全局配置跳过。
