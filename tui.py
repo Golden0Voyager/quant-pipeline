@@ -2219,11 +2219,13 @@ class PipelineApp(App):
 
     async def _stop_current_process(self) -> None:
         """终止当前正在运行的子进程及其整个进程组。"""
+        logger = logging.getLogger("quant_pipeline.tui")
         proc = self._current_process
         if proc is None or proc.returncode is not None:
             self.notify("No running task to stop", severity="warning", timeout=3.0)
             return
         try:
+            logger.info("⛔ TUI 停止当前任务子进程 (PID %s)", proc.pid)
             # 杀整个进程组（start_new_session=True 创建的）
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -2232,11 +2234,13 @@ class PipelineApp(App):
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
+                logger.warning("⚠️ 子进程 (PID %s) SIGTERM 超时，升级为 SIGKILL", proc.pid)
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     proc.kill()
                 await proc.wait()
+            logger.info("✅ 子进程 (PID %s) 已退出", proc.pid)
             self.notify("Task stopped", severity="information", timeout=3.0)
         except ProcessLookupError:
             self.notify("Process already exited", severity="information", timeout=3.0)
@@ -2248,7 +2252,15 @@ class PipelineApp(App):
         env = get_subprocess_env()
         logger = logging.getLogger("quant_pipeline.tui")
 
-        await self._stop_current_process()
+        # 有任务在跑就拒绝启动，X 键是唯一的停止入口——
+        # 隐式顶掉运行中的任务曾把手动全量更新 SIGKILL 掉（2026-07-29 事故）
+        if self._current_process is not None and self._current_process.returncode is None:
+            self.notify(
+                f"已有任务在运行 (PID {self._current_process.pid})，请先按 X 停止",
+                severity="warning",
+                timeout=5.0,
+            )
+            return None
 
         proc: asyncio.subprocess.Process | None = None
         try:
