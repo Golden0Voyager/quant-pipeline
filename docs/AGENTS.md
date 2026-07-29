@@ -65,6 +65,25 @@ quant_pipeline/
 - `uv run python daily_pipeline.py --task <name> [--force] [--resume]` — Direct CLI
 - `uv run python scripts/daemon.py [start|stop]` — Daemon management (TUI D/S keys)
 
+## Close Refresh (`--refresh-today`)
+
+Post-close mode that replaces intraday rows for the current trading day with authoritative close data. Covers the 29 refreshable trading-day tasks (`core/task_registry.refreshable_trading_tasks()`), executed in dependency order by `core/refresh.py` (orchestrator) through `core/refresh_store.py` (atomic staging store) and `core/refresh_adapters.py` (per-task adapters).
+
+```bash
+rtk uv run python daily_pipeline.py --refresh-today
+rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.SH
+```
+
+| Behavior | Detail |
+|----------|--------|
+| 16:00 gate | Runs before 16:00 Asia/Shanghai are rejected before any write; `--force` maps to `allow_pre_close=True` and lifts only the time gate (data validation still applies) |
+| Retained-old-data | A source or validation failure gets one retry; if it still fails, nothing is published — old rows stay untouched, the task ends `failed`/`degraded` with `retained_old_data=true` in its audit metadata, and dependents of a failed task are blocked (also retaining old data) |
+| Run records | Each run persists one `refresh_runs` row plus one `refresh_task_runs` row per task (status, fetched/validated/replaced/retained/failed counters, metadata JSON) |
+| Failure queue | Per-symbol fetch failures go to `failed_symbols` and keep their old rows; derived tasks (indicators, chip distribution) recompute only symbols whose bars actually changed |
+| Rollback | Every publish goes through staging + one transaction (date-partition replace / keyed upsert / run snapshot); composite tasks (`update_sector_derivatives`: `sector_daily`, `sector_valuation`, `index_futures_basis`) commit or roll back all tables together |
+| Exit code | Any degraded/failed/aborted task makes the CLI exit nonzero |
+| TUI | `u` key ("Close Refresh") launches `daily_pipeline.py --refresh-today` after confirmation |
+
 ## Data Flow
 
 ```
