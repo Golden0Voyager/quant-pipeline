@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 
 import pytest
 
 from core.refresh import RefreshAdapterResult, RefreshContext
-from core.refresh_audit import RefreshAudit, RefreshAuditError
+from core.refresh_audit import (
+    CROSS_SOURCE_BOARDS,
+    CrossSourceTolerance,
+    RefreshAudit,
+    RefreshAuditError,
+    classify_board,
+    cross_source_mismatches,
+    stratified_cross_source_sample,
+)
 from core.task_registry import (
     Cadence,
     DateStrategy,
@@ -323,3 +332,193 @@ def test_dead_source_rejects_zero_retained_without_attestation(
                 },
             ),
         )
+
+
+_ALL_BOARDS = frozenset(CROSS_SOURCE_BOARDS)
+
+
+def _board_universe(per_board: int = 12) -> tuple[str, ...]:
+    symbols: list[str] = []
+    for index in range(per_board):
+        symbols.append(f"60{index:04d}.SH")
+        symbols.append(f"00{index:04d}.SZ")
+        symbols.append(f"30{index:04d}.SZ")
+        symbols.append(f"68{index:04d}.SH")
+        symbols.append(f"83{index:04d}.BJ")
+    return tuple(symbols)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "board"),
+    [
+        ("601398.SH", "shanghai"),
+        ("900901.SH", "shanghai"),
+        ("000001.SZ", "shenzhen"),
+        ("200011.SZ", "shenzhen"),
+        ("300750.SZ", "chinext"),
+        ("688001.SH", "star"),
+        ("430047.BJ", "beijing"),
+        ("830799.BJ", "beijing"),
+        ("920001.BJ", "beijing"),
+        ("T00001", None),
+    ],
+)
+def test_classify_board_follows_market_prefix_rules(
+    symbol: str,
+    board: str | None,
+) -> None:
+    assert classify_board(symbol) == board
+
+
+def test_stratified_sample_is_deterministic_per_target_date() -> None:
+    universe = _board_universe()
+
+    first = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-27",
+        supported_boards=_ALL_BOARDS,
+    )
+    second = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-27",
+        supported_boards=_ALL_BOARDS,
+    )
+    other_day = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-28",
+        supported_boards=_ALL_BOARDS,
+    )
+
+    assert first.symbols == second.symbols
+    assert first.symbols != other_day.symbols
+
+
+def test_stratified_sample_spreads_about_thirty_across_five_boards() -> None:
+    universe = _board_universe()
+
+    sample = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-27",
+        supported_boards=_ALL_BOARDS,
+    )
+
+    assert len(sample.symbols) == 30
+    assert sample.excluded_boards == ()
+    assert set(sample.symbols) <= set(universe)
+    counts = Counter(classify_board(symbol) for symbol in sample.symbols)
+    assert counts == {
+        "shanghai": 6,
+        "shenzhen": 6,
+        "chinext": 6,
+        "star": 6,
+        "beijing": 6,
+    }
+
+
+def test_stratified_sample_excludes_unsupported_backup_markets_explicitly() -> None:
+    universe = _board_universe()
+    supported = frozenset({"shanghai", "shenzhen", "chinext"})
+
+    sample = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-27",
+        supported_boards=supported,
+    )
+
+    assert sample.excluded_boards == ("star", "beijing")
+    assert len(sample.symbols) == 30
+    assert all(classify_board(symbol) in supported for symbol in sample.symbols)
+
+
+def test_stratified_sample_takes_short_board_pool_without_padding() -> None:
+    universe = tuple(
+        symbol
+        for symbol in _board_universe()
+        if classify_board(symbol) != "beijing"
+    ) + ("830001.BJ", "920001.BJ")
+
+    sample = stratified_cross_source_sample(
+        universe,
+        target_date="2026-07-27",
+        supported_boards=_ALL_BOARDS,
+    )
+
+    counts = Counter(classify_board(symbol) for symbol in sample.symbols)
+    assert counts["beijing"] == 2
+    assert len(sample.symbols) == 26
+
+
+def test_stratified_sample_rejects_unknown_board_names() -> None:
+    with pytest.raises(ValueError, match="unknown board"):
+        stratified_cross_source_sample(
+            _board_universe(),
+            target_date="2026-07-27",
+            supported_boards=frozenset({"nasdaq"}),
+        )
+
+
+def test_price_and_volume_use_separate_tolerances() -> None:
+    tolerance = CrossSourceTolerance(price=0.01, volume=0.10)
+    symbols = (
+        "600000.SH",
+        "000001.SZ",
+        "300001.SZ",
+        "688001.SH",
+        "830799.BJ",
+    )
+    primary = {
+        "600000.SH": {"close": 10.20, "volume": 1000.0},
+        "000001.SZ": {"close": 10.05, "volume": 1000.0},
+        "300001.SZ": {"close": 10.00, "volume": 1200.0},
+        "688001.SH": {"close": 10.00, "volume": 1050.0},
+        "830799.BJ": {"close": 10.00, "volume": 1000.0},
+    }
+    reference = {
+        "600000.SH": {"close": 10.00, "volume": 1000.0},
+        "000001.SZ": {"close": 10.00, "volume": 1000.0},
+        "300001.SZ": {"close": 10.00, "volume": 1000.0},
+        "688001.SH": {"close": 10.00, "volume": 1000.0},
+    }
+
+    mismatched = cross_source_mismatches(symbols, primary, reference, tolerance)
+
+    # 600000: 2% price diff exceeds the 1% price tolerance.
+    # 000001: 0.5% price diff is inside the price tolerance.
+    # 300001: 20% volume diff exceeds the 10% volume tolerance.
+    # 688001: 5% volume diff is inside the volume tolerance.
+    # 830799: missing reference quote always counts as a mismatch.
+    assert mismatched == ("600000.SH", "300001.SZ", "830799.BJ")
+
+
+def test_zero_reference_volume_requires_zero_primary_volume() -> None:
+    tolerance = CrossSourceTolerance(price=0.01, volume=0.10)
+    primary = {
+        "600000.SH": {"close": 10.0, "volume": 0.0},
+        "000001.SZ": {"close": 10.0, "volume": 5.0},
+    }
+    reference = {
+        "600000.SH": {"close": 10.0, "volume": 0.0},
+        "000001.SZ": {"close": 10.0, "volume": 0.0},
+    }
+
+    mismatched = cross_source_mismatches(
+        ("600000.SH", "000001.SZ"),
+        primary,
+        reference,
+        tolerance,
+    )
+
+    assert mismatched == ("000001.SZ",)
+
+
+@pytest.mark.parametrize(
+    ("price", "volume"),
+    [(-0.01, 0.1), (0.01, -0.1), (float("nan"), 0.1)],
+    ids=["negative-price", "negative-volume", "nan-price"],
+)
+def test_cross_source_tolerance_rejects_invalid_values(
+    price: float,
+    volume: float,
+) -> None:
+    with pytest.raises(ValueError, match="tolerance"):
+        CrossSourceTolerance(price=price, volume=volume)
