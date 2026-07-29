@@ -123,6 +123,10 @@ _BARS_COLUMNS = (
     "close",
     "volume",
     "amount",
+    # 衍生列与 OHLCV 同 vintage 落库：源缺失时写 NULL，绝不残留盘中旧值
+    "turnover_rate",
+    "pct_change",
+    "amplitude",
     "data_source",
 )
 
