@@ -82,6 +82,7 @@ rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.S
 | Failure queue | Per-symbol fetch failures go to `failed_symbols` and keep their old rows; derived tasks (indicators, chip distribution) recompute only symbols whose bars actually changed |
 | Rollback | Every publish goes through staging + one transaction (date-partition replace / keyed upsert / run snapshot); composite tasks (`update_sector_derivatives`: `sector_daily`, `sector_valuation`, `index_futures_basis`) commit or roll back all tables together |
 | Exit code | Any degraded/failed/aborted task makes the CLI exit nonzero |
+| Cross-source check | Opt-in, OFF by default. `REFRESH_CROSS_SOURCE=1` enables a read-only sampled comparison against a backup source (never used for writes); tuning knobs: `REFRESH_CROSS_SOURCE_TASK` (default `update_bars`), `REFRESH_CROSS_SOURCE_SAMPLE_SIZE` (default 30), `REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL` (defaults 0.005/0.05 — provisional, must be tuned on real data). No verifier is wired yet (Xueqiu verifier is a pending follow-up): enabling the switch without one raises a RuntimeError instead of silently skipping |
 | TUI | `u` key ("Close Refresh") launches `daily_pipeline.py --refresh-today` after confirmation |
 
 ## Data Flow
