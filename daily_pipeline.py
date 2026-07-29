@@ -60,6 +60,7 @@ from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.progress import ProgressTracker  # noqa: F401
 from core.refresh import RefreshAdapter, RefreshContext, RefreshOrchestrator
+from core.refresh_adapters import build_all_refresh_adapters
 from core.refresh_store import SQLiteRefreshStore
 from core.runner import safe_task
 from core.task_registry import Cadence, lookup_task, refreshable_trading_tasks
@@ -459,20 +460,31 @@ def run_all(
 # 收盘刷新（--refresh-today）
 # ===========================================================================
 
-def _build_refresh_adapters(loader: DataLoaderInterface) -> dict[str, RefreshAdapter]:
-    """任务名 → 刷新适配器映射；适配器由 Tasks 6-9 接入非缓存 loader。"""
-    _ = loader  # 适配器落地前暂未使用
-    return {}
+def _build_refresh_adapters(
+    *,
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    store: SQLiteRefreshStore,
+) -> dict[str, RefreshAdapter]:
+    """任务名 → 刷新适配器映射；装配全部 29 个收盘刷新适配器。"""
+    return build_all_refresh_adapters(db=db, loader=loader, engine=engine, store=store)
 
 
 def _build_refresh_orchestrator(db_path: str) -> RefreshOrchestrator:
     """构建默认的收盘刷新编排器（非缓存 loader + SQLite 审计存储）。"""
+    db = ProviderFactory.get_db()
+    engine = ProviderFactory.get_indicator_engine()
     # 收盘刷新必须绕过本地缓存，确保拉到收盘后的最终数据
     loader = ProviderFactory.get_loader(use_cache=False)
+    # 适配器与编排器共用同一 store 实例：前者发布数据，后者记录审计
+    store = SQLiteRefreshStore(db_path)
     return RefreshOrchestrator(
         specs=refreshable_trading_tasks(),
-        adapters=_build_refresh_adapters(loader),
-        store=SQLiteRefreshStore(db_path),
+        adapters=_build_refresh_adapters(
+            db=db, loader=loader, engine=engine, store=store
+        ),
+        store=store,
     )
 
 
