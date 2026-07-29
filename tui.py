@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple, TextIO
+from zoneinfo import ZoneInfo
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -22,6 +23,7 @@ from textual.widgets import (
     Button,
     Footer,
     Header,
+    Input,
     Label,
     ListItem,
     ListView,
@@ -34,6 +36,7 @@ from textual.widgets import (
 
 from core.calendar import get_expected_latest_trading_day
 from core.log_cleanup import cleanup_logs
+from core.task_registry import refreshable_trading_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,9 @@ WATCHLIST_DIR = Path.home() / "Code/quant_agents/watchlists"
 TUI_CONFIG_PATH = Path(
     os.environ.get("QUANT_TUI_CONFIG_PATH", Path.home() / ".config/quant_pipeline/tui.json")
 )
+
+# 收盘刷新的目标交易日按上海时区计算，与 CLI（Task 5）保持一致
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _load_tui_config() -> dict:
@@ -303,6 +309,74 @@ class ConfirmRunScreen(ModalScreen[str]):
         self.dismiss(event.button.id)
 
 
+class ConfirmRefreshTodayScreen(ModalScreen[str | None]):
+    """弹窗：确认收盘刷新。
+
+    显示上海目标交易日、刷新任务范围（29 个交易日任务）与可选股票范围；
+    确认返回股票范围字符串（可为空），取消返回 None。
+    16:00 安全闸门由 CLI 负责，弹窗不重复实现。
+    """
+
+    CSS = """
+    ConfirmRefreshTodayScreen {
+        align: center middle;
+        background: $background 60%;
+    }
+    #refresh-dialog {
+        width: 70;
+        height: auto;
+        max-height: 18;
+        background: $surface;
+        border: round $primary;
+        padding: 1 2;
+    }
+    #refresh-dialog Label {
+        width: 100%;
+        text-align: center;
+    }
+    #refresh-symbols {
+        width: 100%;
+        margin-top: 1;
+    }
+    #refresh-buttons {
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # 与 CLI 共用同一计算：上海时区 aware now + get_expected_latest_trading_day
+        self._target_date = get_expected_latest_trading_day(
+            now=datetime.now(_SHANGHAI_TZ)
+        )
+        self._task_count = len(refreshable_trading_tasks())
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="refresh-dialog"):
+            yield Label("[bold]收盘刷新确认[/bold]")
+            yield Label("")
+            yield Label(f"目标交易日（上海时间）: [yellow]{self._target_date}[/yellow]")
+            yield Label(f"刷新范围: 全部 {self._task_count} 个交易日任务")
+            yield Label("[dim]可选股票范围（逗号分隔，留空为全市场）[/dim]")
+            yield Input(placeholder="如 600000,000001（留空=全市场）", id="refresh-symbols")
+            with Horizontal(id="refresh-buttons"):
+                yield Button("确认刷新", variant="primary", id="refresh-confirm")
+                yield Button("取消", variant="error", id="refresh-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "refresh-confirm":
+            self.dismiss(self.query_one("#refresh-symbols", Input).value.strip())
+        else:
+            self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+
+
 class CopyPanelScreen(ModalScreen[str]):
     """弹窗：选择要复制的面板。"""
 
@@ -440,6 +514,7 @@ class HelpScreen(ModalScreen[None]):
             yield Label("")
             yield Label("[bold]S[/bold] — 全量更新")
             yield Label("[bold]R[/bold] — 断点续传")
+            yield Label("[bold]U[/bold] — 收盘刷新")
             yield Label("[bold]X[/bold] — 停止任务")
             yield Label("[bold]D[/bold] — 启动守护进程")
             yield Label("[bold]H[/bold] — 健康检查")
@@ -516,6 +591,103 @@ def _seconds_until_safe() -> int:
         target += timedelta(days=1)
         seconds = (target - now).total_seconds()
     return int(seconds)
+
+
+# 收盘刷新结构化任务状态 → 展示标签（设计文档要求的六态区分）
+REFRESH_STATE_LABELS: dict[str, str] = {
+    "pending": "未运行",
+    "fetched_not_validated": "已抓取未通过校验",
+    "committed": "已提交覆盖",
+    "retained": "保留旧数据",
+    "degraded": "部分降级",
+    "blocked": "被依赖任务阻塞",
+}
+
+
+def classify_refresh_task_state(record: dict | None) -> str:
+    """将 refresh_task_runs 审计记录归类为结构化展示状态。
+
+    关键区分：已提交覆盖（新数据已落库）与保留旧数据（旧数据原样保留）。
+    """
+    if record is None or record.get("status") is None:
+        return "pending"
+    metadata = record.get("metadata") or {}
+    if metadata.get("blocked_by"):
+        return "blocked"
+    status = record["status"]
+    if status == "success":
+        return "committed"
+    if status == "degraded":
+        return "degraded"
+    # failed / aborted / no_data：旧数据保留；区分“抓到但未通过校验”
+    if record.get("fetched", 0) > 0 and record.get("validated", 0) == 0:
+        return "fetched_not_validated"
+    return "retained"
+
+
+def get_latest_refresh_task_states(db_path: str) -> list[dict]:
+    """读取最近一次收盘刷新的每任务审计记录（含结构化状态归类）。
+
+    审计表不存在或库不可读时返回空列表，不抛异常。
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT run_id FROM refresh_runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return []
+        rows = cur.execute(
+            """SELECT task_name, status, fetched, validated, replaced,
+                      retained, failed, metadata_json
+               FROM refresh_task_runs WHERE run_id = ?""",
+            (row[0],),
+        ).fetchall()
+        records: list[dict] = []
+        for task_name, status, fetched, validated, replaced, retained, failed, metadata_json in rows:
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            record = {
+                "task_name": task_name,
+                "status": status,
+                "fetched": fetched,
+                "validated": validated,
+                "replaced": replaced,
+                "retained": retained,
+                "failed": failed,
+                "metadata": metadata,
+            }
+            record["state"] = classify_refresh_task_state(record)
+            records.append(record)
+        return records
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def format_refresh_summary(records: list[dict]) -> str:
+    """汇总收盘刷新结果：区分已提交覆盖与保留旧数据，附失败态计数。"""
+    if not records:
+        return "收盘刷新: 无任务审计记录"
+    counts: dict[str, int] = {}
+    for record in records:
+        state = record.get("state", "pending")
+        counts[state] = counts.get(state, 0) + 1
+    parts = [
+        f"{REFRESH_STATE_LABELS[state]} {counts[state]}"
+        for state in REFRESH_STATE_LABELS
+        if state in counts
+    ]
+    return "收盘刷新: " + "，".join(parts)
 
 
 def get_subprocess_env() -> dict:
@@ -1722,6 +1894,7 @@ class PipelineApp(App):
     BINDINGS = [
         Binding("s", "run_pipeline", "Full Update"),
         Binding("r", "resume_pipeline", "Resume"),
+        Binding("u", "refresh_today", "Close Refresh"),
         Binding("x", "stop_pipeline", "Stop"),
         Binding("d", "start_daemon", "Daemon"),
         Binding("h", "run_health", "Health"),
@@ -2102,6 +2275,35 @@ class PipelineApp(App):
             "断点续传",
             sys.executable, pipeline_path, "--task", "update_bars", "--resume", "--force",
         )
+
+    async def action_refresh_today(self) -> None:
+        """收盘刷新：确认后启动 --refresh-today。
+
+        16:00 安全闸门与 --force 由 CLI 拥有，这里不重复实现，
+        也不复用普通全量更新的延迟调度（_run_or_schedule）。
+        """
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+
+        def _on_dismiss(symbols: str | None) -> None:
+            if symbols is None:
+                # 取消：不启动任何子进程
+                return
+            args = [sys.executable, pipeline_path, "--refresh-today"]
+            if symbols:
+                args.extend(["--symbols", symbols])
+            self._create_background_task(self._run_refresh_today(*args))
+
+        self.push_screen(ConfirmRefreshTodayScreen(), _on_dismiss)
+
+    async def _run_refresh_today(self, *args: str) -> None:
+        """后台执行收盘刷新，结束后用审计记录汇总通知（区分覆盖/保留）。"""
+        returncode = await self._run_in_background(*args)
+        records = get_latest_refresh_task_states(str(DEFAULT_DB_PATH))
+        if records:
+            severity = "information" if returncode == 0 else "warning"
+            self.notify(format_refresh_summary(records), severity=severity, timeout=8.0)
+        elif returncode is not None and returncode != 0:
+            self.notify(f"收盘刷新退出码 {returncode}", severity="warning", timeout=6.0)
 
     async def action_start_daemon(self) -> None:
         daemon_path = str(Path(__file__).parent / "scripts" / "daemon.py")
