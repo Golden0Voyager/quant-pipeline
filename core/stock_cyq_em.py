@@ -602,17 +602,23 @@ def stock_cyq_em(
     kline_data: list[dict] | None = None
     src: str | None = None  # 数据源名称
 
-    # 1) EM API（已封禁，保留兜底）
-    kline_data = _fetch_kline_em(ts_code, adjust=adjust)
-    if kline_data is not None:
-        src = "EM"
-
-    # 2) 本地 DB — numpy 主路径
-    if kline_data is None and use_local_db:
+    # 1) 本地 DB — numpy 主路径（零网络，~30ms/股）。
+    #    EM API 自 2026-07 被封禁后，线上优先会让每支股票空耗 ~11s 重试，
+    #    1808 支跑不完就被调度器杀掉（筹码滞后 6 天事故），故本地优先。
+    if use_local_db:
         db = db_path or _DEFAULT_DB_PATH
         kline_data = _fetch_kline_db(ts_code, str(db))
         if kline_data is not None and len(kline_data) >= 120:
             src = "DB_numpy"
+        else:
+            # K 线不足 120 根无法计算筹码，继续尝试线上源
+            kline_data = None
+
+    # 2) EM API（已封禁，保留兜底）
+    if kline_data is None:
+        kline_data = _fetch_kline_em(ts_code, adjust=adjust)
+        if kline_data is not None:
+            src = "EM"
 
     # 3) 雪球 API
     if kline_data is None:
@@ -626,12 +632,8 @@ def stock_cyq_em(
         if kline_data is not None:
             src = "Sina"
 
-    # 5) 本地 DB — JS 降级（numpy 路径全 NaN 或 data 不足时用）
-    if kline_data is None and use_local_db:
-        db = db_path or _DEFAULT_DB_PATH
-        kline_data = _fetch_kline_db(ts_code, str(db))
-        if kline_data is not None:
-            src = "DB_JS"
+    # （原第 5 路 "DB→JS 降级" 已移除：DB 数据在第 1 路已尝试过，
+    #   不足 120 根时 JS 路径同样无法产出有效筹码，只会输出全零伪数据）
 
     if kline_data is None:
         raise ConnectionError(f"{symbol}: EM/雪球/新浪/DB 均无法获取 K 线数据")

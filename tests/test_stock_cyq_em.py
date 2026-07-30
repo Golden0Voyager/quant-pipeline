@@ -804,7 +804,8 @@ class TestStockCyqEm:
                 "bp": 0.5, "ac": "10.0", "c90l": "9.0", "c90h": "11.0",
                 "cn90": 0.1, "c70l": "9.5", "c70h": "10.5", "cn70": 0.05,
             }
-            stock_cyq_em("000001", adjust="qfq")
+            # DB 现为第一优先，禁用 local db 以确保走 EM 路径
+            stock_cyq_em("000001", adjust="qfq", use_local_db=False)
             assert mock_em.call_args[1]["adjust"] == "qfq"
 
     def test_use_local_db_false_skips_db_paths(self):

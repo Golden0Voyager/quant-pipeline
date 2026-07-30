@@ -271,11 +271,12 @@ def update_chip_distribution_em(
             )
             time.sleep(cool_sec)
 
-        # ── 股票间至少间隔 1-2s，避免爆发式请求 ──
-        if i > 1:
-            time.sleep(random.uniform(1.0, 2.0))
-
+        _t0 = time.time()
         df = _fetch_cyq_em(symbol)
+        # ── 节流仅针对线上源：本地 DB numpy 计算 (~30ms) 无需限速；
+        #    耗时超过 0.5s 说明走了线上兜底（EM/雪球/新浪），限速防爆发请求 ──
+        if time.time() - _t0 > 0.5:
+            time.sleep(random.uniform(1.0, 2.0))
         if df is None:
             failed_count += 1
             consecutive_failures += 1
