@@ -265,6 +265,15 @@ def _run_registry_task(
             return _dispatch_chip_force(fn, db, symbols)
         return _safe_task(task_name, fn, db)
 
+    if task_name == "update_chip_distribution_em":
+        # --symbols 透传给筹码任务；此前无此分支，落入兜底 _safe_task 后
+        # symbols 被丢弃，任务总是走自动探测（自选股+指数成分 ~1800 只）。
+        # ts_code 在 quant_core.db 中为 6 位裸码，去掉交易所后缀防止错位写入。
+        if symbols:
+            bare = [s.split(".")[0] for s in symbols]
+            return _safe_task(task_name, fn, db, symbols_to_update=bare)
+        return _safe_task(task_name, fn, db)
+
     if task_name in ("update_bars",):
         return _safe_task(
             task_name, fn, db, loader,

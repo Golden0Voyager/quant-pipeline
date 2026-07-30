@@ -3145,6 +3145,29 @@ class TestRunRegistryTaskSafeTaskWrap:
             safe_task.assert_not_called()
             mock_fn.assert_called_once_with(db, loader, engine, resume=False, force=False)
 
+    def test_chip_em_symbols_passthrough(self):
+        """--symbols 必须透传给 update_chip_distribution_em，且归一为裸码。"""
+        mock_fn = MagicMock(return_value={"success": 1})
+        db = MagicMock()
+        with patch("daily_pipeline._safe_task") as safe_task, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_chip_distribution_em": mock_fn}):
+            daily_pipeline._run_registry_task(
+                "update_chip_distribution_em", db, symbols=["000975.SZ", "600519"],
+            )
+            safe_task.assert_called_once_with(
+                "update_chip_distribution_em", mock_fn, db,
+                symbols_to_update=["000975", "600519"],
+            )
+
+    def test_chip_em_no_symbols_uses_autodetect(self):
+        """未指定 --symbols 时不传 symbols_to_update，任务走自动探测。"""
+        mock_fn = MagicMock(return_value={"success": 1})
+        db = MagicMock()
+        with patch("daily_pipeline._safe_task") as safe_task, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_chip_distribution_em": mock_fn}):
+            daily_pipeline._run_registry_task("update_chip_distribution_em", db)
+            safe_task.assert_called_once_with("update_chip_distribution_em", mock_fn, db)
+
 
 class TestMainMoreTasks:
     @pytest.fixture(autouse=True)
