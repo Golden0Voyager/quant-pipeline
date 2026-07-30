@@ -770,7 +770,7 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "restricted_share", "earnings_forecast",
             "stock_repurchase", "institution_survey", "stock_pledge", "option_sentiment",
             "sector_daily", "sector_valuation", "index_futures_basis",
-            "macro_monthly", "macro_quarterly", "macro_daily",
+            "macro_monthly", "macro_quarterly",
         ]
         result = {}
         if fast:
@@ -845,7 +845,11 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "index_futures_basis": "trade_date",
     "macro_monthly": "date",
     "macro_quarterly": "date",
-    "macro_daily": "date",
+}
+
+# 按周度更新的表（数据源每周发布一次，不按交易日衡量新鲜度）
+WEEKLY_TABLES: set[str] = {
+    "stock_pledge",  # 中登公司每周五更新质押比例
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
@@ -1457,7 +1461,7 @@ class DataCompletenessWidget(VerticalScroll):
         "update_stock_pledge": ["stock_pledge"],
         "update_option_sentiment": ["option_sentiment"],
         "update_sector_derivatives": ["sector_daily", "sector_valuation", "index_futures_basis"],
-        "update_china_macro": ["macro_monthly", "macro_quarterly", "macro_daily"],
+        "update_china_macro": ["macro_monthly", "macro_quarterly"],
     }
 
     TABLE_LABELS: dict[str, str] = {
@@ -1514,7 +1518,6 @@ class DataCompletenessWidget(VerticalScroll):
         # 宏观
         "macro_monthly": "Macro Monthly",
         "macro_quarterly": "Macro Quarterly",
-        "macro_daily": "Macro Daily",
         # 总览
         "stock_list": "Stock List",
     }
@@ -1573,7 +1576,6 @@ class DataCompletenessWidget(VerticalScroll):
         # 宏观
         "macro_monthly": "宏观(月)",
         "macro_quarterly": "宏观(季)",
-        "macro_daily": "宏观(日)",
         # 总览
         "stock_list": "股票列表",
     }
@@ -1640,16 +1642,17 @@ class DataCompletenessWidget(VerticalScroll):
             return None
 
     # 数据新鲜度排序权重：数字越小越靠前。
-    # 用户指定顺序：最新 → T+1 → 略滞后 → 滞后 → 按月更新 → 按季更新 → 无数据
+    # 用户指定顺序：最新 → T+1 → 略滞后 → 滞后 → 按周更新 → 按月更新 → 按季更新 → 无数据
     _STATUS_ORDER: dict[str, int] = {
         "更新中": 0,
         "最新": 1,
         "T+1": 2,
         "略滞后": 3,
         "滞后": 4,
-        "按月更新": 5,
-        "按季更新": 6,
-        "无数据": 7,
+        "按周更新": 5,
+        "按月更新": 6,
+        "按季更新": 7,
+        "无数据": 8,
     }
 
     # 状态 → (图标, 颜色)。使用高对比度 hex 色，确保在深色主题下清晰可辨。
@@ -1657,6 +1660,7 @@ class DataCompletenessWidget(VerticalScroll):
         "更新中": ("↻", "#22d3ee"),
         "最新": ("●", "#10b981"),
         "T+1": ("◐", "#3b82f6"),
+        "按周更新": ("◇", "#a3e635"),
         "按月更新": ("◈", "#8b5cf6"),
         "按季更新": ("◆", "#d946ef"),
         "略滞后": ("▲", "#f59e0b"),
@@ -1675,6 +1679,8 @@ class DataCompletenessWidget(VerticalScroll):
         """返回指定表的新鲜度状态标签（纯文本）。"""
         if updating_tables and tbl in updating_tables:
             return "更新中"
+        if tbl in WEEKLY_TABLES and latest:
+            return "按周更新"
         if tbl in MONTHLY_TABLES and latest:
             return "按月更新"
         if tbl in QUARTERLY_TABLES and latest:
