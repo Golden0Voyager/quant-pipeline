@@ -17,7 +17,7 @@ import daily_pipeline
 from core.refresh import CrossSourceCheckConfig, RefreshOrchestrator
 from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
-from core.task_result import ErrorKind, TaskResult
+from core.task_result import ErrorKind, TaskResult, normalize_task_result
 
 
 # ===========================================================================
@@ -797,6 +797,19 @@ class TestHealthCheck:
              patch("tasks.utility.logger"):
             r = daily_pipeline.health_check(db)
         assert r["issues"] == []
+        # 诊断任务零行属正常：显式 success，归一化后不得判为 failed
+        assert r["status"] == "success"
+        normalised = normalize_task_result("health_check", r)
+        assert normalised.exit_failure is False
+
+    def test_issues_normalize_to_degraded(self, health_db: str):
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-25"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db)
+        assert r["issues"]
+        assert r["status"] == "degraded"
+        assert r["error"]
 
     def test_low_coverage(self, tmp_path: Path):
         db_path = str(tmp_path / "test.db")

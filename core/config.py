@@ -71,12 +71,18 @@ def _detect_macos_proxy() -> None:
                 os.environ["HTTPS_PROXY"] = _proxy_url
                 os.environ["http_proxy"] = _proxy_url
                 os.environ["https_proxy"] = _proxy_url
-                os.environ["NO_PROXY"] = "localhost,127.0.0.1," \
-                    "datacenter-web.eastmoney.com,push2.eastmoney.com," \
-                    "push2his.eastmoney.com,push2delay.eastmoney.com,*.eastmoney.com"
-                os.environ["no_proxy"] = "localhost,127.0.0.1," \
-                    "datacenter-web.eastmoney.com,push2.eastmoney.com," \
-                    "push2his.eastmoney.com,push2delay.eastmoney.com,*.eastmoney.com"
+                # 境内数据源全部直连：系统代理指向的本机代理若已关闭，
+                # 走代理的境内请求会以 ProxyError / SSL EOF 失败
+                #（urllib 的 no_proxy 按 endswith 匹配，用裸域名后缀）
+                _no_proxy = (
+                    "localhost,127.0.0.1,"
+                    "eastmoney.com,"
+                    "sina.com,sina.cn,sina.com.cn,"
+                    "sse.com.cn,szse.cn,"
+                    "jin10.com,csindex.com.cn,cninfo.com.cn"
+                )
+                os.environ["NO_PROXY"] = _no_proxy
+                os.environ["no_proxy"] = _no_proxy
     except Exception:
         pass
 

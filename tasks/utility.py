@@ -13,6 +13,7 @@ import sqlite3
 import time  # noqa: F401
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd  # noqa: F401
 
@@ -133,14 +134,24 @@ def health_check(db: DatabaseInterface) -> dict:
     if not is_real_db_path(getattr(db, "db_path", None)):
         issues.append("无法打开数据库：db_path 不是有效路径")
         report_lines.append("  数据库连接失败")
-        return {"issues": issues, "report": "\n".join(report_lines)}
+        return {
+            "status": "failed",
+            "error": issues[0],
+            "issues": issues,
+            "report": "\n".join(report_lines),
+        }
 
     try:
         conn = sqlite3.connect(str(db.db_path))
     except sqlite3.OperationalError as e:
         issues.append(f"无法打开数据库 {db.db_path}: {e}")
         report_lines.append("  数据库连接失败")
-        return {"issues": issues, "report": "\n".join(report_lines)}
+        return {
+            "status": "failed",
+            "error": issues[0],
+            "issues": issues,
+            "report": "\n".join(report_lines),
+        }
     cursor = conn.cursor()
 
     tables = [
@@ -303,10 +314,19 @@ def health_check(db: DatabaseInterface) -> dict:
     else:
         logger.info("\n✅ 所有检查通过，数据库健康")
 
-    return {
+    # 诊断型任务不产出数据行：显式声明状态，避免被结果归一化
+    # 当作 "零行无解释" 误判为 failed（2026-07-30 假警报）
+    result: dict[str, Any] = {
         "issues": issues,
         "coverage_pct": coverage_pct,
         "latest_bar": latest_bar,
         "db_size_mb": db_size,
         "report": report,
     }
+    if issues:
+        result["status"] = "degraded"
+        result["error"] = "; ".join(issues)
+    else:
+        result["status"] = "success"
+        result["saved"] = 0
+    return result

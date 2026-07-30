@@ -424,7 +424,13 @@ class TestDetectMacosProxy:
                 _detect_macos_proxy()
             assert os.environ.get("HTTP_PROXY") == "http://127.0.0.1:8080"
             assert os.environ.get("HTTPS_PROXY") == "http://127.0.0.1:8080"
-            assert "push2.eastmoney.com" in os.environ.get("NO_PROXY", "")
+            # 境内数据源必须全部直连（urllib no_proxy 按 endswith 匹配裸域名）
+            no_proxy = os.environ.get("NO_PROXY", "")
+            for domain in (
+                "eastmoney.com", "sina.com.cn", "sse.com.cn",
+                "szse.cn", "jin10.com", "csindex.com.cn", "cninfo.com.cn",
+            ):
+                assert domain in no_proxy
 
 
 # ===========================================================================

@@ -59,7 +59,13 @@ def update_fundamentals(
         existing_count = 0
     if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
         logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
-        return {"saved": 0, "total": 0, "skipped": True}
+        return {
+            "saved": 0,
+            "total": 0,
+            "skipped": True,
+            "reason": f"today ({today}) already has {existing_count} fundamentals rows",
+            "data_date": today,
+        }
 
     all_records = []
     session = get_default_client().get_session("eastmoney")
@@ -327,7 +333,12 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     if xq._get_token() is None:
         logger.warning("⚠️  XUEQIU_TOKEN 未设置，跳过雪球行情快照")
-        return {"saved": 0, "total": 0, "skipped": True}
+        return {
+            "saved": 0,
+            "total": 0,
+            "skipped": True,
+            "reason": "XUEQIU_TOKEN not configured",
+        }
 
     total = len(xq_rows)
     include_bj = os.getenv("INCLUDE_BJ", "0").lower() in ("1", "true", "yes")
