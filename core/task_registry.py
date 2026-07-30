@@ -607,12 +607,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     TaskSpec(
         name="update_china_macro",
         callable=None,
-        tables=("macro_monthly", "macro_quarterly", "macro_daily"),
+        # macro_daily 已由 money_market 表接管（update_money_market），
+        # 本任务只产出月度/季度，保留 macro_daily 会让健康面板盯一张废表
+        tables=("macro_monthly", "macro_quarterly"),
         cadence=Cadence.MONTHLY,
         date_columns={
             "macro_monthly": "date",
             "macro_quarterly": "date",
-            "macro_daily": "date",
         },
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
@@ -827,6 +828,9 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         name="update_stock_pledge",
         callable=None,
         tables=("stock_pledge",),
+        # 中登每周五更新质押比例；cadence 维持 TRADING_DAY 以留在收盘刷新
+        # 策略矩阵内（LATEST_AVAILABLE_WITHIN_LOOKBACK 已兼容周度发布），
+        # 新鲜度展示由 TUI 的 WEEKLY_TABLES 单独处理
         cadence=Cadence.TRADING_DAY,
         date_columns={"stock_pledge": "trade_date"},
         empty_policy=EmptyPolicy.ALLOW,
