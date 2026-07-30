@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1707,3 +1707,85 @@ def test_format_refresh_summary_counts_states():
     assert "已提交覆盖 2" in summary
     assert "保留旧数据 1" in summary
     assert "部分降级 1" in summary
+
+
+# ===========================================================================
+# Single Task 下拉中的收盘刷新哨兵：路由到 action_refresh_today
+# ===========================================================================
+def test_single_task_dropdown_contains_refresh_today_sentinel():
+    """下拉必须包含收盘刷新哨兵项，且紧跟在全量更新之后。"""
+    from tui import SingleTaskWidget
+
+    options = SingleTaskWidget._build_single_tasks()
+    values = [value for _label, value in options]
+    assert "__refresh_today__" in values
+    assert values.index("__refresh_today__") == values.index("all") + 1
+    labels = {value: label for label, value in options}
+    assert "收盘刷新" in labels["__refresh_today__"]
+
+
+def test_validate_against_registry_ignores_refresh_today_sentinel(caplog):
+    """哨兵不是注册任务，不得进入未注册任务警告名单。"""
+    import logging
+
+    from tui import SingleTaskWidget
+
+    # 强制所有任务判为未注册以触发警告路径，但哨兵不在校验名单里
+    with patch("core.task_registry.lookup_task", return_value=None), \
+         caplog.at_level(logging.WARNING):
+        SingleTaskWidget._build_single_tasks()
+    assert any("unregistered" in record.getMessage() for record in caplog.records)
+    assert "__refresh_today__" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_select_refresh_today_sentinel_routes_to_action_refresh_today():
+    """选中哨兵走收盘刷新确认流程，绝不落入 --task 单任务路径。"""
+    from textual.widgets import Select
+
+    from tui import SingleTaskWidget
+
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test():
+            panel = app.query_one("#single-task", SingleTaskWidget)
+            select = panel.query_one("#task-select", Select)
+            with patch.object(
+                app, "action_refresh_today", new_callable=AsyncMock
+            ) as mock_refresh, patch.object(
+                app, "action_run_single_task", new_callable=AsyncMock
+            ) as mock_single:
+                await panel.on_select_changed(
+                    Select.Changed(select, "__refresh_today__")
+                )
+            mock_refresh.assert_awaited_once()
+            mock_single.assert_not_called()
+            # 处理后依旧重置回提示状态
+            assert select.is_blank()
+
+
+@pytest.mark.asyncio
+async def test_select_changed_normal_task_and_separator_routing_regression():
+    """普通任务仍走单任务路径；分隔符两条路径都不触发。"""
+    from textual.widgets import Select
+
+    from tui import SingleTaskWidget
+
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test():
+            panel = app.query_one("#single-task", SingleTaskWidget)
+            select = panel.query_one("#task-select", Select)
+            with patch.object(
+                app, "action_refresh_today", new_callable=AsyncMock
+            ) as mock_refresh, patch.object(
+                app, "action_run_single_task", new_callable=AsyncMock
+            ) as mock_single:
+                await panel.on_select_changed(Select.Changed(select, "update_bars"))
+                mock_single.assert_awaited_once_with("update_bars")
+                mock_refresh.assert_not_called()
+
+                mock_single.reset_mock()
+                await panel.on_select_changed(Select.Changed(select, "__sep__行情"))
+                mock_single.assert_not_called()
+                mock_refresh.assert_not_called()
