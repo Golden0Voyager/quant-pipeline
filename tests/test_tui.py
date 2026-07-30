@@ -1191,11 +1191,23 @@ def test_new_tables_have_date_column_mappings():
         "index_futures_basis": "trade_date",
         "macro_monthly": "date",
         "macro_quarterly": "date",
-        "macro_daily": "date",
     }
 
     for table, date_column in expected.items():
         assert TABLE_DATE_COLUMNS[table] == date_column
+
+    # macro_daily 已由 money_market 接管，无生产者，不得再出现在监控映射中
+    assert "macro_daily" not in TABLE_DATE_COLUMNS
+
+
+def test_stock_pledge_reports_weekly_not_stale():
+    """质押数据每周五发布，一周内的数据不得标记为滞后。"""
+    from tui import DataCompletenessWidget
+
+    status = DataCompletenessWidget._get_status_for_table(
+        "stock_pledge", "2026-07-24", "2026-07-30", None
+    )
+    assert status == "按周更新"
 
 
 def test_get_updating_table_stale():
