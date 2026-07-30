@@ -171,7 +171,14 @@ async def test_get_launchd_status_exception():
 def test_get_subprocess_env():
     env = get_subprocess_env()
     assert isinstance(env, dict)
-    assert env.get("NO_PROXY") == "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
+    # 境内数据源必须全部直连（2026-07-30 事故：sse/szse/jin10/sina.com.cn
+    # 不在白名单，系统代理关闭时全部以 ProxyError / SSL EOF 失败）
+    no_proxy = env.get("NO_PROXY", "")
+    for domain in (
+        "eastmoney.com", "sina.com.cn", "sse.com.cn",
+        "szse.cn", "jin10.com", "csindex.com.cn", "cninfo.com.cn",
+    ):
+        assert domain in no_proxy
     assert env.get("DISABLE_YFINANCE_FALLBACK") == "1"
 
 
