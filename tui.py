@@ -721,7 +721,13 @@ def format_refresh_summary(records: list[dict]) -> str:
 
 def get_subprocess_env() -> dict:
     env = os.environ.copy()
-    env["NO_PROXY"] = "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn"
+    # 与 core/config.py 保持一致：境内数据源全部直连（裸域名后缀匹配）
+    env["NO_PROXY"] = (
+        "localhost,127.0.0.1,"
+        "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn,"
+        "eastmoney.com,sina.com,sina.cn,sina.com.cn,"
+        "sse.com.cn,szse.cn,jin10.com,csindex.com.cn,cninfo.com.cn"
+    )
     env["DISABLE_YFINANCE_FALLBACK"] = "1"
     env["QUANT_DB_PATH"] = str(DEFAULT_DB_PATH)
     return env
