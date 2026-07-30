@@ -14,6 +14,7 @@ from core.refresh_audit import (
     RefreshAudit,
     RefreshAuditError,
     classify_board,
+    compare_cross_source_quotes,
     cross_source_mismatches,
     stratified_cross_source_sample,
 )
@@ -488,6 +489,58 @@ def test_price_and_volume_use_separate_tolerances() -> None:
     # 688001: 5% volume diff is inside the volume tolerance.
     # 830799: missing reference quote always counts as a mismatch.
     assert mismatched == ("600000.SH", "300001.SZ", "830799.BJ")
+
+
+def test_compare_split_separates_unverifiable_from_real_mismatches() -> None:
+    """参考源缺数据（停牌/未覆盖）＝不可校验，绝不能算作真实分歧。"""
+    tolerance = CrossSourceTolerance(price=0.01, volume=0.10)
+    symbols = ("600000.SH", "000001.SZ", "300001.SZ", "830799.BJ")
+    primary = {
+        # 2% 价格差超出 1% 容差：真实分歧
+        "600000.SH": {"close": 10.20, "volume": 1000.0},
+        # 完全一致
+        "000001.SZ": {"close": 10.00, "volume": 1000.0},
+        # 830799 参考侧缺键：不可校验
+        "830799.BJ": {"close": 10.00, "volume": 1000.0},
+        # 300001 我方缺行但参考侧有数据：真实分歧（对方有证据我方没发布）
+    }
+    reference = {
+        "600000.SH": {"close": 10.00, "volume": 1000.0},
+        "000001.SZ": {"close": 10.00, "volume": 1000.0},
+        "300001.SZ": {"close": 10.00, "volume": 1000.0},
+    }
+
+    comparison = compare_cross_source_quotes(symbols, primary, reference, tolerance)
+
+    assert comparison.mismatched == ("600000.SH", "300001.SZ")
+    assert comparison.unverifiable == ("830799.BJ",)
+
+
+def test_compare_split_empty_reference_marks_all_unverifiable() -> None:
+    """参考源零覆盖：全部样本落入 unverifiable，mismatched 为空。"""
+    tolerance = CrossSourceTolerance(price=0.01, volume=0.10)
+    symbols = ("600000.SH", "000001.SZ")
+    primary = {symbol: {"close": 10.0, "volume": 1000.0} for symbol in symbols}
+
+    comparison = compare_cross_source_quotes(symbols, primary, {}, tolerance)
+
+    assert comparison.mismatched == ()
+    assert comparison.unverifiable == symbols
+
+
+def test_cross_source_mismatches_flat_view_still_flags_both_categories() -> None:
+    """兼容的扁平视图保持原契约：缺证据与真实分歧都按样本顺序上报。"""
+    tolerance = CrossSourceTolerance(price=0.01, volume=0.10)
+    symbols = ("600000.SH", "830799.BJ", "000001.SZ")
+    primary = {symbol: {"close": 10.0, "volume": 1000.0} for symbol in symbols}
+    reference = {
+        "600000.SH": {"close": 10.0, "volume": 1000.0},
+        "000001.SZ": {"close": 11.0, "volume": 1000.0},
+    }
+
+    mismatched = cross_source_mismatches(symbols, primary, reference, tolerance)
+
+    assert mismatched == ("830799.BJ", "000001.SZ")
 
 
 def test_zero_reference_volume_requires_zero_primary_volume() -> None:

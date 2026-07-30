@@ -1302,7 +1302,12 @@ class SingleTaskWidget(Static):
     def _build_single_tasks(cls) -> list[tuple[str, str]]:
         """把分组定义展开为带分隔符的下拉选项列表。"""
         cls._validate_against_registry()
-        options: list[tuple[str, str]] = [("全量更新 (Full Update)", "all")]
+        # 收盘刷新是哨兵项（仿 __sep__ 惯例），不进 _SINGLE_TASK_GROUPS/_UTILS，
+        # 避免被 _validate_against_registry 当作未注册任务警告
+        options: list[tuple[str, str]] = [
+            ("全量更新 (Full Update)", "all"),
+            ("收盘刷新 (Close Refresh)", "__refresh_today__"),
+        ]
         for group_name, tasks in cls._SINGLE_TASK_GROUPS:
             options.append((f"[dim]── {group_name} ──[/dim]", f"__sep__{group_name}"))
             options.extend(tasks)
@@ -1325,7 +1330,12 @@ class SingleTaskWidget(Static):
         # 只有 str 类型才是真实任务名，避免误触发导致杀进程
         value = event.value
         select = self.query_one("#task-select", Select)
-        if isinstance(value, str) and value and not value.startswith("__sep__"):
+        if value == "__refresh_today__":
+            # 收盘刷新是独立 CLI 模式（--refresh-today 与 --task 互斥），
+            # 走专属确认流程而非 _run_or_schedule 延迟调度
+            from typing import cast
+            await cast(PipelineApp, self.app).action_refresh_today()
+        elif isinstance(value, str) and value and not value.startswith("__sep__"):
             from typing import cast
             await cast(PipelineApp, self.app).action_run_single_task(value)
         # 无论选中真实任务还是分组分隔符，都重置回提示状态

@@ -741,7 +741,11 @@ def test_update_index_daily_ak_none():
 def test_update_chip_distribution_em_success():
     db = MagicMock()
     db.save_chip_distribution_em_batch.return_value = 1
-    with patch.object(index_chain, "_fetch_cyq_em", return_value=_cyq_df()), patch.object(index_chain, "time"):
+    # mock time.sleep 跳过限速，但保留 time.time() 返回数值（节流按耗时判断）
+    mock_time = MagicMock()
+    mock_time.time.return_value = 0.0
+    with patch.object(index_chain, "_fetch_cyq_em", return_value=_cyq_df()), \
+         patch.object(index_chain, "time", mock_time):
         result = index_chain.update_chip_distribution_em(db, symbols_to_update=["000001.SZ"])
     assert result["success"] == 1
     assert result["total"] == 1
@@ -821,12 +825,61 @@ def test_get_chip_em_target_symbols(tmp_path):
 
     db = MagicMock()
     db.db_path = str(db_path)
-    with patch.object(index_chain, "_fetch_index_constituents", return_value={"600000.SH", "600001.SH"}):
+    # 隔离 quant_agents 自选股 txt（指向空目录），使断言只反映 DB + 指数
+    empty_dir = tmp_path / "empty_watchlists"
+    empty_dir.mkdir()
+    with patch.object(index_chain, "_fetch_index_constituents", return_value={"600000.SH", "600001.SH"}), \
+         patch.object(index_chain, "_AGENTS_WATCHLIST_DIR", str(empty_dir)):
         symbols = index_chain._get_chip_em_target_symbols(db)
     assert "000001.SZ" in symbols
     assert "000002.SZ" not in symbols
     assert "600000.SH" in symbols
     assert "600001.SH" in symbols
+
+
+def test_read_agents_watchlist_symbols(tmp_path):
+    """txt 自选股解析：提取 6 位代码，忽略注释/空行/非法行。"""
+    wl = tmp_path / "wl"
+    wl.mkdir()
+    (wl / "my.txt").write_text(
+        "000975  # 山金国际\n002179  # 中航光电\n\n# 纯注释行\n",
+        encoding="utf-8",
+    )
+    # 末行无换行符 + 一个非法行
+    (wl / "watch.txt").write_text("300748  # 长缆科技\nnot_a_code\n600050", encoding="utf-8")
+    with patch.object(index_chain, "_AGENTS_WATCHLIST_DIR", str(wl)):
+        syms = index_chain._read_agents_watchlist_symbols()
+    assert syms == {"000975", "002179", "300748", "600050"}
+
+
+def test_read_agents_watchlist_symbols_missing_dir(tmp_path):
+    """目录不存在时返回空集合，不抛异常。"""
+    with patch.object(index_chain, "_AGENTS_WATCHLIST_DIR", str(tmp_path / "nope")):
+        assert index_chain._read_agents_watchlist_symbols() == set()
+
+
+def test_get_chip_em_target_symbols_merges_agents_watchlist(tmp_path):
+    """_get_chip_em_target_symbols 合并 quant_agents txt 自选股（如非指数成分的 000975）。"""
+    import sqlite3
+
+    db_path = tmp_path / "targets2.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE IF NOT EXISTS watchlist (ts_code TEXT, status TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS daily_bars (ts_code TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS chip_distribution (ts_code TEXT)")
+    conn.commit()
+    conn.close()
+
+    wl = tmp_path / "wl2"
+    wl.mkdir()
+    (wl / "my.txt").write_text("000975  # 山金国际\n", encoding="utf-8")
+
+    db = MagicMock()
+    db.db_path = str(db_path)
+    with patch.object(index_chain, "_fetch_index_constituents", return_value={"600000.SH"}), \
+         patch.object(index_chain, "_AGENTS_WATCHLIST_DIR", str(wl)):
+        symbols = index_chain._get_chip_em_target_symbols(db)
+    assert "000975" in symbols  # 非指数成分的自选股被覆盖
 
 
 def test_update_chip_distribution_em_fullmarket(tmp_path):

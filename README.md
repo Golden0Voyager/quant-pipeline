@@ -115,7 +115,7 @@ rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.S
 - **失败队列**：单只股票抓取失败进入 `failed_symbols` 队列并保留旧行；派生任务（指标、筹码分布）只重算日线实际变化的股票，失败股票不重算。
 - **回滚行为**：所有写入先进 staging 校验，再在单个事务内替换目标日分区；复合任务（如 `update_sector_derivatives` 的三张表）任一组件失败则整体回滚，所有表保持原样。
 - **退出码**：任一任务 degraded/failed 时进程以非零码退出，便于脚本与定时任务判断。
-- **跨源抽样校验（opt-in，默认关闭）**：`REFRESH_CROSS_SOURCE=1` 开启后，刷新完成时会抽样对比备用源行情（只读，绝不用于写入）。相关环境变量：`REFRESH_CROSS_SOURCE_TASK`（默认 `update_bars`）、`REFRESH_CROSS_SOURCE_SAMPLE_SIZE`（默认 30）、`REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL`（默认 0.005/0.05，临时值，须用真实数据调参后方可信任）。当前尚未接入备用源 verifier（雪球 verifier 为待办后续），开启开关但未提供 verifier 会直接报错退出，不会静默跳过。
+- **跨源抽样校验（opt-in，默认关闭）**：`REFRESH_CROSS_SOURCE=1` 开启后，刷新完成时抽样对比雪球日线（只读，绝不用于写入；价按 qfq 对齐，成交量按手/股约定归一，北交所不参与）。**开启即先进入观察态**：`REFRESH_CROSS_SOURCE_REPORT_ONLY` 默认 `1`，命中不一致只记录/告警、绝不降级；确认容差后设 `0` 才真降级。审计元数据 `cross_source` 区分 `mismatched`（真不一致）、`unverifiable`（雪球当天无数据，如停牌）与 `reference_dead`（整体零命中）。相关变量：`REFRESH_CROSS_SOURCE_TASK`（默认 `update_bars`）、`REFRESH_CROSS_SOURCE_SAMPLE_SIZE`（默认 30）、`REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL`（默认 0.005/0.05，临时值，须用真实数据调参）。启用与调参三步流程见 [docs/runbooks/cross-source-verification-rollout.md](docs/runbooks/cross-source-verification-rollout.md)。
 - **TUI 入口**：面板中按 `U`（Close Refresh）确认后即启动收盘刷新。
 
 ---

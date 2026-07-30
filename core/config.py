@@ -118,6 +118,7 @@ class CrossSourceEnvConfig:
     sample_size: int
     price_tol: float
     volume_tol: float
+    report_only: bool
 
 
 def read_cross_source_config() -> CrossSourceEnvConfig:
@@ -140,6 +141,10 @@ def read_cross_source_config() -> CrossSourceEnvConfig:
                 "REFRESH_CROSS_SOURCE_VOLUME_TOL", str(CROSS_SOURCE_VOLUME_TOL_DEFAULT)
             )
         ),
+        # 默认 "1"：首次启用跨源校验即从观察模式起步（只记录不降级），
+        # 需显式置 0 才切换为 enforce（定向重试 + 降级）。
+        report_only=os.getenv("REFRESH_CROSS_SOURCE_REPORT_ONLY", "1").lower()
+        in ("1", "true", "yes"),
     )
 
 

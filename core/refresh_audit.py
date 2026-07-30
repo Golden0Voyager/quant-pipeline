@@ -121,22 +121,38 @@ class CrossSourceTolerance:
                 )
 
 
-def cross_source_mismatches(
+@dataclass(frozen=True, slots=True)
+class CrossSourceComparison:
+    """Split comparison outcome: real disagreements vs reference-missing."""
+
+    mismatched: tuple[str, ...]
+    unverifiable: tuple[str, ...]
+
+
+def compare_cross_source_quotes(
     symbols: Sequence[str],
     primary: Mapping[str, Mapping[str, Any]],
     reference: Mapping[str, Mapping[str, Any]],
     tolerance: CrossSourceTolerance,
-) -> tuple[str, ...]:
-    """Return sampled symbols whose close or volume disagrees across sources.
+) -> CrossSourceComparison:
+    """Partition sampled symbols into real mismatches and unverifiable ones.
 
-    A missing or unreadable quote on either side counts as a mismatch: absent
-    evidence must not pass a data-quality check.
+    A symbol the reference source returned no data for (suspended or simply
+    not covered) is *unverifiable*: the backup offers no evidence either way,
+    so it must not be reported as a disagreement. A symbol present in the
+    reference but missing from primary IS a real mismatch: the backup has
+    evidence for a row we failed to publish. Values present on both sides
+    are compared under the configured tolerances.
     """
     mismatched: list[str] = []
+    unverifiable: list[str] = []
     for symbol in symbols:
-        ours = primary.get(symbol)
         theirs = reference.get(symbol)
-        if ours is None or theirs is None:
+        if theirs is None:
+            unverifiable.append(symbol)
+            continue
+        ours = primary.get(symbol)
+        if ours is None:
             mismatched.append(symbol)
             continue
         close_ok = _within_tolerance(
@@ -147,7 +163,25 @@ def cross_source_mismatches(
         )
         if not close_ok or not volume_ok:
             mismatched.append(symbol)
-    return tuple(mismatched)
+    return CrossSourceComparison(tuple(mismatched), tuple(unverifiable))
+
+
+def cross_source_mismatches(
+    symbols: Sequence[str],
+    primary: Mapping[str, Mapping[str, Any]],
+    reference: Mapping[str, Mapping[str, Any]],
+    tolerance: CrossSourceTolerance,
+) -> tuple[str, ...]:
+    """Return sampled symbols whose close or volume disagrees across sources.
+
+    Flat compatibility view over ``compare_cross_source_quotes``: a missing
+    or unreadable quote on either side still counts as flagged here, because
+    absent evidence must not pass a data-quality check. Callers that need to
+    treat reference-missing symbols differently should use the split helper.
+    """
+    comparison = compare_cross_source_quotes(symbols, primary, reference, tolerance)
+    flagged = set(comparison.mismatched) | set(comparison.unverifiable)
+    return tuple(symbol for symbol in symbols if symbol in flagged)
 
 
 def _within_tolerance(ours: Any, theirs: Any, tolerance: float) -> bool:

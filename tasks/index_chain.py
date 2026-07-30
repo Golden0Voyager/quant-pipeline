@@ -154,6 +154,43 @@ def _fetch_index_constituents(index_code: str, source: str) -> set[str]:
     return codes
 
 
+# quant_agents 消费端自选股清单目录（纯文本 "代码  # 名称"，每行一只）。
+# pipeline 的 watchlist 表来自自身选股扫描，覆盖不到消费端手工维护的自选股
+# （如 000975 山金国际非指数成分且不在扫描结果里），故筹码任务额外读取这些
+# txt，确保消费端 batch 用到的每只股票都能拿到当日筹码。
+_AGENTS_WATCHLIST_DIR = os.getenv(
+    "QUANT_AGENTS_WATCHLIST_DIR",
+    os.path.expanduser("~/Code/quant_agents/watchlists"),
+)
+
+
+def _read_agents_watchlist_symbols() -> set[str]:
+    """Best-effort 读取 quant_agents watchlists/*.txt 的 6 位股票代码。
+
+    每行格式为 ``600519  # 贵州茅台``；忽略空行、注释行与非法代码。
+    目录不存在或读取失败时返回空集合（不影响筹码任务主流程）。
+    """
+    import re
+    from pathlib import Path
+
+    symbols: set[str] = set()
+    wl_dir = Path(_AGENTS_WATCHLIST_DIR)
+    if not wl_dir.is_dir():
+        return symbols
+    for txt in wl_dir.glob("*.txt"):
+        try:
+            for line in txt.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r"(\d{6})", line)
+                if m:
+                    symbols.add(m.group(1))
+        except Exception:
+            continue
+    return symbols
+
+
 def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
     """获取需要线上抓取筹码分布的目标股票清单。
 
@@ -174,6 +211,12 @@ def _get_chip_em_target_symbols(db: DatabaseInterface) -> list[str]:
         symbols.update(r[0] for r in rows)
     except Exception:
         pass
+
+    # 1b. quant_agents 消费端手工自选股（txt），覆盖非指数成分的自选标的
+    agents_syms = _read_agents_watchlist_symbols()
+    if agents_syms:
+        symbols |= agents_syms
+        logger.info(f"  合并 quant_agents 自选股 {len(agents_syms)} 只")
 
     for index_code, source in _CSI_INDICES:
         symbols |= _fetch_index_constituents(index_code, source)
@@ -271,11 +314,12 @@ def update_chip_distribution_em(
             )
             time.sleep(cool_sec)
 
-        # ── 股票间至少间隔 1-2s，避免爆发式请求 ──
-        if i > 1:
-            time.sleep(random.uniform(1.0, 2.0))
-
+        _t0 = time.time()
         df = _fetch_cyq_em(symbol)
+        # ── 节流仅针对线上源：本地 DB numpy 计算 (~30ms) 无需限速；
+        #    耗时超过 0.5s 说明走了线上兜底（EM/雪球/新浪），限速防爆发请求 ──
+        if time.time() - _t0 > 0.5:
+            time.sleep(random.uniform(1.0, 2.0))
         if df is None:
             failed_count += 1
             consecutive_failures += 1
