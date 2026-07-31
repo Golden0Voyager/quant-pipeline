@@ -10,7 +10,6 @@ import contextlib
 import logging
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 
 from smartmoney_hunter.market_utils import is_beijing_stock
@@ -57,24 +56,45 @@ def lower_process_priority() -> None:
 
 
 def is_trading_day() -> bool:
-    """判断今天是否为 A 股交易日（简化版，排除周末）。"""
-    today = datetime.now()
-    return today.weekday() < 5  # 周一到周五
+    """判断今天（上海时区）是否为 A 股交易日。
+
+    委托 ``core.calendar.is_trading_day``（含节假日日历缓存），
+    替换旧的"仅排除周末"简化版。
+    """
+    from core.calendar import is_trading_day as _calendar_is_trading_day
+    from core.market_time import shanghai_now
+
+    return _calendar_is_trading_day(shanghai_now().date())
 
 
 def should_update() -> bool:
-    """判断是否需要更新：周末跳过、盘中跳过、15:00~16:00 结算窗口跳过。"""
-    now = datetime.now()
-    if now.weekday() >= 5:
-        logger.info("今天是周末，跳过更新")
+    """判断是否需要更新：非交易日跳过、盘中与结算窗口跳过（16:00 后放行）。
+
+    一律使用上海时区时钟——本机时区 ≠ +0800 时，naive 时钟会让
+    开盘时段漏防、结算窗口错位（2026-07-30 事故根因之一）。
+    ``--force`` 可跳过本检查。
+    """
+    from core.market_time import (
+        PHASE_SESSION,
+        PHASE_SETTLEMENT,
+        market_phase,
+        shanghai_now,
+    )
+
+    now = shanghai_now()
+    if not is_trading_day():
+        logger.info("今天（上海时区）不是交易日，跳过更新")
         return False
-    if 9 <= now.hour < 15:
-        logger.info(f"当前时间 {now.hour}:{now.minute:02d}，盘中不执行（15:00 收盘后自动允许）")
+    phase = market_phase(now)
+    if phase == PHASE_SESSION:
+        logger.info(
+            f"上海时间 {now:%H:%M} 盘中，不执行交易日抓取（16:00 后自动放行，--force 可跳过）"
+        )
         return False
-    if now.hour == 15:
+    if phase == PHASE_SETTLEMENT:
         logger.warning(
-            f"当前时间 {now.hour}:{now.minute:02d}，收盘结算窗口（15:00~16:00），"
-            "数据源可能不稳定。等到 16:00 后再运行，或使用 --force 跳过此检查"
+            f"上海时间 {now:%H:%M} 收盘结算窗口（15:00~16:00），数据源尚未定型。"
+            "等到 16:00 后再运行，或使用 --force 跳过此检查"
         )
         return False
     return True

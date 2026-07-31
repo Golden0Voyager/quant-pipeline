@@ -255,6 +255,25 @@ def _run_registry_task(
     if fn is None:
         raise ValueError(f"unknown task: {task_name}")
 
+    # 盘中门禁：交易日抓取任务在盘中/结算窗口写入的是实时快照，
+    # 会被后续"当日已存在"类守卫冻结（2026-07-30 事故）。
+    # 单任务/TUI/守护进程都经过此处，与 run_all 共用 _should_update 判定；
+    # --force 保留逃生门（写入端仍有丢弃当日行的兜底）。
+    # 本地衍生计算任务（从已入库数据推导，不抓数据源）不受门禁限制。
+    derived_compute_tasks = {"update_indicators", "update_chip_distribution"}
+    spec = lookup_task(task_name)
+    if (
+        spec is not None
+        and spec.cadence is Cadence.TRADING_DAY
+        and task_name not in derived_compute_tasks
+        and not force
+        and not _should_update()
+    ):
+        return TaskResult.no_data(
+            task_name,
+            reason="盘中/结算窗口不执行交易日抓取任务（上海时间 16:00 后自动放行，--force 跳过）",
+        ).to_dict()
+
     if task_name == "update_indicators":
         if force or symbols:
             return _dispatch_indicators_force(fn, db, engine, symbols)

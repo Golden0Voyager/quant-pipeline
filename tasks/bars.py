@@ -60,6 +60,7 @@ from core.config import (
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,
 )
+from core.market_time import PHASE_POST_CLOSE, market_phase
 from core.monitor import AkShareMonitor
 from core.progress import ProgressTracker
 from core.utils import is_real_db_path, should_skip_beijing
@@ -756,6 +757,30 @@ def update_bars(
     )
 
 
+def _drop_unsettled_rows(df_bars, expected_latest: str | None, symbol: str):
+    """收盘定型前丢弃晚于 expected_latest 的行（盘中半根 K 线不落库）。
+
+    仅在 --force 绕过盘中门禁时才会真正命中。注意盘中抓取仍会写
+    loader 缓存（TTL 4h），修正当日数据请用 --refresh-today（绕过缓存）。
+    """
+    if (
+        df_bars is None
+        or df_bars.empty
+        or not expected_latest
+        or "trade_date" not in df_bars.columns
+        or market_phase() == PHASE_POST_CLOSE
+    ):
+        return df_bars
+    normalized_dates = df_bars["trade_date"].map(_normalize_trade_date)
+    over_mask = normalized_dates > expected_latest
+    if over_mask.any():
+        logger.warning(
+            f"  ⚠️  {symbol}: 盘中丢弃 {int(over_mask.sum())} 行晚于 {expected_latest} 的当日数据"
+        )
+        df_bars = df_bars[~over_mask]
+    return df_bars
+
+
 def _update_single_bar(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -810,6 +835,7 @@ def _update_single_bar(
             if is_watchlist and not is_backfilled:
                 logger.info(f"🚀 {symbol} 属于自选股且尚未进行全量拉取，准备下载 1990 年起的完整历史K线...")
                 df_bars = loader.get_daily_bars(symbol, start_date="19900101")
+                df_bars = _drop_unsettled_rows(df_bars, expected_latest, symbol)
                 if not df_bars.empty:
                     # 检查是否全部是 yfinance，如果是则不保存以防污染
                     if 'data_source' in df_bars.columns:
@@ -880,6 +906,11 @@ def _update_single_bar(
                     datetime.now() - timedelta(days=DEFAULT_LOOKBACK_DAYS)
                 ).strftime("%Y%m%d"))
 
+            if df_bars.empty:
+                return "skipped"
+
+            # 盘中兜底（--force 绕过门禁时生效）：半根 K 线不落库
+            df_bars = _drop_unsettled_rows(df_bars, expected_latest, symbol)
             if df_bars.empty:
                 return "skipped"
 

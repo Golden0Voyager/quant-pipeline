@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
 from typing import Any
 
 import pandas as pd
 
 from core.data_contract import CONCEPT_BOARD_CONTRACT, validate_records
+from core.market_time import shanghai_today
 from core.source_client import get_default_client
 from interface import DatabaseInterface
 
@@ -64,7 +64,7 @@ def _fetch_em_spot() -> list[dict]:
         "&fields=f3,f4,f12,f14,f104,f105"
     )
     session = get_default_client().get_session("eastmoney")
-    today = date.today().isoformat()
+    today = shanghai_today()
     records = []
     page = 1
     while True:
@@ -201,8 +201,8 @@ def update_concept_board(db: DatabaseInterface) -> dict:
         return {"status": "no_data", "board_saved": 0, "saved": 0}
 
     try:
-        # 补充 trade_date 字段（实时行情接口不返回日期）
-        today_str = date.today().isoformat()
+        # 补充 trade_date 字段（实时行情接口不返回日期，按上海市场日标记）
+        today_str = shanghai_today()
         for r in spot:
             r.setdefault("trade_date", today_str)
         validated_spot, violations = validate_records(spot, CONCEPT_BOARD_CONTRACT, logger)
@@ -259,7 +259,8 @@ def update_concept_member(
 
     results: dict[str, Any] = {}
     run_id = _task_run_id or str(uuid.uuid4())
-    valid_from = date.today().isoformat()
+    # PIT interval 边界使用上海市场日，避免本机时区在午夜前后错切快照区间
+    valid_from = shanghai_today()
 
     try:
         members = _fetch_concept_members_em()
