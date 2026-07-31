@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
 from typing import Any
 
 try:
@@ -17,6 +16,7 @@ try:
 except ImportError:
     ak = None
 
+from core.market_time import shanghai_today
 from interface import DatabaseInterface
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,8 @@ def update_index_membership(
     logger.info("=" * 60)
 
     run_id = _task_run_id or str(uuid.uuid4())
-    valid_from = date.today().isoformat()
+    # PIT interval 边界使用上海市场日，避免本机时区在午夜前后错切快照区间
+    valid_from = shanghai_today()
 
     if ak is None:
         logger.error("❌ akshare 未安装")
