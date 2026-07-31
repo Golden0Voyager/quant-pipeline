@@ -94,16 +94,19 @@ def is_trading_day(d: date | None = None) -> bool:
 def get_expected_latest_trading_day(now: datetime | None = None) -> str:
     """获取期望的最新交易日日期 (YYYY-MM-DD)。
 
-    周末 → 上周五；周一至周五 15:30 之前 → 前一天；15:30 之后 → 今天。
+    周末 → 上周五；周一至周五 16:00（上海）之前 → 前一天；之后 → 今天。
     用于判断数据新鲜度（如 TUI 的数据完整性面板）和任务调度。
 
-    now 缺省时使用本机时钟；调用方可传入上海时区的 aware datetime，
-    此时 15:30 截止点按上海时间解释，结果与主机本地时区无关。
+    now 缺省时使用**上海时区**时钟（与盘中门禁、收盘刷新共用同一时钟，
+    翻转时刻 16:00 与 core.refresh._CLOSE_TIME / market_time 结算线一致）；
+    调用方也可注入 aware datetime，结果与主机本地时区无关。
     """
     if now is None:
-        now = datetime.now()
+        from core.market_time import shanghai_now
+
+        now = shanghai_now()
     target = now
-    if target.weekday() < 5 and (target.hour < 15 or (target.hour == 15 and target.minute < 30)):
+    if target.weekday() < 5 and target.hour < 16:
         target -= timedelta(days=1)
     while target.weekday() >= 5:
         target -= timedelta(days=1)
