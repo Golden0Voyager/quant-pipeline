@@ -118,11 +118,8 @@ class TestUpdateFundamentals:
         with (
             patch("tasks.valuation_chain.logger"),
             patch("tasks.valuation_chain.get_default_client") as mock_gc,
-            patch("tasks.valuation_chain.datetime") as mock_dt,
         ):
             mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
-            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = update_fundamentals(db, loader, symbols=["000001"])
 
         assert r["saved"] == 1  # 只有 000001 被过滤出来
@@ -143,14 +140,104 @@ class TestUpdateFundamentals:
         with (
             patch("tasks.valuation_chain.logger"),
             patch("tasks.valuation_chain.get_default_client") as mock_gc,
-            patch("tasks.valuation_chain.datetime") as mock_dt,
         ):
             mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
-            mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
             r = update_fundamentals(db, loader)
 
         assert r["saved"] == 0
+
+    def test_skip_requires_post_close_completion(self):
+        """行数达标但无收盘后完成记录 → 不跳过，重抓覆盖盘中快照。"""
+        db = MagicMock()
+        db.db_path = "/tmp/fake.db"
+        db.count_fundamentals_for_date.return_value = 6000
+        loader = MagicMock()
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"success": True, "result": {"data": [], "count": 0}}
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.has_post_close_completion", return_value=False),
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
+        ):
+            mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
+            r = update_fundamentals(db, loader)
+
+        # 未跳过：走了抓取路径（源端空 → saved 0，但没有 skipped 标记）
+        assert "skipped" not in r
+
+    def test_skip_with_post_close_completion(self):
+        """行数达标 + 收盘后完成记录 → 跳过。"""
+        db = MagicMock()
+        db.db_path = "/tmp/fake.db"
+        db.count_fundamentals_for_date.return_value = 6000
+        loader = MagicMock()
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.has_post_close_completion", return_value=True),
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r["skipped"] is True
+
+    def test_intraday_does_not_request_today(self):
+        """盘中运行不请求 TRADE_DATE=今天（东财返回实时估值快照）。"""
+        from zoneinfo import ZoneInfo
+
+        sh_now = datetime(2026, 7, 17, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        db = MagicMock()
+        db.db_path = "/tmp/fake.db"
+        db.count_fundamentals_for_date.return_value = 0
+        loader = MagicMock()
+
+        session = MagicMock()
+        session.get.return_value.json.return_value = {
+            "success": True,
+            "result": {"data": [], "count": 0},
+        }
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.shanghai_now", return_value=sh_now),
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
+        ):
+            mock_gc.return_value.get_session.return_value = session
+            update_fundamentals(db, loader)
+
+        requested_filters = [
+            call.kwargs["params"]["filter"] for call in session.get.call_args_list
+        ]
+        assert requested_filters, "盘中仍应回补历史交易日"
+        assert all("2026-07-17" not in f for f in requested_filters)
+
+    def test_post_close_requests_today_first(self):
+        """收盘定型后第一优先请求今天。"""
+        from zoneinfo import ZoneInfo
+
+        sh_now = datetime(2026, 7, 17, 16, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        db = MagicMock()
+        db.db_path = "/tmp/fake.db"
+        db.count_fundamentals_for_date.return_value = 0
+        loader = MagicMock()
+
+        session = MagicMock()
+        session.get.return_value.json.return_value = {
+            "success": True,
+            "result": {"data": [], "count": 0},
+        }
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.shanghai_now", return_value=sh_now),
+            patch("tasks.valuation_chain.get_default_client") as mock_gc,
+        ):
+            mock_gc.return_value.get_session.return_value = session
+            update_fundamentals(db, loader)
+
+        first_filter = session.get.call_args_list[0].kwargs["params"]["filter"]
+        assert "2026-07-17" in first_filter
 
 
 # ===========================================================================
@@ -210,6 +297,63 @@ class TestUpdateMarketSnapshot:
             r = update_market_snapshot(db)
 
         assert r["skipped"] is True
+
+    def test_intraday_today_target_deferred(self, tmp_path: Path):
+        """target 为今日且未收盘定型 → no_data，不写盘中股息率。"""
+        from zoneinfo import ZoneInfo
+
+        db_path = str(tmp_path / "test.db")
+        _create_fundamentals_db(db_path)
+        db = MagicMock()
+        db.db_path = db_path
+
+        sh_now = datetime(2026, 7, 17, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch("tasks.valuation_chain.logger"), \
+             patch("tasks.valuation_chain.shanghai_now", return_value=sh_now):
+            r = update_market_snapshot(db)
+
+        assert r["status"] == "no_data"
+        db.get_last_task_run.assert_not_called()
+
+    def test_today_target_skip_requires_post_close_completion(self, tmp_path: Path):
+        """target 为今日、行数达标但无收盘后完成记录 → 不跳过，重新补充。"""
+        from zoneinfo import ZoneInfo
+
+        db_path = str(tmp_path / "test.db")
+        _create_fundamentals_db(db_path)
+        db = MagicMock()
+        db.db_path = db_path
+        db.get_last_task_run.return_value = "2026-07-17"
+
+        sh_now = datetime(2026, 7, 17, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch("tasks.valuation_chain.logger"), \
+             patch("tasks.valuation_chain.shanghai_now", return_value=sh_now), \
+             patch("tasks.valuation_chain.has_post_close_completion", return_value=False), \
+             patch("smartmoney_hunter.xueqiu._get_token", return_value=None):
+            r = update_market_snapshot(db)
+
+        # 未走守卫跳过（守卫跳过的返回带 updated 键），落到 token 缺失的早退
+        assert "updated" not in r
+        assert r.get("reason") == "XUEQIU_TOKEN not configured"
+
+    def test_today_target_skip_with_post_close_completion(self, tmp_path: Path):
+        """target 为今日、行数达标且有收盘后完成记录 → 跳过。"""
+        from zoneinfo import ZoneInfo
+
+        db_path = str(tmp_path / "test.db")
+        _create_fundamentals_db(db_path)
+        db = MagicMock()
+        db.db_path = db_path
+        db.get_last_task_run.return_value = "2026-07-17"
+
+        sh_now = datetime(2026, 7, 17, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch("tasks.valuation_chain.logger"), \
+             patch("tasks.valuation_chain.shanghai_now", return_value=sh_now), \
+             patch("tasks.valuation_chain.has_post_close_completion", return_value=True):
+            r = update_market_snapshot(db)
+
+        assert r["skipped"] is True
+        assert r["updated"] == 0
 
 
 # ===========================================================================
