@@ -721,13 +721,19 @@ def format_refresh_summary(records: list[dict]) -> str:
 
 def get_subprocess_env() -> dict:
     env = os.environ.copy()
-    # 与 core/config.py 保持一致：境内数据源全部直连（裸域名后缀匹配）
-    env["NO_PROXY"] = (
+    # 与 core/config.py 保持一致：境内数据源全部直连。
+    # NO_PROXY 按后缀（urllib endswith / requests 子串）匹配，不支持 glob，
+    # 故一律用裸域名后缀；requests/urllib 会优先读小写 no_proxy，需同时设置，
+    # 否则操作者 shell 继承来的小写变量会遮蔽此处白名单。
+    no_proxy = (
         "localhost,127.0.0.1,"
-        "push2his.eastmoney.com,*.eastmoney.com,*.sina.com,*.sina.cn,"
-        "eastmoney.com,sina.com,sina.cn,sina.com.cn,"
-        "sse.com.cn,szse.cn,jin10.com,csindex.com.cn,cninfo.com.cn"
+        "eastmoney.com,"
+        "sina.com,sina.cn,sina.com.cn,"
+        "sse.com.cn,szse.cn,"
+        "jin10.com,csindex.com.cn,cninfo.com.cn"
     )
+    env["NO_PROXY"] = no_proxy
+    env["no_proxy"] = no_proxy
     env["DISABLE_YFINANCE_FALLBACK"] = "1"
     env["QUANT_DB_PATH"] = str(DEFAULT_DB_PATH)
     return env
@@ -885,6 +891,15 @@ DELAYED_PUBLISH_TABLES: set[str] = {
 # 无有意义日期列的表（不显示新鲜度标记，只显示行数）
 NO_DATE_TABLES: set[str] = {
 }
+
+# 健康度统计中视为“健康”的状态（含周/月/季周期性更新标记）
+_HEALTHY_STATUSES: tuple[str, ...] = (
+    "最新",
+    "T+1",
+    "按周更新",
+    "按月更新",
+    "按季更新",
+)
 
 
 
@@ -1696,6 +1711,15 @@ class DataCompletenessWidget(VerticalScroll):
         if updating_tables and tbl in updating_tables:
             return "更新中"
         if tbl in WEEKLY_TABLES and latest:
+            # 中登每周五发布；超过 10 个自然日未更新才判定为滞后，
+            # 解析失败时保守地保留“按周更新”标记。
+            try:
+                latest_dt = datetime.strptime(latest, "%Y-%m-%d")
+                expected_dt = datetime.strptime(expected_date, "%Y-%m-%d")
+                if (expected_dt - latest_dt).days > 10:
+                    return _date_status(latest, expected_date)
+            except (ValueError, TypeError):
+                pass
             return "按周更新"
         if tbl in MONTHLY_TABLES and latest:
             return "按月更新"
@@ -1760,7 +1784,7 @@ class DataCompletenessWidget(VerticalScroll):
             order = self._STATUS_ORDER.get(status, 3)
             items.append((order, idx, tbl, label, n, latest, status))
 
-            if status in ("最新", "T+1", "按月更新", "按季更新"):
+            if status in _HEALTHY_STATUSES:
                 health_counts["healthy"] += 1
             elif status == "略滞后":
                 health_counts["degraded"] += 1
