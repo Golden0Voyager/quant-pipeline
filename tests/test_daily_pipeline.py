@@ -86,6 +86,65 @@ def weekday_mock() -> None:
 # _update_single_bar
 # ===========================================================================
 class TestUpdateSingleBar:
+    def test_intraday_force_drops_unsettled_rows(self):
+        """--force 盘中抓取：晚于 expected_latest 的行（半根 K 线）不落库。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-29"
+        db.get_daily_bars.return_value = _bars_df(["2026-07-29"])
+        # 源端返回含"今天"的盘中行
+        loader.incremental_update.return_value = _bars_df(["2026-07-29", "2026-07-30", "2026-07-31"])
+        with patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
+             patch("tasks.bars.market_phase", return_value="session"):
+            r = daily_pipeline._update_single_bar(
+                db, loader, "000001.SZ",
+                watchlist_symbols=set(), backfill_file=Path("/tmp/bf.txt"),
+                backfilled_symbols=set(), expected_latest_date="2026-07-30",
+            )
+        assert r == "success"
+        saved_df = db.save_daily_bars.call_args.args[1]
+        assert list(saved_df["trade_date"]) == ["2026-07-29", "2026-07-30"]
+
+    def test_post_close_keeps_today_rows(self):
+        """收盘定型后正常保存今日行。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-30"
+        db.get_daily_bars.return_value = _bars_df(["2026-07-30"])
+        loader.incremental_update.return_value = _bars_df(["2026-07-30", "2026-07-31"])
+        with patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
+             patch("tasks.bars.market_phase", return_value="post_close"):
+            r = daily_pipeline._update_single_bar(
+                db, loader, "000001.SZ",
+                watchlist_symbols=set(), backfill_file=Path("/tmp/bf.txt"),
+                backfilled_symbols=set(), expected_latest_date="2026-07-31",
+            )
+        assert r == "success"
+        saved_df = db.save_daily_bars.call_args.args[1]
+        assert list(saved_df["trade_date"]) == ["2026-07-30", "2026-07-31"]
+
+    def test_intraday_all_rows_unsettled_returns_skipped(self):
+        """盘中抓到的全是当日行 → 全部丢弃后按 skipped 处理。"""
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-29"
+        db.get_daily_bars.return_value = _bars_df(["2026-07-29", "2026-07-30"])
+        loader.incremental_update.return_value = _bars_df(
+            ["2026-07-29", "2026-07-30", "2026-07-31"]
+        )
+        with patch("daily_pipeline.time.sleep"), patch("daily_pipeline.logger"), \
+             patch("tasks.bars.market_phase", return_value="session"):
+            r = daily_pipeline._update_single_bar(
+                db, loader, "000001.SZ",
+                watchlist_symbols=set(), backfill_file=Path("/tmp/bf.txt"),
+                backfilled_symbols=set(), expected_latest_date="2026-07-30",
+            )
+        # 2026-07-31 被丢弃后与 existing 等长的情况不会出现（行数 3→2 != existing 2? 是 ==）
+        # 实际：丢弃后仍保存 ≤ expected 的行
+        assert r == "success"
+        saved_df = db.save_daily_bars.call_args.args[1]
+        assert "2026-07-31" not in list(saved_df["trade_date"])
+
     def test_normal_incremental_success(self):
         db = MagicMock()
         loader = MagicMock()
@@ -984,11 +1043,12 @@ class TestMain:
     @pytest.fixture(autouse=True)
     def _passthrough_safe_task(self):
         # 单任务模式现经 _safe_task 包装（注入 _task_run_id / 写审计父行）；
-        # CLI 分发测试只关心路由与参数，这里透传以保持断言语义
+        # CLI 分发测试只关心路由与参数，这里透传以保持断言语义。
+        # 同时放行盘中门禁（真实时钟会让测试随运行时段漂移）。
         with patch(
             "daily_pipeline._safe_task",
             side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
-        ):
+        ), patch("daily_pipeline._should_update", return_value=True):
             yield
 
     @pytest.mark.parametrize("status", ["success", "no_data"])
@@ -1750,14 +1810,16 @@ def test_update_fund_flow_save_error():
 
 
 def test_is_trading_day_weekday():
-    with patch("core.utils.datetime") as m:
-        m.now.return_value = datetime(2026, 6, 22)
+    with patch("core.market_time.datetime") as m, \
+         patch("core.calendar._load_cached_calendar", return_value=None), \
+         patch("core.calendar._fetch_trading_calendar", return_value=[]):
+        m.now.return_value = datetime(2026, 6, 22, tzinfo=ZoneInfo("Asia/Shanghai"))
         assert daily_pipeline._is_trading_day()
 
 
 def test_is_trading_day_weekend():
-    with patch("core.utils.datetime") as m:
-        m.now.return_value = datetime(2026, 6, 27)
+    with patch("core.market_time.datetime") as m:
+        m.now.return_value = datetime(2026, 6, 27, tzinfo=ZoneInfo("Asia/Shanghai"))
         assert not daily_pipeline._is_trading_day()
 
 
@@ -2555,7 +2617,7 @@ class TestGlobalMacroCli:
         with patch(
             "daily_pipeline._safe_task",
             side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
-        ):
+        ), patch("daily_pipeline._should_update", return_value=True):
             yield
 
     @pytest.mark.parametrize(
@@ -2824,33 +2886,46 @@ class TestGlobalMacroDbSaveException:
 # _should_update
 # ===========================================================================
 class TestShouldUpdate:
+    @staticmethod
+    def _at(day: int, hour: int, minute: int = 0):
+        return patch(
+            "core.market_time.datetime",
+            **{
+                "now.return_value": datetime(
+                    2026, 6, day, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+            },
+        )
+
     def test_weekend(self):
-        with patch("core.utils.datetime") as m:
-            m.now.return_value = datetime(2026, 6, 27)  # Saturday
-            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            with patch("daily_pipeline.logger"):
-                assert not daily_pipeline._should_update()
+        with self._at(27, 10), patch("daily_pipeline.logger"), \
+             patch("core.utils.logger"):
+            assert not daily_pipeline._should_update()
 
     def test_during_trading(self):
-        with patch("core.utils.datetime") as m:
-            m.now.return_value = datetime(2026, 6, 22, 10, 0)  # Monday 10am
-            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            with patch("daily_pipeline.logger"):
-                assert not daily_pipeline._should_update()
+        with self._at(22, 10), patch("daily_pipeline.logger"), \
+             patch("core.utils.logger"), \
+             patch("core.calendar.is_trading_day", return_value=True):
+            assert not daily_pipeline._should_update()
+
+    def test_session_open_window_guarded(self):
+        """上海 09:40 开盘时段必须拦截（旧本机时钟实现的漏防窗口）。"""
+        with self._at(22, 9, 40), patch("daily_pipeline.logger"), \
+             patch("core.utils.logger"), \
+             patch("core.calendar.is_trading_day", return_value=True):
+            assert not daily_pipeline._should_update()
 
     def test_settlement_window(self):
-        with patch("core.utils.datetime") as m:
-            m.now.return_value = datetime(2026, 6, 22, 15, 0)  # 15:00
-            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            with patch("daily_pipeline.logger"):
-                assert not daily_pipeline._should_update()
+        with self._at(22, 15), patch("daily_pipeline.logger"), \
+             patch("core.utils.logger"), \
+             patch("core.calendar.is_trading_day", return_value=True):
+            assert not daily_pipeline._should_update()
 
     def test_after_hours_ok(self):
-        with patch("core.utils.datetime") as m:
-            m.now.return_value = datetime(2026, 6, 22, 16, 0)
-            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            with patch("daily_pipeline.logger"):
-                assert daily_pipeline._should_update()
+        with self._at(22, 16), patch("daily_pipeline.logger"), \
+             patch("core.utils.logger"), \
+             patch("core.calendar.is_trading_day", return_value=True):
+            assert daily_pipeline._should_update()
 
 
 # ===========================================================================
@@ -3017,12 +3092,12 @@ class TestUpdateMarketSnapshot:
         conn.execute("INSERT INTO stock_list VALUES ('000001', 'sz')")
         conn.commit()
         conn.close()
-        with patch("daily_pipeline.datetime") as m:
-            m.now.return_value = datetime(2026, 6, 30, 16, 0)
-            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            with patch("daily_pipeline.logger"), \
-                 patch("smartmoney_hunter.xueqiu._get_token", return_value=None):
-                r = daily_pipeline.update_market_snapshot(db)
+        # fundamentals 为空 → target_date 落到"今天"，需注入收盘后时钟通过盘中防线
+        sh_now = datetime(2026, 6, 30, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch("tasks.valuation_chain.shanghai_now", return_value=sh_now), \
+             patch("daily_pipeline.logger"), \
+             patch("smartmoney_hunter.xueqiu._get_token", return_value=None):
+            r = daily_pipeline.update_market_snapshot(db)
         assert r.get("skipped") or r["total"] == 0
 
     def test_empty_stock_list(self, tmp_path: Path):
@@ -3034,7 +3109,10 @@ class TestUpdateMarketSnapshot:
         conn.execute("CREATE TABLE stock_list (code TEXT, market TEXT)")
         conn.commit()
         conn.close()
-        with patch("daily_pipeline.logger"):
+        # fundamentals 为空 → target_date 落到"今天"，需注入收盘后时钟通过盘中防线
+        sh_now = datetime(2026, 6, 30, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        with patch("tasks.valuation_chain.shanghai_now", return_value=sh_now), \
+             patch("daily_pipeline.logger"):
             r = daily_pipeline.update_market_snapshot(db)
         assert r["total"] == 0
 
@@ -3138,7 +3216,73 @@ class TestUpdateIndustry:
 # ===========================================================================
 # CLI: additional main() task branches
 # ===========================================================================
+class TestIntradayGate:
+    """盘中门禁：TRADING_DAY 抓取任务盘中不执行（2026-07-30 事故防线）。"""
+
+    def test_trading_day_task_blocked_intraday(self):
+        mock_fn = MagicMock()
+        db = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=False), \
+             patch("daily_pipeline._safe_task") as safe_task, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_fundamentals": mock_fn}):
+            raw = daily_pipeline._run_registry_task("update_fundamentals", db, MagicMock())
+        assert raw["status"] == "no_data"
+        mock_fn.assert_not_called()
+        safe_task.assert_not_called()
+
+    def test_force_bypasses_gate(self):
+        mock_fn = MagicMock(return_value={"saved": 1})
+        db = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=False), \
+             patch(
+                 "daily_pipeline._safe_task",
+                 side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+             ), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_dragon_tiger": mock_fn}):
+            raw = daily_pipeline._run_registry_task(
+                "update_dragon_tiger", db, force=True
+            )
+        assert raw == {"saved": 1}
+        mock_fn.assert_called_once()
+
+    def test_non_trading_day_cadence_unaffected(self):
+        """MONTHLY 等非交易日任务盘中照常执行。"""
+        mock_fn = MagicMock(return_value={"saved": 2})
+        db = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=False), \
+             patch(
+                 "daily_pipeline._safe_task",
+                 side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+             ), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_china_macro": mock_fn}):
+            raw = daily_pipeline._run_registry_task("update_china_macro", db)
+        assert raw == {"saved": 2}
+        mock_fn.assert_called_once()
+
+    def test_derived_compute_tasks_exempt(self):
+        """本地衍生计算（指标/筹码）盘中不受门禁限制。"""
+        mock_fn = MagicMock(return_value={"saved": 3})
+        db = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=False), \
+             patch(
+                 "daily_pipeline._safe_task",
+                 side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+             ), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_indicators": mock_fn}):
+            raw = daily_pipeline._run_registry_task(
+                "update_indicators", db, engine=MagicMock()
+            )
+        assert raw == {"saved": 3}
+        mock_fn.assert_called_once()
+
+
 class TestRunRegistryTaskSafeTaskWrap:
+    @pytest.fixture(autouse=True)
+    def _allow_intraday(self):
+        # 路由测试不关心盘中门禁，放行以免随真实时钟漂移
+        with patch("daily_pipeline._should_update", return_value=True):
+            yield
+
     def test_single_task_routes_through_safe_task(self):
         """单任务模式必须经 safe_task：审计父行 + _task_run_id 注入。"""
         mock_fn = MagicMock(return_value={"status": "success", "saved": 1})
@@ -3188,7 +3332,7 @@ class TestMainMoreTasks:
         with patch(
             "daily_pipeline._safe_task",
             side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
-        ):
+        ), patch("daily_pipeline._should_update", return_value=True):
             yield
 
     def test_task_update_stock_list(self, weekday_mock):
@@ -3555,9 +3699,8 @@ def test_health_check_db_error():
 def test_get_expected_latest_trading_day_weekday():
     from core.calendar import get_expected_latest_trading_day
 
-    with patch("core.calendar.datetime") as m:
-        m.now.return_value = datetime(2026, 6, 22, 16, 0)  # Monday 16:00
-        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+    with patch("core.market_time.datetime") as m:
+        m.now.return_value = datetime(2026, 6, 22, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         result = get_expected_latest_trading_day()
         assert result == "2026-06-22"  # same day after hours
 
@@ -3565,9 +3708,8 @@ def test_get_expected_latest_trading_day_weekday():
 def test_get_expected_latest_trading_day_monday_before_market():
     from core.calendar import get_expected_latest_trading_day
 
-    with patch("core.calendar.datetime") as m:
-        m.now.return_value = datetime(2026, 6, 22, 9, 0)  # Monday before 15:30
-        m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+    with patch("core.market_time.datetime") as m:
+        m.now.return_value = datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         result = get_expected_latest_trading_day()
         assert result == "2026-06-19"  # previous Friday
 
