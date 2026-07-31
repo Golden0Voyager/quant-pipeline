@@ -179,6 +179,18 @@ def test_get_subprocess_env():
         "szse.cn", "jin10.com", "csindex.com.cn", "cninfo.com.cn",
     ):
         assert domain in no_proxy
+    # requests/urllib 优先读小写 no_proxy，须与大写完全一致，
+    # 否则操作者 shell 继承来的小写变量会遮蔽我们的白名单
+    assert env["no_proxy"] == env["NO_PROXY"]
+    # NO_PROXY 按后缀匹配、不支持 glob，条目必须与 core/config.py 完全一致（集合相等）
+    expected_domains = {
+        "localhost", "127.0.0.1",
+        "eastmoney.com",
+        "sina.com", "sina.cn", "sina.com.cn",
+        "sse.com.cn", "szse.cn",
+        "jin10.com", "csindex.com.cn", "cninfo.com.cn",
+    }
+    assert set(no_proxy.split(",")) == expected_domains
     assert env.get("DISABLE_YFINANCE_FALLBACK") == "1"
 
 
@@ -1213,6 +1225,36 @@ def test_stock_pledge_reports_weekly_not_stale():
 
     status = DataCompletenessWidget._get_status_for_table(
         "stock_pledge", "2026-07-24", "2026-07-30", None
+    )
+    assert status == "按周更新"
+
+
+def test_healthy_statuses_include_weekly():
+    """健康度统计必须含“按周更新”，否则新鲜的质押数据会从健康计数中静默流失。"""
+    from tui import _HEALTHY_STATUSES
+
+    assert "按周更新" in _HEALTHY_STATUSES
+    for status in ("最新", "T+1", "按月更新", "按季更新"):
+        assert status in _HEALTHY_STATUSES
+
+
+def test_stock_pledge_weekly_goes_stale_after_10_days():
+    """超过 10 个自然日未更新的质押数据应落入 _date_status 判定，不再显示“按周更新”。"""
+    from tui import DataCompletenessWidget, _date_status
+
+    status = DataCompletenessWidget._get_status_for_table(
+        "stock_pledge", "2026-07-10", "2026-07-30", None
+    )
+    assert status != "按周更新"
+    assert status == _date_status("2026-07-10", "2026-07-30")
+
+
+def test_stock_pledge_weekly_malformed_date_keeps_badge():
+    """日期解析失败时保守地保留“按周更新”标记。"""
+    from tui import DataCompletenessWidget
+
+    status = DataCompletenessWidget._get_status_for_table(
+        "stock_pledge", "not-a-date", "2026-07-30", None
     )
     assert status == "按周更新"
 
