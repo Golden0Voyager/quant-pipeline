@@ -91,9 +91,19 @@ def update_shareholder_count(db: DatabaseInterface, symbols: list[str] | None = 
 
 
 def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
-    """批量获取全市场（或指定股票）季度财务数据并保存。"""
-    if symbols:
-        logger.info(f"  --symbols 过滤：{len(symbols)} 只")
+    """批量获取全市场（或指定股票）季度财务数据并保存。
+
+    日常全市场模式委托给按报告期批量抓取的 update_financial_history
+    （约 5 次请求/报告期，替代逐股 ~5500 次请求、2.6 小时的旧路径）；
+    逐股路径仅保留给 --symbols 定向修复。
+    """
+    if symbols is None:
+        logger.info("📋 季度财务：全市场模式委托按报告期批量抓取 (update_financial_history)")
+        from tasks.financial_history import update_financial_history
+
+        return update_financial_history(db)
+
+    logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
     logger.info("📋 任务: 批量获取季度财务数据")
     logger.info("=" * 60)
