@@ -10,13 +10,19 @@ import json  # noqa: F401
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pandas as pd  # noqa: F401
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
+from core.market_time import (
+    PHASE_POST_CLOSE,
+    has_post_close_completion,
+    market_phase,
+    shanghai_now,
+)
 from core.source_client import get_default_client
 from core.utils import infer_market, should_skip_beijing  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
@@ -45,25 +51,34 @@ def update_fundamentals(
     logger.info("📊 任务: 批量获取估值数据")
     logger.info("=" * 60)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    # 尝试今天，如果没数据回退到最近交易日
-    trade_dates = [today]
+    sh_now = shanghai_now()
+    today = sh_now.strftime("%Y-%m-%d")
+    post_close = market_phase(sh_now) == PHASE_POST_CLOSE
+    # 收盘定型后才请求今天：盘中东财返回的是实时估值快照，
+    # 落库后会被"当日已存在"守卫冻结（2026-07-30 事故）
+    trade_dates = [today] if post_close else []
     for offset in range(1, 5):
-        d = datetime.now() - timedelta(days=offset)
+        d = sh_now - timedelta(days=offset)
         if d.weekday() < 5:
             trade_dates.append(d.strftime("%Y-%m-%d"))
+    if not post_close:
+        logger.info("  非收盘定型时段（上海 16:00 前），仅回补历史交易日估值")
 
     existing_count = db.count_fundamentals_for_date(today)
     if not isinstance(existing_count, int):
         logger.warning("count_fundamentals_for_date 返回非 int (%s)，视为 0", type(existing_count).__name__)
         existing_count = 0
-    if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT:
-        logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据")
+    if existing_count >= MIN_FUNDAMENTALS_STOCK_COUNT and has_post_close_completion(
+        str(db.db_path), "update_fundamentals", today
+    ):
+        # 行数达标 + 收盘后曾成功运行过，才视为当日完成；
+        # 只有盘中写入的行数达标不算数，重抓覆盖为收盘终值
+        logger.info(f"  跳过：today ({today}) 已有 {existing_count} 只估值数据（收盘后已完成）")
         return {
             "saved": 0,
             "total": 0,
             "skipped": True,
-            "reason": f"today ({today}) already has {existing_count} fundamentals rows",
+            "reason": f"today ({today}) already has {existing_count} fundamentals rows (post-close run recorded)",
             "data_date": today,
         }
 
@@ -272,7 +287,8 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     from smartmoney_hunter import xueqiu as xq
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    sh_now = shanghai_now()
+    today = sh_now.strftime("%Y-%m-%d")
 
     # 1. 查找 fundamentals 表中最新的交易日，确保在正确的日期上更新股息率
     conn = sqlite3.connect(str(db.db_path))
@@ -281,6 +297,16 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     row = cursor.fetchone()
     conn.close()
     target_date = row[0] if (row and row[0]) else today
+
+    # 盘中防线：target 为今日且未收盘定型时，雪球实时价算出的股息率
+    # 是盘中快照，落库后会被下方守卫冻结——直接不补充（2026-07-30 事故）
+    if target_date == today and market_phase(sh_now) != PHASE_POST_CLOSE:
+        logger.info("  非收盘定型时段（上海 16:00 前），跳过今日 dividend_yield 补充")
+        return {
+            "status": "no_data",
+            "saved": 0,
+            "reason": "intraday: dividend_yield backfill deferred until post-close",
+        }
 
     # 增量检测：以数据实态为准 —— target_date 当天 dividend_yield 实际非空行数
     # 达到阈值才跳过。仅凭 task_runs 判断会在数据事后被覆盖为 NULL 时永久漏补
@@ -302,12 +328,20 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
     finally:
         conn.close()
     last_run = db.get_last_task_run("update_market_snapshot")
-    if last_run == target_date and filled >= min_filled:
+    # target 为今日时，还要求收盘后曾成功运行过——盘中补充的实时股息率不算完成
+    post_close_done = target_date != today or has_post_close_completion(
+        str(db.db_path), "update_market_snapshot", target_date
+    )
+    if last_run == target_date and filled >= min_filled and post_close_done:
         logger.info(
             f"  跳过：target_date={target_date} 的 dividend_yield 已补充过 ({filled} 行非空)"
         )
         return {"status": "success", "saved": 0, "total": 0, "updated": 0, "skipped": True}
-    if last_run == target_date:
+    if last_run == target_date and filled >= min_filled:
+        logger.info(
+            f"  target_date={target_date} 行数达标但无收盘后完成记录，重新补充为收盘终值"
+        )
+    elif last_run == target_date:
         logger.warning(
             f"  ⚠️ target_date={target_date} 曾标记完成，但 dividend_yield 非空仅 {filled} 行"
             f" (< {min_filled})，重新补充"
