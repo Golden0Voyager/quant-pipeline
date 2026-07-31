@@ -154,6 +154,226 @@ class TestUpdateFundamentals:
 
 
 # ===========================================================================
+# update_fundamentals — 雪球兜底（东财不可达时）
+# ===========================================================================
+
+def _em_empty_client() -> MagicMock:
+    """构造东财 datacenter 全日期返回空数据的 get_default_client mock。"""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"success": True, "result": {"data": [], "count": 0}}
+    mock_gc = MagicMock()
+    mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
+    return mock_gc
+
+
+class TestUpdateFundamentalsXueqiuFallback:
+    """EM 零记录时的雪球兜底路径。"""
+
+    def _db(self) -> MagicMock:
+        db = MagicMock()
+        db.count_fundamentals_for_date.return_value = 0
+        return db
+
+    def test_fallback_saves_quote_fields(self):
+        """EM 空 + 雪球有报价 → 落库 pe_ttm/pb/market_cap/dividend_yield，其余 None。"""
+        db = self._db()
+        db.save_fundamentals_batch.return_value = 2
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001", "600000"]})
+        loader = MagicMock()
+
+        received_codes: list[list[str]] = []
+
+        def fake_fetch(codes, **kwargs):
+            received_codes.append(list(codes))
+            # 实测口径（2026-07-30）：market_cap 单位元、dividend_yield 百分比原值
+            return [
+                {"code": "000001", "pe_ttm": 5.232, "pb": 0.486,
+                 "market_cap": 225302710279.0, "dividend_yield": 5.134,
+                 "current": 11.5},
+                {"code": "600000", "pe_ttm": 8.0, "pb": 0.8,
+                 "market_cap": 5e9, "dividend_yield": None},
+            ]
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes", side_effect=fake_fetch),
+            patch("tasks.valuation_chain.get_expected_latest_trading_day",
+                  return_value="2026-07-30"),
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r["saved"] == 2
+        assert r["total"] == 2
+        assert r["source"] == "xueqiu"
+        assert received_codes == [["000001", "600000"]]
+
+        records = db.save_fundamentals_batch.call_args[0][0]
+        assert len(records) == 2
+        first = records[0]
+        assert first["ts_code"] == "000001"
+        # 雪球报价为实时数据，统一 stamp 为期望最新交易日（周六运行不能落周六）
+        assert first["trade_date"] == "2026-07-30"
+        assert first["pe_ttm"] == 5.232
+        assert first["pb"] == 0.486
+        assert first["market_cap"] == 225302710279.0
+        # 与 update_market_snapshot 口径一致：百分比原值直接落库
+        assert first["dividend_yield"] == 5.134
+        # 雪球不提供的东财独有字段 → None
+        assert first["ps_ttm"] is None
+        assert first["peg"] is None
+        assert first["roe"] is None
+        assert set(first.keys()) == {
+            "ts_code", "trade_date", "pe_ttm", "pb", "ps_ttm", "dividend_yield",
+            "roe", "roa", "gross_margin", "net_margin", "debt_ratio",
+            "revenue_growth", "profit_growth", "eps_growth", "peg", "market_cap",
+        }
+        db.record_task_run.assert_called_once_with("update_fundamentals", "2026-07-30")
+
+    def test_fallback_failure_returns_zero_without_raise(self):
+        """EM 空 + 雪球无 Token（RuntimeError）→ saved 0，不上抛。"""
+        db = self._db()
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001"]})
+        loader = MagicMock()
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes",
+                  side_effect=RuntimeError("XUEQIU_TOKEN is not configured")),
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r == {"saved": 0, "total": 0}
+        db.save_fundamentals_batch.assert_not_called()
+        db.record_task_run.assert_not_called()
+
+    def test_fallback_empty_quotes_returns_zero(self):
+        """EM 空 + 雪球返回空列表 → saved 0，无 source 键。"""
+        db = self._db()
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001"]})
+        loader = MagicMock()
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes", return_value=[]),
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r == {"saved": 0, "total": 0}
+        db.save_fundamentals_batch.assert_not_called()
+
+    def test_fallback_symbols_restricts_universe(self):
+        """symbols 给定时兜底 universe 即 symbols，不读 stock_list。"""
+        db = self._db()
+        db.save_fundamentals_batch.return_value = 1
+        loader = MagicMock()
+
+        received_codes: list[list[str]] = []
+
+        def fake_fetch(codes, **kwargs):
+            received_codes.append(list(codes))
+            return [{"code": "000001", "pe_ttm": 5.0, "pb": 0.5,
+                     "market_cap": 1e9, "dividend_yield": 2.0}]
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes", side_effect=fake_fetch),
+            patch("tasks.valuation_chain.get_expected_latest_trading_day",
+                  return_value="2026-07-30"),
+        ):
+            r = update_fundamentals(db, loader, symbols=["000001"])
+
+        assert received_codes == [["000001"]]
+        db.get_stock_list.assert_not_called()
+        assert r["saved"] == 1
+        assert r["source"] == "xueqiu"
+
+    def test_fallback_empty_stock_list_returns_zero(self):
+        """stock_list 为空 → 兜底放弃，saved 0，不调雪球。"""
+        db = self._db()
+        db.get_stock_list.return_value = pd.DataFrame()
+        loader = MagicMock()
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes") as mock_fetch,
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r == {"saved": 0, "total": 0}
+        mock_fetch.assert_not_called()
+
+    def test_em_success_path_never_calls_xueqiu(self):
+        """回归：EM 有数据时行为不变，不触发雪球兜底。"""
+        db = self._db()
+        db.save_fundamentals_batch.return_value = 1
+        loader = MagicMock()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "success": True,
+            "result": {
+                "data": [
+                    {"SECURITY_CODE": "000001", "TRADE_DATE": "2026-07-30",
+                     "PE_TTM": 10.0, "PB_MRQ": 1.5, "PS_TTM": 2.0,
+                     "PEG_CAR": 1.2, "TOTAL_MARKET_CAP": 1e9},
+                ],
+                "count": 1,
+            },
+        }
+        mock_gc = MagicMock()
+        mock_gc.return_value.get_session.return_value.get.return_value = mock_resp
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=mock_gc),
+            patch("tasks.valuation_chain.fetch_market_snapshot_quotes") as mock_fetch,
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert r["saved"] == 1
+        assert "source" not in r
+        mock_fetch.assert_not_called()
+
+    def test_fallback_filters_beijing_via_helper(self):
+        """universe 含北交所代码 → 真实 helper 过滤，雪球请求不含 bj 代码。"""
+        db = self._db()
+        db.save_fundamentals_batch.return_value = 1
+        db.get_stock_list.return_value = pd.DataFrame({"code": ["600000", "830001"]})
+        loader = MagicMock()
+
+        seen_chunks: list[list[str]] = []
+
+        def fake_batch(chunk):
+            seen_chunks.append(list(chunk))
+            return [{"code": code, "pe_ttm": 8.0, "pb": 0.8,
+                     "market_cap": 5e9, "dividend_yield": 3.0} for code in chunk]
+
+        with (
+            patch("tasks.valuation_chain.logger"),
+            patch("tasks.valuation_chain.get_default_client", new=_em_empty_client()),
+            patch("smartmoney_hunter.xueqiu._get_token", return_value="tok"),
+            patch("smartmoney_hunter.xueqiu.get_batch_quotes", side_effect=fake_batch),
+            patch("tasks.valuation_chain.is_beijing_stock", lambda c: c.startswith(("4", "8"))),
+            patch("tasks.valuation_chain.time.sleep"),
+            patch("tasks.valuation_chain.get_expected_latest_trading_day",
+                  return_value="2026-07-30"),
+        ):
+            r = update_fundamentals(db, loader)
+
+        assert seen_chunks == [["600000"]]
+        records = db.save_fundamentals_batch.call_args[0][0]
+        assert [rec["ts_code"] for rec in records] == ["600000"]
+        assert r["source"] == "xueqiu"
+
+
+# ===========================================================================
 # update_market_snapshot
 # ===========================================================================
 
