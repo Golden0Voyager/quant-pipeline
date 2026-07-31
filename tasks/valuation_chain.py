@@ -104,8 +104,8 @@ def update_fundamentals(
                 break
 
     if not all_records:
-        logger.warning("⚠️  未获取到估值数据")
-        return {"saved": 0, "total": 0}
+        logger.warning("⚠️  未获取到估值数据（东财不可达），尝试雪球兜底")
+        return _fundamentals_xueqiu_fallback(db, symbols)
 
     batch_records = []
     for rec in all_records:
@@ -152,6 +152,80 @@ def update_fundamentals(
         db.record_task_run("update_fundamentals", date_used)
     logger.info(f"✅ 估值数据保存完成: {saved}/{len(all_records)} 只 (日期: {date_used})")
     return {"saved": saved, "total": len(all_records)}
+
+
+def _fundamentals_xueqiu_fallback(db: DatabaseInterface, symbols: list[str] | None) -> dict:
+    """东财估值源不可达时的雪球兜底：用批量行情中的估值字段落库。
+
+    - universe：symbols 给定时用 symbols，否则读 stock_list 全市场
+      （北交所由 fetch_market_snapshot_quotes 过滤，雪球不支持）。
+    - 字段口径与东财一致，零换算：pe_ttm/pb 同量纲，market_cap 单位元；
+      dividend_yield 为百分比原值直接落库（与 update_market_snapshot 的
+      UPDATE 写库口径一致）。雪球不提供 ps_ttm/peg/roe 等 → 置 None。
+    - trade_date：雪球报价为实时数据、不带交易日，统一 stamp 为
+      get_expected_latest_trading_day()（与 update_sector_industry 同约定；
+      周六运行不能落周六分区）。
+    - 兜底自身失败（无 Token / 全批失败 / 零报价）保持旧行为：
+      warn + {"saved": 0, "total": 0}，不向任务外抛异常。
+    """
+    try:
+        if symbols:
+            universe = [str(c).strip() for c in symbols if str(c).strip()]
+        else:
+            stocks = db.get_stock_list()
+            if not isinstance(stocks, pd.DataFrame) or stocks.empty:
+                logger.warning("⚠️  雪球兜底跳过：股票列表为空")
+                return {"saved": 0, "total": 0}
+            universe = [str(c).strip() for c in stocks["code"].tolist() if str(c).strip()]
+        if not universe:
+            logger.warning("⚠️  雪球兜底跳过：universe 为空")
+            return {"saved": 0, "total": 0}
+        quotes = fetch_market_snapshot_quotes(universe)
+    except Exception as e:
+        logger.warning(f"⚠️  雪球兜底失败: {e}")
+        return {"saved": 0, "total": 0}
+
+    date_used = get_expected_latest_trading_day()
+    batch_records = []
+    for q in quotes:
+        code = str(q.get("code") or "").strip()
+        if not code:
+            continue
+        batch_records.append({
+            "ts_code": code,
+            "trade_date": date_used,
+            "pe_ttm": q.get("pe_ttm"),
+            "pb": q.get("pb"),
+            "ps_ttm": None,
+            "dividend_yield": q.get("dividend_yield"),
+            "roe": None,
+            "roa": None,
+            "gross_margin": None,
+            "net_margin": None,
+            "debt_ratio": None,
+            "revenue_growth": None,
+            "profit_growth": None,
+            "eps_growth": None,
+            "peg": None,
+            "market_cap": q.get("market_cap"),
+        })
+
+    if not batch_records:
+        logger.warning("⚠️  雪球兜底未获取到行情")
+        return {"saved": 0, "total": 0}
+
+    try:
+        saved = db.save_fundamentals_batch(batch_records)
+    except Exception as e:
+        logger.error(f"❌ 雪球兜底估值批量保存失败: {e}")
+        saved = 0
+    if saved > 0:
+        db.record_task_run("update_fundamentals", date_used)
+    logger.info(
+        f"✅ 雪球兜底估值保存完成: {saved}/{len(batch_records)} 只"
+        f" (日期: {date_used}, 东财不可用 → 使用雪球行情)"
+    )
+    return {"saved": saved, "total": len(batch_records), "source": "xueqiu"}
 
 
 # ===========================================================================
