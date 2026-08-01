@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import threading
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -98,6 +99,97 @@ def _mock_resp(
     resp.encoding = "gb2312"
     resp.text = text
     return resp
+
+
+class _SharedSession:
+    """模拟 SourceClient 缓存的共享 session：close 后不可再用。
+
+    SourceClient.get_session() 按 source 名缓存复用同一个 session，
+    与真实 curl_cffi Session 行为一致：close() 之后再次 get() 抛
+    SessionClosed。用于回归验证 _fetch_industry 绝不关闭共享 session。
+    """
+
+    def __init__(self, resp_factory):
+        self._resp_factory = resp_factory
+        self._closed = False
+        self.close_calls = 0
+        self._lock = threading.Lock()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def get(self, *args, **kwargs):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Session is closed, cannot send request.")
+            return self._resp_factory()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self.close_calls += 1
+
+
+class TestSharedSessionNotClosed:
+    """回归：update_industry 绝不能 close SourceClient 的共享 session。
+
+    曾于 7-24 提交 3a577e7 引入：把每次新建的 ``_req.Session()`` 换成
+    ``get_default_client().get_session()``（缓存复用）却仍保留
+    ``finally: session.close()``，导致第一个线程关闭共享 session 后，
+    其余线程全部抛 SessionClosed → 119 只股票只成功 3 只。
+    """
+
+    def _make_db(self, tmp_path, n_stocks: int) -> MagicMock:
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        stocks = [
+            (f"{i:06d}", "sz", None) for i in range(1, n_stocks + 1)
+        ]
+        _create_db(str(db_path), stocks)
+        return db
+
+    def test_session_close_never_called(self, tmp_path):
+        """多股票 F10 全成功 → 共享 session.close() 一次都不能被调用。"""
+        db = self._make_db(tmp_path, 5)
+        f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
+        session = _SharedSession(lambda: f10_ok)
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_gc.return_value.get_session.return_value = session
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 5
+        assert result["failed"] == 0
+        assert session.close_calls == 0, (
+            "共享 session 不应被 update_industry 关闭；"
+            "close 一次即毒化后续所有请求（SessionClosed）"
+        )
+
+    def test_session_close_poisons_followup_requests(self, tmp_path):
+        """真实 curl_cffi 行为：session 一旦 close，后续 get() 抛 SessionClosed。
+
+        修复前：第一只股票成功 → finally close 共享 session → 其余股票
+        get() 抛 SessionClosed → 几乎全部失败。修复后 close 不再被调用，
+        全部股票成功。
+        """
+        db = self._make_db(tmp_path, 8)
+        f10_ok = _mock_resp(200, {"jbzl": {"sshy": "银行"}})
+        session = _SharedSession(lambda: f10_ok)
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_gc.return_value.get_session.return_value = session
+            result = financials.update_industry(db)
+
+        assert session.close_calls == 0
+        assert result["saved"] == 8
+        assert result["failed"] == 0
+        assert not session.closed
 
 
 # ===========================================================================
@@ -445,6 +537,7 @@ class TestAllStrategiesFail:
 
         f10_err = _mock_resp(500)
         sina_err = _mock_resp(404)
+        push2_err = _mock_resp(404)
 
         with patch("core.lock.task_lock", _task_lock_yield_true), \
              patch.object(financials, "time"), \
@@ -452,7 +545,7 @@ class TestAllStrategiesFail:
              patch.object(financials, "get_default_client") as mock_gc:
             mock_session = MagicMock()
             mock_gc.return_value.get_session.return_value = mock_session
-            mock_session.get.side_effect = [f10_err] * 3 + [sina_err]
+            mock_session.get.side_effect = [f10_err] * 3 + [sina_err, push2_err]
 
             result = financials.update_industry(db)
 
@@ -460,6 +553,134 @@ class TestAllStrategiesFail:
         assert result["total"] == 1
         assert result["failed"] == 1
         assert result["coverage_pct"] == 0.0
+
+
+# ===========================================================================
+# 6b. 策略 D — 东财 push2 快照接口（北交所/次新股）
+# ===========================================================================
+
+
+class TestStrategyDPush2:
+    """Eastmoney push2 quote API (f127=industry) covers BJ/star/sz markets."""
+
+    def test_push2_succeeds_after_all_others_fail(self, tmp_path):
+        """F10 500, AkShare=None, Sina 404 → push2 f127 → saved=1."""
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        _create_db(str(db_path), [("920002", "bj", None)])
+
+        f10_err = _mock_resp(500)
+        sina_err = _mock_resp(404)
+        push2_ok = _mock_resp(200, {"data": {"f57": "920002", "f127": "通用设备"}})
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "ak", None), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_session = MagicMock()
+            mock_gc.return_value.get_session.return_value = mock_session
+            mock_session.get.side_effect = [f10_err] * 3 + [sina_err, push2_ok]
+
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 1
+        assert result["failed"] == 0
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT industry FROM stock_list WHERE code='920002'"
+        ).fetchone()
+        assert row[0] == "通用设备"
+        conn.close()
+
+    def test_push2_url_uses_market_prefix(self, tmp_path):
+        """BJ market → secid '0.<code>'; SH/star market → '1.<code>'."""
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        _create_db(str(db_path), [("688712", "star", None)])
+
+        f10_err = _mock_resp(500)
+        sina_err = _mock_resp(404)
+        push2_ok = _mock_resp(200, {"data": {"f57": "688712", "f127": "医疗器械"}})
+
+        call_urls: list[str] = []
+
+        def _side_effect(url: str, **kwargs):
+            call_urls.append(url)
+            if "push2.eastmoney.com" in url:
+                return push2_ok
+            if "money.finance.sina.com.cn" in url:
+                return sina_err
+            return f10_err
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "ak", None), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_session = MagicMock()
+            mock_gc.return_value.get_session.return_value = mock_session
+            mock_session.get.side_effect = _side_effect
+
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 1
+        push2_urls = [u for u in call_urls if "push2.eastmoney.com" in u]
+        assert len(push2_urls) == 1
+        assert "secid=1.688712" in push2_urls[0]
+        assert "fields=f57,f58,f127" in push2_urls[0]
+
+    def test_push2_falls_back_to_delay_host_on_502(self, tmp_path):
+        """标准 push2 主机 502（服务降级）→ 自动回退 push2delay 主机 → saved=1。
+
+        2026-08-01 实测：push2.eastmoney.com 全端点 502，push2delay 正常，
+        无回退则策略 D 整体失败（50 只全挂）。
+        """
+        db = MagicMock()
+        db_path = tmp_path / "test.db"
+        db.db_path = str(db_path)
+        _create_db(str(db_path), [("920002", "bj", None)])
+
+        f10_err = _mock_resp(500)
+        sina_err = _mock_resp(404)
+        delay_ok = _mock_resp(200, {"data": {"f57": "920002", "f127": "通用设备"}})
+
+        call_urls: list[str] = []
+
+        def _side_effect(url: str, **kwargs):
+            call_urls.append(url)
+            if "push2delay.eastmoney.com" in url:
+                return delay_ok
+            if "push2.eastmoney.com" in url:
+                return _mock_resp(502)
+            if "money.finance.sina.com.cn" in url:
+                return sina_err
+            return f10_err
+
+        with patch("core.lock.task_lock", _task_lock_yield_true), \
+             patch.object(financials, "time"), \
+             patch.object(financials, "ak", None), \
+             patch.object(financials, "get_default_client") as mock_gc:
+            mock_session = MagicMock()
+            mock_gc.return_value.get_session.return_value = mock_session
+            mock_session.get.side_effect = _side_effect
+
+            result = financials.update_industry(db)
+
+        assert result["saved"] == 1
+        assert result["failed"] == 0
+
+        delay_urls = [u for u in call_urls if "push2delay.eastmoney.com" in u]
+        assert len(delay_urls) == 1
+        assert "secid=0.920002" in delay_urls[0]
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT industry FROM stock_list WHERE code='920002'"
+        ).fetchone()
+        assert row[0] == "通用设备"
+        conn.close()
 
 
 # ===========================================================================
