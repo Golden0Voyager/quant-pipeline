@@ -46,11 +46,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.lock import ProcessLock
-
+# 路径必须在导入本仓库模块之前设置：脚本直跑时 sys.path 只含 scripts/，
+# import core 需要仓库根目录（2026-08-01 事故：TUI F 键秒退 ModuleNotFoundError）
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.expanduser("~/Code"))
 
 import pandas as pd
+
+from core.lock import ProcessLock  # noqa: E402
 
 try:
     import akshare as ak
