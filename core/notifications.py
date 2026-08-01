@@ -90,7 +90,8 @@ def notify_all(level: str, title: str, message: str = "") -> None:
     """
     level_order = {"error": 0, "warning": 1, "info": 2}
     config_level = NOTIFICATION_LEVEL
-    if level_order.get(level, 2) < level_order.get(config_level, 2):
+    # level_order 越小越严重：仅当通知级别 >= 配置级别（数值 <=）时才发送
+    if level_order.get(level, 2) > level_order.get(config_level, 2):
         return  # 低于配置级别，不发送
 
     for channel in _get_channels():
