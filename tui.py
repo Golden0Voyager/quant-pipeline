@@ -1439,6 +1439,7 @@ class TaskGroupWidget(Static):
         with Grid(id="group-buttons"):
             for key, label in self.GROUP_LABELS.items():
                 yield Button(label, id=f"group-{key}", variant="primary")
+            yield Button("⚡ 补齐缺失", id="group-catchup", variant="warning")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -1446,7 +1447,12 @@ class TaskGroupWidget(Static):
             return
         group_key = button_id.replace("group-", "")
         from typing import cast
-        await cast(PipelineApp, self.app).action_run_task_group(group_key)
+
+        app = cast(PipelineApp, self.app)
+        if group_key == "catchup":
+            await app.action_run_catch_up()
+            return
+        await app.action_run_task_group(group_key)
 
 
 class DataCompletenessWidget(VerticalScroll):
@@ -1841,6 +1847,83 @@ class DataCompletenessWidget(VerticalScroll):
         filled = max(0, min(length, round(length * pct_int / 100)))
         bar = "█" * filled + "░" * (length - filled)
         return f"[bold #22c55e]{bar}[/bold #22c55e]", pct_int
+
+
+# 补齐缺失按钮的任务执行顺序：与 run_all 的"依赖先行、长尾垫底"一致。
+# 一张表可能有多个 owner 任务（如 chip_distribution_em 的日常/全市场版），
+# 按此列表先到先得，确保选到日常任务而非 ON_DEMAND 任务。
+_CATCH_UP_TASK_ORDER: tuple[str, ...] = (
+    "update_bars",
+    "update_indicators",
+    "update_chip_distribution",
+    "update_fundamentals",
+    "update_market_snapshot",
+    "update_historical_valuation",
+    "update_sector_fund_flow",
+    "update_sector_industry",
+    "update_fund_flow",
+    "update_margin_trading",
+    "update_dragon_tiger",
+    "update_block_trade",
+    "update_limit_up_down",
+    "update_index_daily",
+    "update_market_valuation",
+    "update_concept_board",
+    "update_north_flow",
+    "update_south_flow",
+    "update_ah_premium",
+    "update_etf_daily",
+    "update_cb_quotation",
+    "update_cb_redeem",
+    "update_cb_index",
+    "update_sector_derivatives",
+    "update_option_sentiment",
+    "update_stock_repurchase",
+    "update_institution_survey",
+    "update_stock_pledge",
+    "update_restricted_share",
+    "update_earnings_forecast",
+    "update_dividend_summary",
+    "update_gold_price",
+    "update_crude_oil",
+    "update_usd",
+    "update_global_index",
+    "update_us_treasury",
+    "update_futures",
+    "update_china_macro",
+    "update_money_market",
+    "update_chip_distribution_em",
+)
+
+
+def compute_catch_up_tasks(
+    latest_dates: dict[str, str | None], expected_date: str
+) -> list[str]:
+    """根据完整度面板的新鲜度判定，计算需要补齐的任务清单（按执行顺序）。
+
+    只补面板会标「略滞后/滞后」的表；T+1、周/月/季更、无数据（如北向
+    资金停止披露）沿用面板既有语义，不视为缺失。
+    """
+    stale_tables = {
+        tbl
+        for tbl in TABLE_DATE_COLUMNS
+        if DataCompletenessWidget._get_status_for_table(
+            tbl, latest_dates.get(tbl), expected_date, None
+        )
+        in ("略滞后", "滞后")
+    }
+    if not stale_tables:
+        return []
+
+    tasks: list[str] = []
+    claimed: set[str] = set()
+    for task in _CATCH_UP_TASK_ORDER:
+        tables = DataCompletenessWidget.TASK_TO_TABLE.get(task, [])
+        hit = [t for t in tables if t in stale_tables and t not in claimed]
+        if hit:
+            tasks.append(task)
+            claimed.update(hit)
+    return tasks
 
 
 class ProgressWidget(Static):
@@ -2513,6 +2596,48 @@ class PipelineApp(App):
             timeout=4.0,
         )
         self._create_background_task(self._run_task_group(label, tasks))
+
+    async def action_run_catch_up(self) -> None:
+        """补齐缺失：检测截至最近交易日的滞后表，只补缺的任务。
+
+        目标日 = get_expected_latest_trading_day()（交易日收盘定型后 → 今天，
+        否则 → 上一交易日）。分组队列以 --force 运行会绕过盘中门禁，
+        因此交易日的盘中/结算窗口直接拒绝，避免把实时快照写成终值。
+        """
+        from core.calendar import is_trading_day as _calendar_is_trading_day
+        from core.market_time import (
+            PHASE_POST_CLOSE,
+            PHASE_PRE_OPEN,
+            market_phase,
+            shanghai_now,
+        )
+
+        sh_now = shanghai_now()
+        if _calendar_is_trading_day(sh_now.date()) and market_phase(sh_now) not in (
+            PHASE_PRE_OPEN,
+            PHASE_POST_CLOSE,
+        ):
+            self.notify(
+                "盘中/结算窗口不可补数（上海 16:00 后数据定型再试）",
+                severity="warning",
+                timeout=5.0,
+            )
+            return
+
+        expected = get_expected_latest_trading_day()
+        latest_dates = await asyncio.to_thread(get_latest_dates, str(DEFAULT_DB_PATH))
+        tasks = compute_catch_up_tasks(latest_dates, expected)
+        if not tasks:
+            self.notify(f"✅ 无缺失：全部数据已更新到 {expected}", timeout=4.0)
+            return
+
+        self.notify(
+            f"检测到 {len(tasks)} 项滞后于 {expected}，按依赖顺序补齐: "
+            + "、".join(t.removeprefix("update_") for t in tasks[:6])
+            + ("…" if len(tasks) > 6 else ""),
+            timeout=6.0,
+        )
+        self._create_background_task(self._run_task_group("补齐缺失", tasks))
 
     async def _run_task_group(self, label: str, tasks: list[str]) -> None:
         """在后台协程中依次执行分组任务。"""
