@@ -157,7 +157,7 @@ def find_running_pipeline_processes(
                 ["ps", "-p", str(pid), "-o", "pid=,etime=,command="],
                 capture_output=True, text=True, timeout=2.0,
             )
-            if "daily_pipeline.py" in res.stdout:
+            if "daily_pipeline.py" in res.stdout and "python" in res.stdout.lower():
                 parts = res.stdout.strip().split(None, 2)
                 processes.append({
                     "pid": int(parts[0]),
@@ -197,10 +197,15 @@ def find_running_pipeline_processes(
             )
             if res2.stdout.strip():
                 parts = res2.stdout.strip().split(None, 2)
+                command = parts[2] if len(parts) > 2 else ""
+                # pgrep -f 匹配整条命令行：vim/tail/grep 等打开过该文件的进程
+                # 也会命中，只认 python 解释器启动的管道进程，避免误报/误杀
+                if "daily_pipeline.py" not in command or "python" not in command.lower():
+                    continue
                 processes.append({
                     "pid": int(parts[0]),
                     "elapsed": parts[1] if len(parts) > 1 else "unknown",
-                    "command": parts[2] if len(parts) > 2 else "daily_pipeline.py",
+                    "command": command,
                 })
     except (ValueError, OSError, subprocess.SubprocessError):
         pass
@@ -735,7 +740,9 @@ def get_subprocess_env() -> dict:
     env["NO_PROXY"] = no_proxy
     env["no_proxy"] = no_proxy
     env["DISABLE_YFINANCE_FALLBACK"] = "1"
-    env["QUANT_DB_PATH"] = str(DEFAULT_DB_PATH)
+    # 操作者显式 export 的 QUANT_DB_PATH（如指向测试库）必须保留，
+    # 只在未设置时补默认值，避免静默写回生产库
+    env.setdefault("QUANT_DB_PATH", str(DEFAULT_DB_PATH))
     return env
 
 async def get_launchd_status(env: dict | None = None) -> bool:
@@ -2691,11 +2698,12 @@ class PipelineApp(App):
 
         themes = sorted(BUILTIN_THEMES)
         idx = themes.index(self._theme_name) if self._theme_name in themes else -1
-        new_theme = themes[(idx + 1) % len(themes)]
+        new_idx = (idx + 1) % len(themes)
+        new_theme = themes[new_idx]
         self._theme_name = new_theme
         self.theme = new_theme
         save_theme(new_theme)
-        self.notify(f"主题已切换: {new_theme} ({idx + 2}/{len(themes)})", timeout=3.0)
+        self.notify(f"主题已切换: {new_theme} ({new_idx + 1}/{len(themes)})", timeout=3.0)
 
     async def action_show_help(self) -> None:
         """显示快捷键帮助弹窗。"""

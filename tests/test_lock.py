@@ -84,6 +84,39 @@ def test_acquire_stale_lock_auto_cleanup():
         pidfile.unlink.assert_called_with(missing_ok=True)
 
 
+def test_acquire_stale_lock_recovers_without_exit():
+    """残留锁清理并重新加锁成功后不得 sys.exit：进程应继续启动。"""
+    _reset()
+    pidfile = _make_pidfile()
+    stale = MagicMock(spec=io.TextIOWrapper)
+    stale.read.return_value = "999999"
+    fresh = MagicMock(spec=io.TextIOWrapper)
+
+    with patch.object(lock_mod, "_PIDFILE", pidfile), patch(
+        "core.lock.open", side_effect=[stale, fresh]
+    ), patch("core.lock.fcntl") as mock_fcntl, patch(
+        "core.lock.os"
+    ) as mock_os, patch("core.lock.atexit"), patch("core.lock.signal"), patch(
+        "core.lock.sys"
+    ) as mock_sys:
+        calls = {"n": 0}
+
+        def _flock_effect(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("locked")
+            return None
+
+        mock_fcntl.flock.side_effect = _flock_effect
+        mock_os.kill.side_effect = OSError("no such process")
+        ProcessLock.acquire()
+        # 恢复路径不经过 sys.exit（sys 已被 mock，真实退出会终止测试进程）
+        mock_sys.exit.assert_not_called()
+        # 重新加锁成功：PID 已写入 fresh fd
+        fresh.write.assert_called_once()
+        ProcessLock.release()
+
+
 def test_acquire_alive_lock_exits():
     _reset()
     pidfile = _make_pidfile()

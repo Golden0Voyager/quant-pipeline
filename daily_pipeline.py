@@ -59,6 +59,7 @@ from core.config import (
 )
 from core.lock import ProcessLock, TaskLock
 from core.monitor import AkShareMonitor  # noqa: F401
+from core.notifications import notify_all
 from core.progress import ProgressTracker  # noqa: F401
 from core.refresh import (
     CrossSourceCheckConfig,
@@ -507,11 +508,22 @@ def run_all(
 
     # 检查是否有任务失败，供 main() 决定退出码
     # 使用 TaskResult.exit_failure 语义：degraded / failed / aborted
-    results["crashed"] = any(
-        isinstance(v, dict)
+    failed_tasks = sorted(
+        k
+        for k, v in results.items()
+        if isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
-        for v in results.values()
     )
+    results["crashed"] = bool(failed_tasks)
+    # 无人值守告警：整轮结果必须主动外发，不能只靠日志
+    if failed_tasks:
+        notify_all(
+            "error",
+            "数据管道完成（含失败任务）",
+            f"耗时 {elapsed / 60:.1f}min，失败任务: {', '.join(failed_tasks)}",
+        )
+    else:
+        notify_all("info", "数据管道全部完成", f"耗时 {elapsed / 60:.1f}min")
     return results
 
 
@@ -729,6 +741,9 @@ def main():
             sys.exit(1)
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在退出...")
+        # 与 ProcessLock 的 SIGINT handler 口径一致：中断必须非零退出，
+        # 否则调度器/TUI 队列会把"被取消"误判为"成功"
+        sys.exit(130)
     finally:
         if db is not None:
             db.close()

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from core.notifications import notify_all
 from core.task_result import ErrorKind, TaskResult, TaskStatus, normalize_task_result
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,8 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
     except Exception as e:
         elapsed = time.time() - task_start
         logger.error(f"❌ 任务 {name} 异常终止 (耗时 {elapsed:.1f}s): {e}", exc_info=True)
+        # 无人值守场景下日志之外必须有主动告警
+        notify_all("error", f"任务 {name} 异常终止", str(e)[:500])
         result = TaskResult.failed(
             name, ErrorKind.INTERNAL, str(e)[:2000],
         )

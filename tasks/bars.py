@@ -62,6 +62,7 @@ from core.config import (
 )
 from core.market_time import PHASE_POST_CLOSE, market_phase, shanghai_today
 from core.monitor import AkShareMonitor
+from core.notifications import notify_all
 from core.progress import ProgressTracker
 from core.utils import is_real_db_path, should_skip_beijing
 from interface import DatabaseInterface, DataLoaderInterface
@@ -660,6 +661,9 @@ def update_bars(
                 # 避免污染持久化监控历史与限流节奏；窗口成功率规则不受哨兵豁免
                 monitor.current_run_consecutive_failures = 0
                 should_abort, abort_msg = monitor.should_abort()
+        if should_abort:
+            # 熔断中止必须外发告警：无人值守时仅靠日志无法感知
+            notify_all("error", "AkShare 熔断中止", abort_msg)
         return should_abort, abort_msg
 
     # ── 自选股全量拉取初始化 ──

@@ -59,11 +59,12 @@ class ProcessLock:
             if alive:
                 print(f"❌ 管道已在运行 (PID: {old_pid})，请勿重复启动")
                 print(f"   如需强制重启，请先执行: kill {old_pid}")
-            else:
-                print(f"⚠️  检测到残留锁文件（PID {old_pid} 已不存在），自动清理后启动")
-                cls.release()
-                cls.acquire()
-            sys.exit(1)
+                sys.exit(1)
+            print(f"⚠️  检测到残留锁文件（PID {old_pid} 已不存在），自动清理后启动")
+            cls.release()
+            # 递归重新加锁成功后直接返回，不得落入 sys.exit
+            cls.acquire()
+            return
         cls._lock_file_fd.truncate(0)
         cls._lock_file_fd.seek(0)
         cls._lock_file_fd.write(str(os.getpid()))

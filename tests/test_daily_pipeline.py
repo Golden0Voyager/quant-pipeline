@@ -2166,6 +2166,64 @@ def test_safe_task_marks_failed_result_completed_with_errors():
     assert result["status"] == "degraded"
 
 
+def test_safe_task_notifies_on_exception():
+    """任务异常终止必须外发 error 级告警（无人值守场景唯一的感知渠道）。"""
+    from core.runner import safe_task
+
+    def _boom():
+        raise RuntimeError("kaput")
+
+    with patch("core.runner.logger"), \
+         patch("core.runner.notify_all") as mock_notify:
+        result = safe_task("exploding_task", _boom)
+
+    assert result["status"] == "failed"
+    mock_notify.assert_called_once()
+    level, title, message = mock_notify.call_args.args
+    assert level == "error"
+    assert "exploding_task" in title
+    assert "kaput" in message
+
+
+def test_run_all_notifies_summary_on_success():
+    """run_all 全部成功时发送 info 级完成通知。"""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+    with patch("daily_pipeline._safe_task", return_value={"status": "ok"}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("daily_pipeline.notify_all") as mock_notify, \
+         patch("time.sleep"):
+        run_all(db, loader, engine)
+
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.args[0] == "info"
+
+
+def test_run_all_notifies_error_with_failed_task_names():
+    """run_all 含失败任务时发送 error 级通知，正文列出失败任务名。"""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+    with patch("daily_pipeline._safe_task",
+               return_value={"status": "failed", "error": "simulated crash"}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("daily_pipeline.notify_all") as mock_notify, \
+         patch("time.sleep"):
+        run_all(db, loader, engine)
+
+    mock_notify.assert_called_once()
+    level, _title, message = mock_notify.call_args.args
+    assert level == "error"
+    assert "bars" in message
+
+
 def test_main_exits_one_when_run_all_returns_crashed():
     """main() must exit with code 1 when run_all returns crashed=True."""
     with patch.object(sys, "argv",
@@ -3465,6 +3523,7 @@ class TestMainMoreTasks:
                 daily_pipeline.main()
 
     def test_keyboard_interrupt(self, weekday_mock):
+        """中断必须以 130 退出，调度器/TUI 才能区分'被取消'与'成功'。"""
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
              patch("daily_pipeline.run_all", side_effect=KeyboardInterrupt), \
@@ -3473,7 +3532,9 @@ class TestMainMoreTasks:
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
-            daily_pipeline.main()  # should handle gracefully
+            with pytest.raises(SystemExit) as exc_info:
+                daily_pipeline.main()
+            assert exc_info.value.code == 130
 
 
 # ===========================================================================
