@@ -846,6 +846,24 @@ class TestCanaryCircuitBreaker:
         assert normalised.attempted == r["attempted"]
         assert normalised.error == r["error"]
 
+    def test_abort_sends_notification(self, tmp_path: Path):
+        """熔断中止时必须外发 error 级告警（无人值守场景的感知渠道）。"""
+        db, loader, progress_file = self._make_failing_run(tmp_path)
+        loader.get_daily_bars.return_value = pd.DataFrame()  # 哨兵返回空
+
+        with patch("tasks.bars.ProgressTracker.FILE", progress_file), \
+             patch("tasks.bars.AkShareMonitor.FILE", tmp_path / "monitor.json"), \
+             patch("tasks.bars.PARALLEL_WORKERS", 1), \
+             patch("tasks.bars.MAX_RETRY", 1), \
+             patch("tasks.bars.time.sleep"), \
+             patch("tasks.bars.logger"), \
+             patch("tasks.bars.notify_all") as mock_notify:
+            r = update_bars(db, loader)
+
+        assert r["status"] == "aborted"
+        mock_notify.assert_called_once()
+        assert mock_notify.call_args.args[0] == "error"
+
     def test_canary_rejects_pure_yfinance_data(self, tmp_path: Path):
         """哨兵返回纯 yfinance 数据 → 视为 AkShare 不可用，照常熔断。"""
         db, loader, progress_file = self._make_failing_run(tmp_path)
