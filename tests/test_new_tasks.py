@@ -1344,7 +1344,7 @@ def test_financials_quarterly_ak_none():
     db = MagicMock()
     loader = MagicMock()
     with patch.object(financials, "ak", None):
-        result = financials.update_quarterly_financials(db, loader)
+        result = financials.update_quarterly_financials(db, loader, symbols=["000001"])
     assert result["saved"] == 0
     assert "error" in result
 
@@ -1354,8 +1354,9 @@ def test_financials_quarterly_empty_stock_list():
     db = MagicMock()
     db.get_stock_list.return_value = pd.DataFrame()
     loader = MagicMock()
+    # symbols=[] 走逐股路径（全市场 None 模式已委托 financial_history）
     with patch.object(financials, "ak", ak):
-        result = financials.update_quarterly_financials(db, loader)
+        result = financials.update_quarterly_financials(db, loader, symbols=[])
     assert result["saved"] == 0
     assert result["total"] == 0
 
@@ -1521,18 +1522,15 @@ def test_china_macro_gdp_exception():
 
 
 def test_financials_quarterly_with_existing_filter():
-    """quarterly: 过滤已有数据的股票。"""
+    """quarterly: 过滤已有数据的股票（--symbols 逐股路径）。"""
     ak = MagicMock()
     db = MagicMock()
-    db.get_stock_list.return_value = pd.DataFrame(
-        {
-            "code": ["000001.SZ", "000002.SZ", "000003.SZ"],
-        }
-    )
     db.get_distinct_codes.return_value = {"000001.SZ"}  # 已有数据
     loader = MagicMock()
     with patch.object(financials, "ak", ak):
-        result = financials.update_quarterly_financials(db, loader)
+        result = financials.update_quarterly_financials(
+            db, loader, symbols=["000001.SZ", "000002.SZ", "000003.SZ"]
+        )
     assert result["total"] == 3  # code-level existence filtering removed, all 3 processed
 
 

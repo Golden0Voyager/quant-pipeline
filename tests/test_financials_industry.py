@@ -21,6 +21,41 @@ import pandas as pd
 import tasks.financials as financials
 
 # ===========================================================================
+# update_quarterly_financials 日常委托
+# ===========================================================================
+
+
+class TestQuarterlyFinancialsDelegation:
+    def test_full_market_delegates_to_financial_history(self):
+        """全市场模式委托按报告期批量抓取，不再逐股请求。"""
+        db = MagicMock()
+        expected = {"saved": 42}
+        with patch(
+            "tasks.financial_history.update_financial_history",
+            return_value=expected,
+        ) as batch, patch("tasks.financials.logger"):
+            r = financials.update_quarterly_financials(db, MagicMock())
+        batch.assert_called_once_with(db)
+        assert r == expected
+        db.get_stock_list.assert_not_called()
+
+    def test_symbols_mode_keeps_per_stock_path(self):
+        """--symbols 定向修复仍走逐股路径，不委托。"""
+        db = MagicMock()
+        with patch(
+            "tasks.financial_history.update_financial_history"
+        ) as batch, patch("tasks.financials.ak") as mock_ak, \
+             patch("tasks.financials.logger"), \
+             patch("tasks.financials.time.sleep"):
+            mock_ak.stock_financial_abstract.return_value = pd.DataFrame()
+            r = financials.update_quarterly_financials(
+                db, MagicMock(), symbols=["000001"]
+            )
+        batch.assert_not_called()
+        assert r["total"] == 1
+
+
+# ===========================================================================
 # 测试辅助
 # ===========================================================================
 

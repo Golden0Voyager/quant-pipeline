@@ -31,7 +31,7 @@ if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
 
 from smartmoney_hunter.market_utils import is_beijing_stock
 
-from core.calendar import get_expected_latest_trading_day
+from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
 from core.config import (
     BATCH_SIZE_VAL as BATCH_SIZE,
 )
@@ -60,7 +60,7 @@ from core.config import (
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,
 )
-from core.market_time import PHASE_POST_CLOSE, market_phase
+from core.market_time import PHASE_POST_CLOSE, market_phase, shanghai_today
 from core.monitor import AkShareMonitor
 from core.progress import ProgressTracker
 from core.utils import is_real_db_path, should_skip_beijing
@@ -322,6 +322,101 @@ def _bars_failed_result(*, error: str) -> dict[str, Any]:
     return result
 
 
+def _seed_from_snapshot(
+    db: DatabaseInterface,
+    remaining_codes: list[str],
+    expected_latest: str,
+) -> tuple[list[str], int, set[str]]:
+    """收盘后快照播种：为"只缺今天一根 K 线"的股票批量写入当日行。
+
+    只播种同时满足以下条件的股票（其余留给逐股路径兜底）：
+    - 库中最新日期 == 上一交易日（落后多天/新股 → 逐股）
+    - 快照昨收与库中昨日收盘一致（容差 0.2%；对不上 = 当日除权，
+      前复权锚点已变，必须走新浪 qfq 逐股重拉）
+
+    Returns:
+        (剩余待逐股清单, 播种成功数, 快照判定的停牌集合[6位裸码])
+    """
+    import sqlite3
+
+    from tasks.bars_snapshot import (
+        bar_record_to_frame,
+        fetch_market_snapshot,
+        snapshot_to_bar_records,
+    )
+
+    snapshot_df = fetch_market_snapshot()
+    records, snapshot_suspended = snapshot_to_bar_records(
+        snapshot_df, trade_date=expected_latest
+    )
+
+    prev_days = get_recent_trading_days(expected_latest, 2)
+    prev_day = prev_days[1] if len(prev_days) > 1 else None
+    if prev_day is None:
+        raise RuntimeError("cannot determine previous trading day")
+
+    # 一次性批量读：每只股票的最新日期 + 上一交易日收盘价
+    conn = sqlite3.connect(str(db.db_path))
+    try:
+        latest_map = {
+            str(ts)[:6]: _normalize_trade_date(dt)
+            for ts, dt in conn.execute(
+                "SELECT ts_code, MAX(trade_date) FROM daily_bars GROUP BY ts_code"
+            )
+        }
+        prev_close_map = {
+            str(ts)[:6]: close
+            for ts, close in conn.execute(
+                "SELECT ts_code, close FROM daily_bars WHERE trade_date IN (?, ?)",
+                (prev_day, prev_day.replace("-", "")),
+            )
+            if close
+        }
+    finally:
+        conn.close()
+
+    seeded = 0
+    ex_div = 0
+    behind = 0
+    remaining: list[str] = []
+    for symbol in remaining_codes:
+        code6 = symbol[:6]
+        record = records.get(code6)
+        latest = latest_map.get(code6)
+        if record is None or latest is None or latest != prev_day:
+            # 快照缺席（非停牌原因）或落后多天/新股 → 逐股
+            if record is not None and latest is not None and latest != prev_day:
+                behind += 1
+            remaining.append(symbol)
+            continue
+        stored_prev = prev_close_map.get(code6)
+        snap_prev = record.get("prev_close")
+        if (
+            not stored_prev
+            or not snap_prev
+            or abs(snap_prev - stored_prev) / stored_prev > 0.002
+        ):
+            # 昨收对不上 = 当日除权（qfq 锚点变动），逐股重拉当日正确价格
+            ex_div += 1
+            remaining.append(symbol)
+            continue
+        db.save_daily_bars(symbol, bar_record_to_frame(record))
+        seeded += 1
+
+    snapshot_suspended_in_scope = {
+        s[:6] for s in remaining_codes if s[:6] in snapshot_suspended
+    }
+    logger.info(
+        "⚡ 快照播种: 成功 %d / 除权待重拉 %d / 落后待逐股 %d / 停牌 %d / 其余逐股 %d",
+        seeded,
+        ex_div,
+        behind,
+        len(snapshot_suspended_in_scope),
+        len(remaining) - ex_div - behind,
+    )
+    return remaining, seeded, snapshot_suspended_in_scope
+
+
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
@@ -515,6 +610,32 @@ def update_bars(
             )
     except Exception as e:
         logger.warning(f"⚠️ 停牌预检失败（不影响主流程）: {e}")
+
+    # ── 阶段 0｜快照播种：收盘后用一次全市场快照补齐"只缺今天"的股票 ──
+    # 常规日更 ~3700 次逐股请求中的绝大多数由此消除；任何异常都完整回退逐股路径
+    if (
+        not retry_mode
+        and symbols is None
+        and not limit
+        and market_phase() == PHASE_POST_CLOSE
+        and expected_latest == shanghai_today()
+        and _has_real_db_path(db)
+    ):
+        try:
+            remaining_codes, seeded, snapshot_suspended = _seed_from_snapshot(
+                db, remaining_codes, expected_latest
+            )
+            success_count += seeded
+            processed_count += seeded
+            skipped_count += len(snapshot_suspended)
+            processed_count += len(snapshot_suspended)
+            suspended_symbols |= snapshot_suspended
+            remaining_codes = [
+                c for c in remaining_codes if c[:6] not in snapshot_suspended
+            ]
+            remaining_total = len(remaining_codes)
+        except Exception as e:
+            logger.warning(f"⚠️ 快照播种失败，回退逐股路径: {e}")
 
     # ── 熔断检查（带哨兵验证）──
     canary_probes_used = 0

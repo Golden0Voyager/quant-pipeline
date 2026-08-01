@@ -416,30 +416,59 @@ def run_all(
         db.close()
         return {"status": "skipped", "reason": "非交易日"}
 
+    # 执行顺序原则：
+    #   1. 依赖先行：bars → retry(补失败) → indicators/chip（本地计算基于补齐后的 bars）；
+    #      fundamentals → market_snapshot(补股息率) → historical_valuation(快照沉淀)；
+    #      sector_fund_flow → sector_industry(用资金流排名)。
+    #   2. 核心交易数据最早完整：行情/指标/估值链放最前，中途崩溃损失最小。
+    #   3. 长尾逐股任务垫底：chip_distribution_em（逐股限流，耗时最长）放在
+    #      health_check 之前，中断不拖累其它任务。
     results = {}
+
+    # ── 第一梯队：核心行情链（bars 收盘后走快照播种，分钟级）──
     results["stock_list"] = _run_task("update_stock_list", update_stock_list, db)
     results["bars"] = _run_task("update_bars", update_bars, db, loader, resume=resume, force=force)
-
+    # retry 紧跟 bars：先补齐失败股票，下游指标/筹码当天就能覆盖它们
+    results["retry"] = _run_task("retry", retry_failed, db, loader)
     # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
     # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
     results["indicators"] = _run_task("update_indicators", update_indicators, db, engine)
+    results["chip_distribution"] = _run_task(
+        "update_chip_distribution", update_chip_distribution, db
+    )
 
+    # ── 第二梯队：估值链（有内部先后依赖）──
     results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
     results["market_snapshot"] = _run_task("update_market_snapshot", update_market_snapshot, db)
+    results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
+    results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
+    results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
+
+    # ── 第三梯队：其余交易日快任务（单请求/少请求，顺序无依赖）──
     results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
     results["margin_trading"] = _run_task("update_margin_trading", update_margin_trading, db)
     results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
     results["block_trade"] = _run_task("update_block_trade", update_block_trade, db)
-    results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
-    results["shareholder_count"] = _run_task("update_shareholder_count", update_shareholder_count, db)
-    results["quarterly_financials"] = _run_task("update_quarterly_financials", update_quarterly_financials, db, loader)
-    results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
-    results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
-    results["industry"] = _run_task("update_industry", update_industry, db)
-    results["north_flow"] = _run_task("update_north_flow", update_north_flow, db)
-    results["north_hold"] = _run_task("update_north_hold", update_north_hold, db)
-    results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
     results["limit_up_down"] = _run_task("update_limit_up_down", update_limit_up_down, db)
+    results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
+    results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
+    results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
+    results["north_flow"] = _run_task("update_north_flow", update_north_flow, db)
+    results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
+    results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
+    results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
+    results["cb_quotation"] = _run_task("update_cb_quotation", update_cb_quotation, db)
+    results["cb_redeem"] = _run_task("update_cb_redeem", update_cb_redeem, db)
+    results["cb_index"] = _run_task("update_cb_index", update_cb_index, db)
+    results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
+
+    # ── 第四梯队：事件信号与非交易日频任务 ──
+    results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
+    results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
+    results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
+    results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
+    results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
+    results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
     results["dividend_summary"] = _run_task("update_dividend_summary", update_dividend_summary, db)
     results["gold_price"] = _run_task("update_gold_price", update_gold_price, db)
     results["crude_oil"] = _run_task("update_crude_oil", update_crude_oil, db)
@@ -449,34 +478,15 @@ def run_all(
     results["futures"] = _run_task("update_futures", update_futures, db)
     results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
     results["money_market"] = _run_task("update_money_market", update_money_market, db)
-    results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
-    results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
 
-    # ── Phase 2: 事件型强信号 ──
-    results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
-    results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
-    results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
-    results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
-
-    # ── 新增衍生数据任务 ──
-    results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
-    results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
-    results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
-    results["cb_quotation"] = _run_task("update_cb_quotation", update_cb_quotation, db)
-    results["cb_redeem"] = _run_task("update_cb_redeem", update_cb_redeem, db)
-    results["cb_index"] = _run_task("update_cb_index", update_cb_index, db)
-    results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
-    results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
-    results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
-    results["chip_distribution"] = _run_task(
-        "update_chip_distribution", update_chip_distribution, db
-    )
-    results["chip_distribution_em"] = _run_task(
-        "update_chip_distribution_em", update_chip_distribution_em, db
-    )
+    # ── 第五梯队：财务/成分（批量接口或低频）──
     results["financial_history"] = _run_task(
         "update_financial_history", update_financial_history, db
     )
+    results["shareholder_count"] = _run_task("update_shareholder_count", update_shareholder_count, db)
+    results["quarterly_financials"] = _run_task("update_quarterly_financials", update_quarterly_financials, db, loader)
+    results["industry"] = _run_task("update_industry", update_industry, db)
+    results["north_hold"] = _run_task("update_north_hold", update_north_hold, db)
     results["index_membership"] = _run_task(
         "update_index_membership", update_index_membership, db
     )
@@ -484,7 +494,11 @@ def run_all(
         "update_concept_member", update_concept_member, db
     )
 
-    results["retry"] = _run_task("retry", retry_failed, db, loader)
+    # ── 长尾垫底：逐股限流任务，中断不拖累其它任务 ──
+    results["chip_distribution_em"] = _run_task(
+        "update_chip_distribution_em", update_chip_distribution_em, db
+    )
+
     results["health"] = _run_task("health_check", health_check, db)
 
     db.close()

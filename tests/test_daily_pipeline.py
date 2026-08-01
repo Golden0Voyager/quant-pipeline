@@ -1017,7 +1017,8 @@ class TestRunAll:
         assert "health" in r
         assert safe_task.call_count > 20
 
-    def test_chip_tasks_run_after_all_data_update_tasks(self, tmp_path: Path, weekday_mock):
+    def test_task_ordering_dependencies_and_long_tail(self, tmp_path: Path, weekday_mock):
+        """执行顺序契约：依赖先行、retry 紧跟 bars、长尾逐股任务垫底。"""
         db = MagicMock()
         db.db_path = str(tmp_path / "quant_core.db")
         loader = MagicMock()
@@ -1028,12 +1029,23 @@ class TestRunAll:
              patch("daily_pipeline.logger"):
             daily_pipeline.run_all(db, loader, engine)
 
-        task_names = [call.args[0] for call in safe_task.call_args_list]
+        order = [call.args[0] for call in safe_task.call_args_list]
 
-        assert task_names.index("update_chip_distribution") > task_names.index("update_sector_derivatives")
-        assert task_names.index("update_chip_distribution_em") > task_names.index("update_chip_distribution")
-        assert task_names.index("retry") > task_names.index("update_chip_distribution_em")
-        assert task_names.index("health_check") > task_names.index("retry")
+        # retry 紧跟 bars 之后、指标之前：补抓成功的股票当天就有指标
+        assert order.index("update_bars") < order.index("retry") < order.index("update_indicators")
+        # 本地衍生计算在 bars/retry 之后
+        assert order.index("update_chip_distribution") > order.index("retry")
+        # 估值链内部依赖：fundamentals → market_snapshot → historical_valuation
+        assert (
+            order.index("update_fundamentals")
+            < order.index("update_market_snapshot")
+            < order.index("update_historical_valuation")
+        )
+        # sector_industry 依赖 sector_fund_flow 的资金流排名
+        assert order.index("update_sector_fund_flow") < order.index("update_sector_industry")
+        # 最长尾的逐股任务垫底，仅在 health_check 之前
+        assert order.index("update_chip_distribution_em") == len(order) - 2
+        assert order.index("health_check") == len(order) - 1
 
 
 # ===========================================================================
@@ -3121,25 +3133,30 @@ class TestUpdateMarketSnapshot:
 # update_quarterly_financials
 # ===========================================================================
 class TestUpdateQuarterlyFinancials:
-    def test_ak_none(self):
+    def test_ak_none_symbols_mode(self):
+        """--symbols 逐股路径：akshare 缺失 → saved 0 并带 error。"""
         db = MagicMock()
         loader = MagicMock()
-        with patch.object(daily_pipeline, "ak", None), patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_quarterly_financials(db, loader)
+        with patch("tasks.financials.ak", None), patch("daily_pipeline.logger"):
+            r = daily_pipeline.update_quarterly_financials(db, loader, symbols=["000001"])
         assert r["saved"] == 0
+        assert "error" in r
 
-    def test_empty_stock_list(self):
+    def test_full_market_delegates_to_financial_history(self):
+        """全市场模式委托按报告期批量抓取（提速改造后的契约）。"""
         db = MagicMock()
         loader = MagicMock()
-        db.get_stock_list.return_value = pd.DataFrame()
-        with patch("tasks.financials.ak"), patch("daily_pipeline.logger"):
+        with patch(
+            "tasks.financial_history.update_financial_history",
+            return_value={"saved": 7},
+        ) as batch, patch("daily_pipeline.logger"):
             r = daily_pipeline.update_quarterly_financials(db, loader)
-        assert r["total"] == 0
+        batch.assert_called_once_with(db)
+        assert r == {"saved": 7}
 
-    def test_normal_with_mock(self):
+    def test_normal_with_mock_symbols_mode(self):
         db = MagicMock()
         loader = MagicMock()
-        db.get_stock_list.return_value = pd.DataFrame({"code": ["000001"]})
         db.get_distinct_codes.return_value = set()
         with patch("tasks.financials.ak") as mock_ak, \
              patch("daily_pipeline.logger"), \
@@ -3151,7 +3168,7 @@ class TestUpdateQuarterlyFinancials:
             })
             mock_ak.stock_financial_abstract.return_value = df
             db.save_quarterly_financials_batch.return_value = 1
-            r = daily_pipeline.update_quarterly_financials(db, loader)
+            r = daily_pipeline.update_quarterly_financials(db, loader, symbols=["000001"])
         assert r["total"] >= 0
 
 
