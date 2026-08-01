@@ -13,6 +13,7 @@ from tui import (
     HelpScreen,
     LogCleanupScreen,
     PipelineApp,
+    compute_catch_up_tasks,
     find_latest_log_file,
     get_active_stock_count,
     get_daemon_status,
@@ -23,6 +24,109 @@ from tui import (
     parse_progress,
     save_theme,
 )
+
+
+def _fresh_latest_dates(expected: str) -> dict:
+    """所有表都更新到 expected 的基准状态。"""
+    from tui import TABLE_DATE_COLUMNS
+
+    return dict.fromkeys(TABLE_DATE_COLUMNS, expected)
+
+
+class TestComputeCatchUpTasks:
+    EXPECTED = "2026-07-31"
+    STALE = "2026-07-30"
+
+    def test_all_fresh_returns_empty(self):
+        assert compute_catch_up_tasks(_fresh_latest_dates(self.EXPECTED), self.EXPECTED) == []
+
+    def test_stale_bars_selects_dependency_chain_in_order(self):
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["daily_bars"] = self.STALE
+        latest["indicators"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks == ["update_bars", "update_indicators"]
+
+    def test_chip_em_table_maps_to_daily_task(self):
+        """chip_distribution_em 表有两个 owner，必须选日常任务而非 ON_DEMAND 全市场版。"""
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["chip_distribution_em"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks == ["update_chip_distribution_em"]
+        assert "update_chip_distribution_em_fullmarket" not in tasks
+
+    def test_expected_semantics_excluded_tables_not_selected(self):
+        """T+1 / 周更 / 月更 / 季更 / 无数据不视为缺失（沿用面板语义）。"""
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["margin_trading"] = self.STALE  # T+1
+        latest["stock_pledge"] = "2026-07-24"  # 周更
+        latest["macro_monthly"] = "2026-07-20"  # 月更
+        latest["quarterly_financials"] = "2026-06-30"  # 季更
+        latest["north_flow"] = None  # 无数据（源已停止披露）
+        assert compute_catch_up_tasks(latest, self.EXPECTED) == []
+
+    def test_long_tail_ordered_last(self):
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["chip_distribution_em"] = self.STALE
+        latest["daily_bars"] = self.STALE
+        latest["fund_flow"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks[0] == "update_bars"
+        assert tasks[-1] == "update_chip_distribution_em"
+
+
+class TestActionRunCatchUp:
+    def _sh(self, y, m, d, hh, mm=0):
+        from datetime import datetime as dt
+        from zoneinfo import ZoneInfo
+
+        return dt(y, m, d, hh, mm, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    @pytest.mark.asyncio
+    async def test_refused_during_session_on_trading_day(self):
+        app = PipelineApp()
+        with patch("core.market_time.shanghai_now",
+                   return_value=self._sh(2026, 7, 31, 10, 30)), \
+             patch("core.calendar.is_trading_day", return_value=True), \
+             patch.object(app, "_run_task_group") as run_group, \
+             patch.object(app, "notify") as notify:
+            await app.action_run_catch_up()
+        run_group.assert_not_called()
+        assert "盘中" in notify.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_post_close_runs_computed_tasks(self):
+        app = PipelineApp()
+        with patch("core.market_time.shanghai_now",
+                   return_value=self._sh(2026, 7, 31, 17, 0)), \
+             patch("core.calendar.is_trading_day", return_value=True), \
+             patch("tui.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("tui.get_latest_dates", return_value={}), \
+             patch("tui.compute_catch_up_tasks",
+                   return_value=["update_bars", "update_fund_flow"]) as compute, \
+             patch.object(app, "_create_background_task") as bg, \
+             patch.object(app, "_run_task_group",
+                          side_effect=_close_coro) as run_group, \
+             patch.object(app, "notify"):
+            await app.action_run_catch_up()
+        compute.assert_called_once_with({}, "2026-07-31")
+        run_group.assert_called_once_with("补齐缺失", ["update_bars", "update_fund_flow"])
+        bg.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_nothing_stale_notifies_and_skips(self):
+        app = PipelineApp()
+        with patch("core.market_time.shanghai_now",
+                   return_value=self._sh(2026, 8, 1, 10, 0)), \
+             patch("core.calendar.is_trading_day", return_value=False), \
+             patch("tui.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("tui.get_latest_dates", return_value={}), \
+             patch("tui.compute_catch_up_tasks", return_value=[]), \
+             patch.object(app, "_run_task_group") as run_group, \
+             patch.object(app, "notify") as notify:
+            await app.action_run_catch_up()
+        run_group.assert_not_called()
+        assert "无缺失" in notify.call_args.args[0]
 
 
 def _close_coro(coro, **_kwargs):
@@ -1369,9 +1473,11 @@ async def test_task_group_buttons():
     async with app.run_test():
         widget = app.query_one("#task-groups", TaskGroupWidget)
         buttons = list(widget.query("Button"))
-        assert len(buttons) == len(TASK_GROUPS)
+        # 分组按钮 + 「补齐缺失」按钮
+        assert len(buttons) == len(TASK_GROUPS) + 1
         for key in TASK_GROUPS:
             assert widget.query_one(f"#group-{key}") is not None
+        assert widget.query_one("#group-catchup") is not None
 
 
 @pytest.mark.asyncio
