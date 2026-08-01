@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 _PIDFILE = Path("/tmp/daily_pipeline.pid")
 
 
+def global_lock_held() -> bool:
+    """非阻塞试探全局管道锁是否被其它进程持有（不获取、不残留）。
+
+    供单任务路径在 acquire TaskLock 前调用：全局锁与单任务锁原本互不感知，
+    ``--task all`` 运行期间单任务可并行写同一批表。
+    """
+    fd = open(_PIDFILE, "a+")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        return True
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    fd.close()
+    return False
+
+
 def _task_lock_path(name: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "task"
     return Path(f"/tmp/daily_pipeline_{safe_name}.lock")
