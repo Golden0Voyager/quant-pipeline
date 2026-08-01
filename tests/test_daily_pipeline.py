@@ -3616,7 +3616,12 @@ def test_update_fundamentals_already_has_data():
     db = MagicMock()
     db.count_fundamentals_for_date.return_value = 5500  # > MIN_FUNDAMENTALS_STOCK_COUNT
     loader = MagicMock()
-    with patch("daily_pipeline.datetime") as mock_dt, patch("daily_pipeline.logger"):
+    # has_post_close_completion 必须为 True 才能命中"当日已完成"跳过分支；
+    # 否则走到真实抓取路径，MagicMock 的 save_fundamentals_batch 返回值
+    # 与 int 比较会抛 TypeError。
+    with patch("daily_pipeline.datetime") as mock_dt, \
+         patch("daily_pipeline.logger"), \
+         patch("tasks.valuation_chain.has_post_close_completion", return_value=True):
         mock_dt.now.return_value = datetime(2026, 6, 30, 9, 0, 0)
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw) if a else mock_dt.now()
         r = daily_pipeline.update_fundamentals(db, loader)
