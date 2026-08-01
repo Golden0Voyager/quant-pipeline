@@ -272,6 +272,22 @@ async def test_get_launchd_status_exception():
     with patch("subprocess.run", side_effect=OSError):
         assert await get_launchd_status() is False
 
+def test_get_subprocess_env_preserves_operator_db_path():
+    """操作者显式 export 的 QUANT_DB_PATH 不得被 TUI 覆盖回默认库。"""
+    with patch.dict(os.environ, {"QUANT_DB_PATH": "/tmp/custom_operator.db"}):
+        env = get_subprocess_env()
+    assert env["QUANT_DB_PATH"] == "/tmp/custom_operator.db"
+
+
+def test_get_subprocess_env_defaults_db_path():
+    """未设置 QUANT_DB_PATH 时才补默认值。"""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("QUANT_DB_PATH", None)
+        env = get_subprocess_env()
+    from tui import DEFAULT_DB_PATH
+    assert env["QUANT_DB_PATH"] == str(DEFAULT_DB_PATH)
+
+
 def test_get_subprocess_env():
     env = get_subprocess_env()
     assert isinstance(env, dict)
@@ -1101,6 +1117,35 @@ def test_find_running_pipeline_from_pidfile():
     assert procs[0]["pid"] == 12345
 
 
+def test_find_running_pipeline_skips_non_python_lookalikes():
+    """pgrep -f 会命中 vim/tail 等命令行含 daily_pipeline.py 的进程，必须过滤。"""
+    from tui import find_running_pipeline_processes
+    with patch("tui.Path.exists", return_value=False), \
+         patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(stdout="999\n"),                           # pgrep
+            MagicMock(stdout=" 1\n"),                            # ps ppid
+            MagicMock(stdout="999 01:23 vim daily_pipeline.py"),  # ps command
+        ]
+        procs = find_running_pipeline_processes()
+    assert procs == []
+
+
+def test_find_running_pipeline_keeps_python_processes():
+    """python 解释器启动的 daily_pipeline.py 进程必须保留。"""
+    from tui import find_running_pipeline_processes
+    with patch("tui.Path.exists", return_value=False), \
+         patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(stdout="888\n"),                                        # pgrep
+            MagicMock(stdout=" 1\n"),                                         # ps ppid
+            MagicMock(stdout="888 01:23 python daily_pipeline.py --task all"),  # ps command
+        ]
+        procs = find_running_pipeline_processes()
+    assert len(procs) == 1
+    assert procs[0]["pid"] == 888
+
+
 # ===========================================================================
 # get_all_table_counts fast mode
 # ===========================================================================
@@ -1403,6 +1448,21 @@ async def test_action_toggle_theme():
             assert app._theme_name == themes_sorted[after_idx]
             assert app.theme == themes_sorted[after_idx]
             assert mock_save.call_args.args[0] == themes_sorted[after_idx]
+
+
+@pytest.mark.asyncio
+async def test_action_toggle_theme_wraparound_index_display():
+    """最后一个主题环绕到第一个时，通知里的索引应显示 1/N 而非 (N+1)/N。"""
+    from textual.theme import BUILTIN_THEMES
+    app = PipelineApp()
+    async with app.run_test():
+        themes_sorted = sorted(BUILTIN_THEMES)
+        app._theme_name = themes_sorted[-1]
+        with patch("tui.save_theme"), patch.object(app, "notify") as mock_notify:
+            await app.action_toggle_theme()
+        assert app._theme_name == themes_sorted[0]
+        msg = mock_notify.call_args.args[0]
+        assert f"(1/{len(themes_sorted)})" in msg
 
 
 @pytest.mark.asyncio
