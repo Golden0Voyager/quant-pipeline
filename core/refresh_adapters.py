@@ -2277,52 +2277,6 @@ class StockRepurchaseRefreshAdapter:
 
 
 # ===========================================================================
-# update_north_flow（死源：降级保留旧数据，绝无替换）
-# ===========================================================================
-
-_NORTH_FLOW_DEAD_REASON = (
-    "北向逐日资金流源已于 2024-08-16 起停更，保留历史数据不再刷新"
-)
-
-
-@dataclass
-class NorthFlowRefreshAdapter:
-    """北向资金：死源。不抓取、零替换，只盘点并保留既有历史行。"""
-
-    store: SQLiteRefreshStore
-    db_path: str
-
-    task_name = "update_north_flow"
-
-    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
-        retained = self._existing_row_count()
-        return RefreshAdapterResult(
-            task_name=self.task_name,
-            as_of_date=None,
-            fetched=0,
-            validated=0,
-            replaced=0,
-            retained=retained,
-            failed_symbols=(),
-            changed_symbols=(),
-            metadata={
-                "source_status": "dead_source",
-                "reason": _NORTH_FLOW_DEAD_REASON,
-                # 空基线声明：新库 north_flow 本就无历史行，retained=0 属实。
-                "baseline_empty": retained == 0,
-            },
-        )
-
-    def _existing_row_count(self) -> int:
-        conn = sqlite3.connect(self.db_path)
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM north_flow").fetchone()
-        finally:
-            conn.close()
-        return int(row[0]) if row else 0
-
-
-# ===========================================================================
 # update_sector_derivatives（复合：三表目标日分区一次事务替换）
 # ===========================================================================
 
@@ -2491,7 +2445,6 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_cb_quotation": CbQuotationRefreshAdapter,
     "update_cb_redeem": CbRedeemRefreshAdapter,
     "update_stock_repurchase": StockRepurchaseRefreshAdapter,
-    "update_north_flow": NorthFlowRefreshAdapter,
     "update_sector_derivatives": SectorDerivativesRefreshAdapter,
 }
 
@@ -2513,7 +2466,6 @@ def build_all_refresh_adapters(
     复用两个已有工厂（核心远端 4 + 派生 5），并显式接入其余 20 个
     Task 9 适配器。EM 筹码 throttle 保持生产默认，绝不在此注入测试节流。
     """
-    db_path = str(db.db_path)
     adapters: dict[str, RefreshAdapter] = {}
     adapters.update(build_core_refresh_adapters(db=db, loader=loader, store=store))
     adapters.update(build_derived_refresh_adapters(db=db, engine=engine, store=store))
@@ -2536,7 +2488,6 @@ def build_all_refresh_adapters(
         "update_cb_quotation": CbQuotationRefreshAdapter(store=store),
         "update_cb_redeem": CbRedeemRefreshAdapter(store=store),
         "update_stock_repurchase": StockRepurchaseRefreshAdapter(store=store),
-        "update_north_flow": NorthFlowRefreshAdapter(store=store, db_path=db_path),
         "update_sector_derivatives": SectorDerivativesRefreshAdapter(store=store),
     })
     return adapters
