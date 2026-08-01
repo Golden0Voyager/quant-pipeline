@@ -547,6 +547,7 @@ async def test_action_handlers_use_run_in_background():
     expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
+         patch.object(app, "_run_and_report", new_callable=MagicMock) as mock_run_report, \
          patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
          patch.object(app, "push_screen") as mock_push_screen:
 
@@ -555,11 +556,11 @@ async def test_action_handlers_use_run_in_background():
         _screen, callback = mock_push_screen.call_args[0]
         callback("run-now")
         mock_create_task.assert_called_once()
-        mock_run_bg.assert_called_once_with(
-            sys.executable, expected_pipeline_path, "--task", "all", "--force"
+        mock_run_report.assert_called_once_with(
+            "全量更新", sys.executable, expected_pipeline_path, "--task", "all", "--force"
         )
 
-        mock_run_bg.reset_mock()
+        mock_run_report.reset_mock()
         mock_create_task.reset_mock()
         mock_push_screen.reset_mock()
         await app.action_resume_pipeline()
@@ -567,8 +568,8 @@ async def test_action_handlers_use_run_in_background():
         _screen, callback = mock_push_screen.call_args[0]
         callback("run-now")
         mock_create_task.assert_called_once()
-        mock_run_bg.assert_called_once_with(
-            sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
+        mock_run_report.assert_called_once_with(
+            "断点续传", sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
         )
 
         mock_run_bg.reset_mock()
@@ -587,7 +588,7 @@ async def test_action_handlers_use_run_in_background():
             sys.executable, expected_daemon_path, "stop"
         )
 
-        mock_run_bg.reset_mock()
+        mock_run_report.reset_mock()
         mock_create_task.reset_mock()
         mock_push_screen.reset_mock()
         await app.action_run_health()
@@ -595,8 +596,8 @@ async def test_action_handlers_use_run_in_background():
         _screen, callback = mock_push_screen.call_args[0]
         callback("run-now")
         mock_create_task.assert_called_once()
-        mock_run_bg.assert_called_once_with(
-            sys.executable, expected_pipeline_path, "--task", "health_check", "--force"
+        mock_run_report.assert_called_once_with(
+            "健康检查", sys.executable, expected_pipeline_path, "--task", "health_check", "--force"
         )
 
 
@@ -1501,7 +1502,7 @@ async def test_log_cleanup_screen_buttons():
             assert "全部清理" in labels
             assert "保留最近 7 天" in labels
             assert "保留最近 30 天" in labels
-            assert "取消" in labels
+            assert "取消 (Esc)" in labels
 
 
 @pytest.mark.asyncio
@@ -2015,3 +2016,205 @@ async def test_select_changed_normal_task_and_separator_routing_regression():
                 await panel.on_select_changed(Select.Changed(select, "__sep__行情"))
                 mock_single.assert_not_called()
                 mock_refresh.assert_not_called()
+
+
+# ===========================================================================
+# LogsWidget: colorize_line / copy_recent_logs
+# ===========================================================================
+def test_colorize_line_preserves_equals_signs():
+    """日志内容不得被篡改：= 不得被替换成 -（如 task=update_bars）。"""
+    from tui import LogsWidget
+    w = LogsWidget()
+    out = w.colorize_line("2026-08-01 12:00:00 | INFO | task=update_bars saved=100")
+    assert "task=update_bars" in out
+    assert "saved=100" in out
+
+
+def test_colorize_line_levels():
+    from tui import LogsWidget
+    w = LogsWidget()
+    assert "❌" in w.colorize_line("ts | ERROR | boom")
+    assert "⚠️" in w.colorize_line("ts | WARNING | careful")
+    assert "✅" in w.colorize_line("ts | SUCCESS | done")
+
+
+def test_copy_recent_logs_reads_bound_file(tmp_path):
+    from tui import LogsWidget
+    log = tmp_path / "x.log"
+    log.write_text("line1\nline2\nline3\n")
+    w = LogsWidget()
+    w.active_log = str(log)
+    assert w.copy_recent_logs(2) == "line2\nline3\n"
+
+
+def test_copy_recent_logs_without_file_returns_string():
+    from tui import LogsWidget
+    w = LogsWidget()
+    w.active_log = "/nonexistent/x.log"
+    assert isinstance(w.copy_recent_logs(), str)
+
+
+# ===========================================================================
+# get_recent_failed_tasks
+# ===========================================================================
+def test_get_recent_failed_tasks_filters_and_orders(tmp_path):
+    from tui import get_recent_failed_tasks
+    db_file = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE ingestion_runs (run_id TEXT PRIMARY KEY, task_name TEXT,"
+        " status TEXT, finished_at TEXT, error_kind TEXT, error_message TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO ingestion_runs VALUES (?,?,?,?,?,?)",
+        [
+            ("1", "update_bars", "success", "2026-08-01T10:00:00", None, None),
+            ("2", "update_bars", "failed", "2026-08-01T11:00:00", "internal", "boom"),
+            ("3", "update_indicators", "degraded", "2026-08-01T12:00:00", "data_quality", "partial"),
+            ("4", "retry", "aborted", "2026-08-01T09:00:00", None, "circuit"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    result = get_recent_failed_tasks(str(db_file))
+    # success 行被过滤；按 finished_at 倒序
+    assert [r["task_name"] for r in result] == ["update_indicators", "update_bars", "retry"]
+    assert result[0]["error_message"] == "partial"
+
+
+def test_get_recent_failed_tasks_missing_table(tmp_path):
+    from tui import get_recent_failed_tasks
+    db_file = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE x (a TEXT)")
+    conn.commit()
+    conn.close()
+    assert get_recent_failed_tasks(str(db_file)) == []
+
+
+def test_get_recent_failed_tasks_no_db():
+    from tui import get_recent_failed_tasks
+    assert get_recent_failed_tasks("/nonexistent/x.db") == []
+
+
+# ===========================================================================
+# _notify_and_log / _run_and_report
+# ===========================================================================
+def test_notify_and_log_writes_notify_and_logs_widget():
+    """关键结果既弹通知也写 Logs 面板（通知几秒即逝，面板可回看）。"""
+    app = PipelineApp()
+    logs = MagicMock()
+    with patch.object(app, "notify") as mock_notify, \
+         patch.object(app, "query_one", return_value=logs):
+        app._notify_and_log("hello-result", severity="warning")
+    mock_notify.assert_called_once()
+    logs.write.assert_called_once()
+    assert "hello-result" in logs.write.call_args.args[0]
+
+
+def test_notify_and_log_tolerates_missing_widget():
+    """Logs 面板未挂载时只弹通知，不抛异常。"""
+    app = PipelineApp()
+    with patch.object(app, "notify") as mock_notify, \
+         patch.object(app, "query_one", side_effect=Exception("not mounted")):
+        app._notify_and_log("hello")
+    mock_notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_and_report_failure_lists_failed_tasks():
+    """运行失败时报告退出码并列出失败任务名（来自审计表）。"""
+    app = PipelineApp()
+    async with app.run_test():
+        with patch.object(app, "_run_in_background", new=AsyncMock(return_value=1)), \
+             patch("tui.get_recent_failed_tasks", return_value=[
+                 {"task_name": "update_bars", "status": "failed",
+                  "finished_at": "t", "error_kind": "", "error_message": "boom"},
+             ]), \
+             patch.object(app, "_notify_and_log") as mock_nal:
+            rc = await app._run_and_report("全量更新", "python", "daily_pipeline.py")
+        assert rc == 1
+        msg = mock_nal.call_args.args[0]
+        assert "update_bars" in msg
+        assert mock_nal.call_args.kwargs.get("severity") == "error"
+
+
+@pytest.mark.asyncio
+async def test_run_and_report_success_notifies_info():
+    app = PipelineApp()
+    async with app.run_test():
+        with patch.object(app, "_run_in_background", new=AsyncMock(return_value=0)), \
+             patch.object(app, "_notify_and_log") as mock_nal:
+            rc = await app._run_and_report("全量更新", "python", "daily_pipeline.py")
+        assert rc == 0
+        assert mock_nal.call_args.kwargs.get("severity") == "information"
+
+
+# ===========================================================================
+# ProgressWidget 失败明细
+# ===========================================================================
+def test_progress_widget_shows_failed_symbols_inline():
+    """失败队列前 5 只内联展示，超出显示「等 N 只」。"""
+    from tui import ProgressWidget
+    w = ProgressWidget()
+    progress = {
+        "task": "update_bars", "processed": 10, "total": 100,
+        "last_symbol": "000001.SZ",
+        "failed_queue": [f"{i:06d}.SZ" for i in range(7)],
+    }
+    captured: dict[str, str] = {}
+    with patch("tui.parse_progress", return_value=progress), \
+         patch.object(w, "update", side_effect=lambda t: captured.setdefault("text", t)), \
+         patch.object(w, "add_class"), patch.object(w, "remove_class"):
+        w.update_progress()
+    assert "000004.SZ" in captured["text"]
+    assert "000006.SZ" not in captured["text"]
+    assert "等 7 只" in captured["text"]
+
+
+# ===========================================================================
+# 弹窗键盘一致性
+# ===========================================================================
+def test_confirm_stop_screen_escape_cancels():
+    from tui import ConfirmStopScreen
+    screen = ConfirmStopScreen([])
+    with patch.object(screen, "dismiss") as mock_dismiss:
+        screen.on_key(MagicMock(key="escape"))
+    mock_dismiss.assert_called_once_with(False)
+
+
+def test_confirm_run_screen_keyboard_shortcuts():
+    from tui import ConfirmRunScreen
+    screen = ConfirmRunScreen("测试")
+    for key, expected in (("y", "run-now"), ("l", "run-later"), ("escape", "cancel")):
+        with patch.object(screen, "dismiss") as mock_dismiss:
+            screen.on_key(MagicMock(key=key))
+        mock_dismiss.assert_called_once_with(expected)
+
+
+def test_log_cleanup_screen_escape_cancels():
+    screen = LogCleanupScreen()
+    with patch.object(screen, "dismiss") as mock_dismiss:
+        screen.on_key(MagicMock(key="escape"))
+    mock_dismiss.assert_called_once_with("cancel")
+
+
+# ===========================================================================
+# 延迟调度去重
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_run_or_schedule_run_later_dedupes_same_action():
+    """同一动作重复选择「稍后运行」不得重复排队。"""
+    app = PipelineApp()
+    async with app.run_test():
+        args = ("python", "test_script.py")
+        with patch.object(app, "push_screen") as mock_push_screen:
+            app._run_or_schedule("测试任务", *args)
+            _, callback = mock_push_screen.call_args[0]
+            with patch("tui._seconds_until_safe", return_value=3600), \
+                 patch.object(app, "_create_background_task") as mock_bg, \
+                 patch.object(app, "notify") as mock_notify:
+                callback("run-later")
+                callback("run-later")
+                assert mock_bg.call_count == 1
+                assert "已在延迟队列" in mock_notify.call_args.args[0]
