@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import Literal, NamedTuple, TextIO
 from zoneinfo import ZoneInfo
 
 from rich.markup import escape
@@ -263,7 +263,7 @@ class ConfirmStopScreen(ModalScreen[bool]):
     def on_key(self, event) -> None:
         if event.key.lower() == "y":
             self.dismiss(True)
-        elif event.key.lower() == "n":
+        elif event.key.lower() == "n" or event.key == "escape":
             self.dismiss(False)
 
 
@@ -306,12 +306,21 @@ class ConfirmRunScreen(ModalScreen[str]):
             yield Label(f"[yellow]{self._action_name}[/yellow]")
             yield Label("")
             with Horizontal(id="confirm-buttons"):
-                yield Button("立即运行", variant="primary", id="run-now")
-                yield Button("稍后自动运行", variant="default", id="run-later")
-                yield Button("取消", variant="error", id="cancel")
+                yield Button("立即运行 (Y)", variant="primary", id="run-now")
+                yield Button("稍后自动运行 (L)", variant="default", id="run-later")
+                yield Button("取消 (Esc)", variant="error", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id)
+
+    def on_key(self, event) -> None:
+        key = event.key.lower()
+        if key == "y":
+            self.dismiss("run-now")
+        elif key == "l":
+            self.dismiss("run-later")
+        elif key in ("escape", "n"):
+            self.dismiss("cancel")
 
 
 class ConfirmRefreshTodayScreen(ModalScreen[str | None]):
@@ -580,10 +589,14 @@ class LogCleanupScreen(ModalScreen[str]):
                 yield Button("全部清理", variant="error", id="all")
                 yield Button("保留最近 7 天", variant="primary", id="keep-7")
                 yield Button("保留最近 30 天", variant="default", id="keep-30")
-                yield Button("取消", variant="default", id="cancel")
+                yield Button("取消 (Esc)", variant="default", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss("cancel")
 
 
 def _seconds_until_safe() -> int:
@@ -744,6 +757,43 @@ def get_subprocess_env() -> dict:
     # 只在未设置时补默认值，避免静默写回生产库
     env.setdefault("QUANT_DB_PATH", str(DEFAULT_DB_PATH))
     return env
+
+def get_recent_failed_tasks(db_path: str, limit: int = 10) -> list[dict[str, str]]:
+    """查询最近失败/降级/中止的任务审计记录（ingestion_runs，按完成时间倒序）。
+
+    用于运行结束后的失败明细报告；表不存在或不可读时返回空列表。
+    """
+    p = Path(db_path)
+    if not p.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT task_name, status, finished_at, error_kind, error_message
+                FROM ingestion_runs
+                WHERE status IN ('failed', 'degraded', 'aborted')
+                ORDER BY finished_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "task_name": r[0],
+            "status": r[1],
+            "finished_at": r[2],
+            "error_kind": r[3] or "",
+            "error_message": r[4] or "",
+        }
+        for r in rows
+    ]
+
 
 async def get_launchd_status(env: dict | None = None) -> bool:
     if env is None:
@@ -1942,12 +1992,20 @@ class ProgressWidget(Static):
         processed = progress.get("processed", 0)
         total = progress.get("total", 0)
         last_symbol = progress.get("last_symbol", "")
-        failed_count = len(progress.get("failed_queue", []))
+        failed_queue = progress.get("failed_queue", [])
+        failed_count = len(failed_queue)
 
         pct = (processed / total * 100) if total > 0 else 0
         bar_length = 20
         filled = min(bar_length, max(0, int(bar_length * processed / total))) if total > 0 else 0
         bar = "█" * filled + "░" * (bar_length - filled)
+
+        # 失败明细内联：前 5 只列出，超出显示「等 N 只」，避免只见计数不见对象
+        failed_detail = ""
+        if failed_count:
+            shown = ", ".join(str(s) for s in failed_queue[:5])
+            suffix = f" 等 {failed_count} 只" if failed_count > 5 else ""
+            failed_detail = f"\n [dim]失败明细：[/dim][red]{escape(shown)}{suffix}[/red]"
 
         text = (
             f" [yellow]{progress.get('task')}[/yellow]  "
@@ -1955,7 +2013,8 @@ class ProgressWidget(Static):
             f"([cyan]{processed}[/cyan]/[cyan]{total}[/cyan])  "
             f"[bold #c084fc]{bar}[/bold #c084fc]\n"
             f" [dim]当前股票：[/dim][cyan]{last_symbol}[/cyan]  "
-            f"[dim]失败：[/dim][bold red]{failed_count}[/bold red]\n"
+            f"[dim]失败：[/dim][bold red]{failed_count}[/bold red]"
+            f"{failed_detail}\n"
         )
         self.update(text)
         self.add_class("active-task")
@@ -2005,9 +2064,6 @@ class LogsWidget(RichLog):
             level = parts[1].strip()
             body = parts[2].strip()
 
-            if "=" in body:
-                body = body.replace("=", "-")
-
             body = escape(body)
 
             if "ERROR" in level:
@@ -2020,8 +2076,6 @@ class LogsWidget(RichLog):
                 return f"[#e2e8f0]{body}[/#e2e8f0]"
             return body
         else:
-            if "=" in line:
-                line = line.replace("=", "-")
             return escape(line)
 
     def tail_log(self) -> None:
@@ -2075,6 +2129,41 @@ class PipelineApp(App):
         # 分组队列用 wait=True 在槽上排队；手动按键默认拒绝，防手滑重复启动
         self._task_slot = asyncio.Lock()
         self._theme_name = load_theme()
+        # 已排入延迟队列的动作名：防止连按重复调度（排队状态对操作者可见）
+        self._pending_scheduled: set[str] = set()
+
+    def _notify_and_log(
+        self,
+        message: str,
+        *,
+        severity: Literal["information", "warning", "error"] = "information",
+        timeout: float = 6.0,
+    ) -> None:
+        """弹通知的同时写入 Logs 面板：关键结果可回看（通知几秒后即消失）。"""
+        self.notify(message, severity=severity, timeout=timeout)
+        try:
+            logs = self.query_one("#live-logs", LogsWidget)
+            stamp = datetime.now().strftime("%H:%M:%S")
+            logs.write(f"[dim]{stamp}[/dim] {escape(message)}")
+        except Exception:
+            pass
+
+    async def _run_and_report(self, action_name: str, *args: str) -> int | None:
+        """运行子进程并报告结果：完成/失败既弹通知也写日志面板，失败列出任务名。"""
+        rc = await self._run_in_background(*args)
+        if rc == 0:
+            self._notify_and_log(f"✅ 「{action_name}」运行完成", severity="information")
+        else:
+            failed = get_recent_failed_tasks(str(DEFAULT_DB_PATH), limit=5)
+            detail = ""
+            if failed:
+                names = "、".join(f["task_name"] for f in failed)
+                detail = f"；失败任务: {names}"
+            self._notify_and_log(
+                f"❌ 「{action_name}」运行失败 (code={rc}){detail}，详见日志",
+                severity="error",
+            )
+        return rc
 
     async def on_mount(self) -> None:
         """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
@@ -2138,17 +2227,29 @@ class PipelineApp(App):
 
         def _on_dismiss(choice: str | None) -> None:
             if choice == "run-now":
-                self._create_background_task(self._run_in_background(*args))
+                self._create_background_task(self._run_and_report(action_name, *args))
             elif choice == "run-later":
+                if action_name in self._pending_scheduled:
+                    self.notify(
+                        f"「{action_name}」已在延迟队列中，请勿重复调度",
+                        severity="warning",
+                        timeout=4.0,
+                    )
+                    return
                 delay = _seconds_until_safe()
+                self._pending_scheduled.add(action_name)
                 self.notify(
                     f"「{action_name}」已调度到安全时间后自动运行（剩余 {delay//60} 分钟）",
                     timeout=6.0,
                 )
                 async def _delayed():
-                    await asyncio.sleep(delay)
-                    self._create_background_task(self._run_in_background(*args))
-                self._background_tasks.add(asyncio.create_task(_delayed()))
+                    try:
+                        await asyncio.sleep(delay)
+                        await self._run_and_report(action_name, *args)
+                    finally:
+                        self._pending_scheduled.discard(action_name)
+                # 统一走 _create_background_task：带 done_callback 回收，任务不泄漏
+                self._create_background_task(_delayed())
 
         self.push_screen(ConfirmRunScreen(action_name), _on_dismiss)
 
