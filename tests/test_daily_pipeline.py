@@ -3511,6 +3511,23 @@ class TestMainMoreTasks:
             daily_pipeline.main()
             fn.assert_called_once()
 
+    def test_single_task_refused_when_global_lock_held(self, weekday_mock):
+        """全量管道持有全局锁期间，单任务必须退出，避免并发写同一批表。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_industry"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.global_lock_held", return_value=True), \
+             patch("daily_pipeline.update_industry") as fn, \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_industry": fn}), \
+             patch("daily_pipeline.logger"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            with pytest.raises(SystemExit) as exc_info:
+                daily_pipeline.main()
+            assert exc_info.value.code == 1
+            fn.assert_not_called()
+
     def test_invalid_task(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "nonexistent_task"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
