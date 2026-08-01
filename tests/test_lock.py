@@ -148,6 +148,24 @@ def test_release_when_not_locked():
         ProcessLock.release()  # 不应抛异常
 
 
+def test_global_lock_held_probes_other_process_lock(tmp_path):
+    """global_lock_held 非阻塞试探：被持有时 True，空闲时 False，且不泄露锁。"""
+    import fcntl as real_fcntl
+
+    pidfile = tmp_path / "daily_pipeline.pid"
+    with patch.object(lock_mod, "_PIDFILE", pidfile):
+        assert lock_mod.global_lock_held() is False
+        fd = open(pidfile, "a+")  # noqa: SIM115
+        real_fcntl.flock(fd, real_fcntl.LOCK_EX | real_fcntl.LOCK_NB)
+        try:
+            assert lock_mod.global_lock_held() is True
+        finally:
+            real_fcntl.flock(fd, real_fcntl.LOCK_UN)
+            fd.close()
+        # 试探本身不得残留锁
+        assert lock_mod.global_lock_held() is False
+
+
 def test_task_lock_context_acquires_and_releases():
     _reset()
     fake_fd = MagicMock(spec=io.TextIOWrapper)
