@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 任务标识（TUI Dashboard 的状态查询依赖这个名字，改动需同步 tui.py） -->
+    <key>Label</key>
+    <string>com.smartmoney.update</string>
+
+    <!-- 每天下午 20:30 运行（收盘结算完成之后） -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- 运行命令：python 解释器必须能提供 akshare/pandas 等依赖，
+         当前部署使用 quant_hunter venv，按实际情况调整 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin/python3</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/daily_pipeline.py</string>
+        <string>--task</string>
+        <string>all</string>
+    </array>
+
+    <!-- 工作目录 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/hainingyu/Code/quant_pipeline</string>
+
+    <!-- 环境变量 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter</string>
+        <!-- 指向真实数据库 -->
+        <key>QUANT_DB_PATH</key>
+        <string>/Users/hainingyu/Code/quant_data/quant_core.db</string>
+        <!-- 禁用 yfinance fallback，防止污染黄金数据源 -->
+        <key>DISABLE_YFINANCE_FALLBACK</key>
+        <string>1</string>
+        <!-- 无人值守告警：填好 webhook 后改为 webhook，默认 console 只写日志 -->
+        <key>NOTIFICATION_TYPE</key>
+        <string>console</string>
+        <!-- 飞书/钉钉机器人 Webhook URL，配置后任务异常/熔断/整轮失败会主动推送 -->
+        <key>NOTIFICATION_WEBHOOK_URL</key>
+        <string></string>
+        <!-- 推送级别：error（默认，只推失败）/ warning / info（含每日完成汇总） -->
+        <key>NOTIFICATION_LEVEL</key>
+        <string>error</string>
+    </dict>
+
+    <!-- 日志输出 -->
+    <key>StandardOutPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_update.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_update.err.log</string>
+
+    <!-- 任务运行超过 3 小时自动终止（5000+ 只股票全量可能较久） -->
+    <key>Timeout</key>
+    <integer>10800</integer>
+</dict>
+</plist>
