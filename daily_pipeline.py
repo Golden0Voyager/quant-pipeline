@@ -57,7 +57,7 @@ from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
     read_cross_source_config,
 )
-from core.lock import ProcessLock, TaskLock
+from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.notifications import notify_all
 from core.progress import ProgressTracker  # noqa: F401
@@ -701,6 +701,11 @@ def main():
         if task in ("all", "update_daily_core"):
             _acquire_lock()
         elif task != "health_check":
+            # 全局锁与 TaskLock 互不感知：全量管道（或收盘刷新）运行期间，
+            # 单任务必须退出，否则双份抓取并发写同一批表
+            if global_lock_held():
+                print(f"❌ 全量管道正在运行，任务 {task} 退出以避免并发写同一批表")
+                sys.exit(1)
             if not TaskLock.acquire(task):
                 print(f"❌ 任务 {task} 已在运行，请勿重复启动")
                 sys.exit(1)
