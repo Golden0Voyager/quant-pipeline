@@ -312,7 +312,7 @@ class ConfirmRunScreen(ModalScreen[str]):
 class ConfirmRefreshTodayScreen(ModalScreen[str | None]):
     """弹窗：确认收盘刷新。
 
-    显示上海目标交易日、刷新任务范围（29 个交易日任务）与可选股票范围；
+    显示上海目标交易日、刷新任务范围（28 个交易日任务）与可选股票范围；
     确认返回股票范围字符串（可为空），取消返回 None。
     16:00 安全闸门由 CLI 负责，弹窗不重复实现。
     """
@@ -773,7 +773,7 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             "quarterly_financials", "historical_valuation",
             "sector_industry", "stock_list",
             "institutional_holdings",
-            "north_flow", "north_hold", "index_daily", "limit_up_down", "dividend_summary",
+            "north_hold", "index_daily", "limit_up_down", "dividend_summary",
             "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
             "chip_distribution", "chip_distribution_em",
             "futures_daily",
@@ -827,7 +827,6 @@ TABLE_DATE_COLUMNS: dict[str, str] = {
     "historical_valuation": "trade_date",
     "sector_industry": "trade_date",
     "institutional_holdings": "report_date",
-    "north_flow": "trade_date",
     "north_hold": "trade_date",
     "index_daily": "trade_date",
     "limit_up_down": "trade_date",
@@ -1217,7 +1216,6 @@ class SingleTaskWidget(Static):
             [
                 ("资金流向 (Fund Flow)", "update_fund_flow"),
                 ("板块资金 (Sector Fund Flow)", "update_sector_fund_flow"),
-                ("北向资金 (North Flow)", "update_north_flow"),
                 ("北向持仓 (North Hold)", "update_north_hold"),
                 ("融资融券 (Margin Trading)", "update_margin_trading"),
                 ("龙虎榜 (Dragon Tiger)", "update_dragon_tiger"),
@@ -1375,7 +1373,6 @@ TASK_GROUPS: dict[str, list[str]] = {
     "fund": [
         "update_fund_flow",
         "update_sector_fund_flow",
-        "update_north_flow",
         "update_north_hold",
         "update_margin_trading",
         "update_dragon_tiger",
@@ -1472,7 +1469,6 @@ class DataCompletenessWidget(VerticalScroll):
         "update_historical_valuation": ["historical_valuation"],
         "update_sector_industry": ["sector_industry"],
         "update_institutional_holdings": ["institutional_holdings"],
-        "update_north_flow": ["north_flow"],
         "update_north_hold": ["north_hold"],
         "update_index_daily": ["index_daily"],
         "update_limit_up_down": ["limit_up_down"],
@@ -1516,7 +1512,6 @@ class DataCompletenessWidget(VerticalScroll):
         "dragon_tiger": "Dragon Tiger",
         "block_trade": "Block Trade",
         "sector_fund_flow": "Sector Flow",
-        "north_flow": "North Flow",
         "north_hold": "North Hold",
         # 行业/大盘
         "sector_industry": "Industry",
@@ -1574,7 +1569,6 @@ class DataCompletenessWidget(VerticalScroll):
         "dragon_tiger": "龙虎榜",
         "block_trade": "大宗交易",
         "sector_fund_flow": "板块资金",
-        "north_flow": "北向资金",
         "north_hold": "北向持仓",
         # 行业/大盘
         "sector_industry": "行业分类",
@@ -1869,7 +1863,6 @@ _CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_index_daily",
     "update_market_valuation",
     "update_concept_board",
-    "update_north_flow",
     "update_south_flow",
     "update_ah_premium",
     "update_etf_daily",
