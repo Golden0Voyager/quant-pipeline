@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sqlite3
 import sys
 import time
@@ -16,6 +17,11 @@ from pathlib import Path
 
 import akshare as ak
 import pandas as pd
+
+# 全局套接字超时兜底：本脚本独立运行不经过 core.config，个别请求路径
+# （如 akshare 内部调用）漏传 timeout 时，SSL read 会无限期挂死
+# （2026-08-01 事故：单只股票的静默连接卡住整个回补 27+ 分钟）
+socket.setdefaulttimeout(20)
 
 _CODE_DIR = str(Path("~/Code").expanduser())
 if _CODE_DIR not in sys.path:
