@@ -256,9 +256,11 @@ def update_industry(db: DatabaseInterface) -> dict:
             f10_url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code={api_code}"
             f10_rate_limited = False  # 跟踪是否遇到 HTTP 限流
             for attempt in range(3):
-                session = None
+                # 注意：get_session() 返回的是 SourceClient 缓存的共享 session，
+                # 生命周期由 SourceClient 统一管理，绝不能在这里 close（否则后续
+                # 所有线程拿到已关闭的 session → SessionClosed）。见 get_session docstring。
+                session = get_default_client().get_session("eastmoney")
                 try:
-                    session = get_default_client().get_session("eastmoney")
                     resp = session.get(
                         f10_url,
                         headers={"User-Agent": "Mozilla/5.0"},
@@ -274,12 +276,10 @@ def update_industry(db: DatabaseInterface) -> dict:
                     if resp.status_code in (403, 429, 503):
                         f10_rate_limited = True
                         time.sleep(2**attempt)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"  F10 请求失败 {code}: {e}")
                     if attempt < 2:
                         time.sleep(2**attempt)
-                finally:
-                    if session is not None:
-                        session.close()
             # 仅当遇到 HTTP 限流(403/429/503)时才全局熔断
             # 普通解析错误、单股票 404、连接超时不阻断后续股票
             if f10_rate_limited:
@@ -299,7 +299,7 @@ def update_industry(db: DatabaseInterface) -> dict:
             except Exception:
                 pass
 
-        session = None
+        # 同样使用共享 session，不 close（见上方 F10 分支注释）
         try:
             sin_url = f"http://money.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/{code}.phtml"
             session = get_default_client().get_session("sina")
@@ -321,11 +321,38 @@ def update_industry(db: DatabaseInterface) -> dict:
                     industry = m.group(1).strip()
                     if industry and "备注" not in industry:
                         return code, industry
-        except Exception:
-            pass
-        finally:
-            if session is not None:
-                session.close()
+        except Exception as e:
+            logger.debug(f"  Sina 请求失败 {code}: {e}")
+
+        # 策略 D: 东财 push2 快照接口（f127=行业板块）。
+        # 覆盖 F10/AkShare/Sina 均不支持的北交所（920/8/4 段）及次新股。
+        # 标准 push2 主机偶发 502（服务降级/风控），自动回退 push2delay 主机
+        # （延迟行情，行业板块为低频静态数据，延迟可忽略）。
+        push2_market = "1" if prefix == "SH" else "0"
+        for push2_host in ("push2.eastmoney.com", "push2delay.eastmoney.com"):
+            try:
+                push2_url = (
+                    f"https://{push2_host}/api/qt/stock/get"
+                    f"?secid={push2_market}.{code}&fields=f57,f58,f127"
+                )
+                session = get_default_client().get_session("eastmoney")
+                resp = session.get(
+                    push2_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        quote = data.get("data") or {}
+                        industry = quote.get("f127")
+                        if industry:
+                            return code, str(industry).strip()
+                elif resp.status_code in (502, 503):
+                    logger.debug(f"  push2 {push2_host} 降级({resp.status_code})，{code} 切换备用主机")
+                    continue
+            except Exception as e:
+                logger.debug(f"  push2 {push2_host} 请求失败 {code}: {e}")
 
         return code, None
 
