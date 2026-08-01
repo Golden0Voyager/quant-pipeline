@@ -2387,55 +2387,9 @@ def test_update_us_treasury_empty(mock_ak: MagicMock):
 
 
 # ===========================================================================
-# A股补充数据 (v3.1): north_flow / index_daily / limit_up_down / dividend_summary
+# A股补充数据 (v3.1): index_daily / limit_up_down / dividend_summary
+#（north_flow 已随任务下线：北向日度流向交易所自 2024-08 停止披露）
 # ===========================================================================
-
-@patch("tasks.macro.ak")
-def test_update_north_flow_success(mock_ak: MagicMock):
-    db = MagicMock()
-    db.save_north_flow_batch.return_value = 2
-    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame({
-        "交易日": ["2026-07-10", "2026-07-10"],
-        "板块": ["沪股通", "深股通"],
-        "资金方向": ["北向", "北向"],
-        "成交净买额": [1.5, -0.8],
-    })
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_north_flow(db)
-    assert r["saved"] == 2
-    db.save_north_flow_batch.assert_called_once()
-    rec = db.save_north_flow_batch.call_args[0][0][0]
-    assert rec["market"] == "沪股通"
-    assert rec["net_buy_amount"] == 1.5
-
-
-@patch("tasks.macro.ak")
-def test_update_north_flow_empty(mock_ak: MagicMock):
-    db = MagicMock()
-    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame()
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_north_flow(db)
-    assert r["saved"] == 0
-    db.save_north_flow_batch.assert_not_called()
-
-
-@patch("tasks.macro.ak")
-def test_update_north_flow_filters_south(mock_ak: MagicMock):
-    """确认方向='南向'的行被过滤掉。"""
-    db = MagicMock()
-    db.save_north_flow_batch.return_value = 1
-    mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame({
-        "交易日": ["2026-07-10", "2026-07-10"],
-        "板块": ["沪股通", "港股通(沪)"],
-        "资金方向": ["北向", "南向"],
-        "成交净买额": [1.5, -33.4],
-    })
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_north_flow(db)
-    assert r["saved"] == 1  # 只有北向那行
-    recs = db.save_north_flow_batch.call_args[0][0]
-    assert len(recs) == 1
-    assert recs[0]["market"] == "沪股通"
 
 
 def _mk_north_hold_resp(payload: dict) -> MagicMock:
@@ -2635,7 +2589,6 @@ class TestGlobalMacroCli:
     @pytest.mark.parametrize(
         "task_name,func_name",
         [
-            ("update_north_flow", "update_north_flow"),
             ("update_index_daily", "update_index_daily"),
             ("update_limit_up_down", "update_limit_up_down"),
             ("update_dividend_summary", "update_dividend_summary"),
@@ -2670,7 +2623,6 @@ class TestGlobalMacroAkNone:
              patch("tasks.index_chain.ak", None), \
              patch("daily_pipeline.logger"):
             for fn in [
-                daily_pipeline.update_north_flow,
                 daily_pipeline.update_index_daily,
                 daily_pipeline.update_limit_up_down,
                 daily_pipeline.update_dividend_summary,
@@ -2690,13 +2642,6 @@ class TestGlobalMacroAkNone:
 # ===========================================================================
 
 class TestGlobalMacroFetchException:
-    def test_north_flow_fetch_exception(self):
-        db = MagicMock()
-        with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
-            mock_ak.stock_hsgt_fund_flow_summary_em.side_effect = ValueError("API error")
-            r = daily_pipeline.update_north_flow(db)
-        assert r["saved"] == 0
-
     def test_index_daily_fetch_exception(self):
         db = MagicMock()
         with patch("tasks.index_chain.ak") as mock_ak, patch("daily_pipeline.logger"):
@@ -2777,18 +2722,6 @@ class TestGlobalMacroDbSaveException:
 
     def _make_records(self, count: int = 1) -> list[dict]:
         return [{"x": i} for i in range(count)]
-
-    def test_north_flow_db_exception(self):
-        db = MagicMock()
-        db.save_north_flow_batch.side_effect = RuntimeError("db error")
-        with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
-            mock_ak.stock_hsgt_fund_flow_summary_em.return_value = pd.DataFrame({
-                "交易日": ["2026-07-10"], "板块": ["沪股通"],
-                "资金方向": ["北向"], "成交净买额": [1.0],
-            })
-            r = daily_pipeline.update_north_flow(db)
-        assert r["saved"] == 0
-        assert "error" in r
 
     def test_index_daily_db_exception(self):
         db = MagicMock()

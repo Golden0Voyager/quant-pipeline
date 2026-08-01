@@ -157,7 +157,8 @@ class TestRefreshPolicies:
 
     def test_all_trading_day_tasks_have_refresh_policy(self):
         specs = tuple(s for s in TASK_REGISTRY if s.cadence is Cadence.TRADING_DAY)
-        assert len(specs) == 29
+        # 28：update_north_flow 已下线（北向日度流向 2024-08 起停止披露）
+        assert len(specs) == 28
         assert all(s.refresh_policy is not None for s in specs)
         assert {s.name for s in refreshable_trading_tasks()} == {
             s.name for s in specs
@@ -273,7 +274,6 @@ class TestRefreshPolicies:
             "update_sector_fund_flow": (RefreshKind.REMOTE_RUN_SNAPSHOT, DateStrategy.RUN_SNAPSHOT),
             "update_historical_valuation": (RefreshKind.DERIVED_RECOMPUTE, DateStrategy.EXACT_TARGET),
             "update_sector_industry": (RefreshKind.DERIVED_RECOMPUTE, DateStrategy.EXACT_TARGET),
-            "update_north_flow": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
             "update_south_flow": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK),
             "update_ah_premium": (RefreshKind.REMOTE_RUN_SNAPSHOT, DateStrategy.RUN_SNAPSHOT),
             "update_etf_daily": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),

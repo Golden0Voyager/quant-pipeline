@@ -35,78 +35,9 @@ logger = logging.getLogger(__name__)
 # 北向资金
 # ===========================================================================
 
-
-def _fetch_north_flow(trade_date: str) -> list[dict]:
-    """获取北向资金流向数据（沪深港通）。"""
-    if ak is None:
-        return []
-    try:
-        df = ak.stock_hsgt_fund_flow_summary_em()
-        if df is None or df.empty:
-            return []
-        records = []
-        for _, row in df.iterrows():
-            direction = str(row.get("资金方向", "")).strip()
-            if direction != "北向":
-                continue
-            records.append(
-                {
-                    "trade_date": str(row.get("交易日", trade_date))[:10],
-                    "market": str(row.get("板块", "")).strip(),
-                    "net_buy_amount": row.get("成交净买额"),
-                    "buy_amount": None,
-                    "sell_amount": None,
-                    "cumulative_net_buy": None,
-                    "data_source": "akshare",
-                }
-            )
-        return records
-    except Exception as e:
-        logger.warning(f"⚠️ 北向资金获取失败: {e}")
-        return []
-
-
-def update_north_flow(db: DatabaseInterface) -> dict:
-    """获取北向资金流向数据并保存。
-
-    注：港交所自 2024-08 起停止披露日度北向资金净买入额，akshare 接口会返回全零
-    成交净买额。为避免写入误导性零值（下游策略会误读为"北向零流入"），当抓取到的
-    记录其 net_buy_amount 全为 None/0/NaN 时，跳过写入并记录停滞状态。
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("🌐 任务: 更新北向资金流向")
-    logger.info("=" * 60)
-
-    if ak is None:
-        logger.error("❌ akshare 未安装")
-        return {"saved": 0, "error": "akshare not installed"}
-
-    try:
-        records = _fetch_north_flow(get_expected_latest_trading_day())
-        if not records:
-            logger.warning("⚠️ 北向资金无数据")
-            return {"saved": 0, "total": 0}
-
-        # 零数据护栏：检测数据源停更（成交净买额全为零/NaN），不写入误导性占位行
-        def _is_zero(v: object) -> bool:
-            try:
-                return float(v) == 0.0  # noqa: PLR2004
-            except (TypeError, ValueError):
-                return True
-
-        if all(_is_zero(r.get("net_buy_amount")) for r in records):
-            logger.warning(
-                "⏸️  北向资金成交净买额全为零（港交所自 2024-08 停止日度披露），"
-                "跳过写入以避免误导性零值进入策略"
-            )
-            return {"status": "no_data", "saved": 0, "total": len(records), "reason": "dead_source"}
-
-        saved = db.save_north_flow_batch(records)
-        logger.info(f"✅ 北向资金保存完成: {saved} 条")
-        return {"saved": saved, "total": len(records)}
-    except Exception as e:
-        logger.error(f"❌ 北向资金更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+# update_north_flow 已下线（2026-08）：港交所自 2024-08 起停止披露日度北向
+# 资金净买入额，任务自建立起从未产出有效数据。north_flow 表保留在库中，
+# 若未来恢复披露可从 git 历史找回本任务重新接入。
 
 
 # ===========================================================================

@@ -62,7 +62,6 @@ class TestComputeCatchUpTasks:
         latest["stock_pledge"] = "2026-07-24"  # 周更
         latest["macro_monthly"] = "2026-07-20"  # 月更
         latest["quarterly_financials"] = "2026-06-30"  # 季更
-        latest["north_flow"] = None  # 无数据（源已停止披露）
         assert compute_catch_up_tasks(latest, self.EXPECTED) == []
 
     def test_long_tail_ordered_last(self):
@@ -406,7 +405,7 @@ async def test_run_task_group_uses_wait_semantics():
         return 0
 
     with patch.object(app, "_run_in_background", side_effect=fake_run):
-        await app._run_task_group("测试组", ["update_north_flow", "update_usd"])
+        await app._run_task_group("测试组", ["update_south_flow", "update_usd"])
 
     assert len(calls) == 2
     assert all(kw.get("wait") is True for kw in calls)
@@ -1533,7 +1532,7 @@ async def test_refresh_today_binding_and_action_exist():
 
 @pytest.mark.asyncio
 async def test_refresh_today_confirmation_displays_date_tasks_and_scope():
-    """确认弹窗必须显示上海目标交易日、29 个任务范围与可选股票范围输入。"""
+    """确认弹窗必须显示上海目标交易日、28 个任务范围与可选股票范围输入。"""
     from zoneinfo import ZoneInfo
 
     from textual.widgets import Input
@@ -1555,7 +1554,7 @@ async def test_refresh_today_confirmation_displays_date_tasks_and_scope():
             await pilot.pause()
             text = _screen_labels_text(screen)
             assert "2026-07-28" in text
-            assert "29" in text
+            assert "28" in text
             # 可选股票范围输入框 + 确认/取消按钮
             assert screen.query_one("#refresh-symbols", Input) is not None
             assert screen.query_one("#refresh-confirm") is not None

@@ -413,22 +413,9 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         display_label="行业分类",
     ),
     # ── Cross-market ──────────────────────────────────────────────
-    TaskSpec(
-        name="update_north_flow",
-        callable=None,
-        tables=("north_flow",),
-        cadence=Cadence.TRADING_DAY,
-        date_columns={"north_flow": "trade_date"},
-        empty_policy=EmptyPolicy.ALLOW,
-        primary_source="akshare",
-        display_label="北向资金",
-        refresh_policy=RefreshPolicy(
-            RefreshKind.REMOTE_DATE_SNAPSHOT,
-            DateStrategy.EXACT_TARGET,
-            {"north_flow": ("trade_date", "market")},
-            {"north_flow": ("trade_date", "market")},
-        ),
-    ),
+    # update_north_flow 已下线：北向逐日资金流交易所自 2024-08 停止披露，
+    # 任务/监控/收盘刷新全部移除；north_flow 表保留在库中（空表无害，
+    # 若未来恢复披露可重新接入）。北向持仓 (update_north_hold) 不受影响。
     TaskSpec(
         name="update_north_hold",
         callable=None,
