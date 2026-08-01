@@ -136,7 +136,6 @@ from tasks.macro import (
     update_global_index,
     update_gold_price,
     update_limit_up_down,
-    update_north_flow,
     update_north_hold,
     update_us_treasury,
     update_usd,
@@ -201,7 +200,6 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_historical_valuation": update_historical_valuation,
     "update_sector_industry": update_sector_industry,
     "update_industry": update_industry,
-    "update_north_flow": update_north_flow,
     "update_north_hold": update_north_hold,
     "update_south_flow": update_south_flow,
     "update_ah_premium": update_ah_premium,
@@ -453,7 +451,6 @@ def run_all(
     results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
     results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
     results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
-    results["north_flow"] = _run_task("update_north_flow", update_north_flow, db)
     results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
     results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
     results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
