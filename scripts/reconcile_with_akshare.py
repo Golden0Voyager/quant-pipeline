@@ -956,6 +956,24 @@ def main():
         if not args.resume:
             clear_retry_file()
 
+    # 退市过滤：daily_bars 会保留退市股历史，但数据源不再提供其行情，
+    # 对账必然失败并永久滞留失败队列（2026-08-02：4 只退市股反复重试）。
+    # 以 stock_list（现存上市列表）为准过滤；读取失败时不过滤（fail-open）。
+    try:
+        cursor.execute("SELECT code FROM stock_list")
+        listed = {str(row[0]).split(".")[0] for row in cursor.fetchall()}
+    except sqlite3.Error:
+        listed = set()
+    if listed:
+        delisted = sorted(s for s in symbols if s.split(".")[0] not in listed)
+        if delisted:
+            symbols = [s for s in symbols if s.split(".")[0] in listed]
+            preview = ", ".join(delisted[:10]) + ("…" if len(delisted) > 10 else "")
+            logger.info(
+                f"⏭️ 跳过 {len(delisted)} 只已退市/不在股票列表的代码"
+                f"（历史数据保留，不再对账）: {preview}"
+            )
+
     cursor.close()
 
     # 探测数据源可用性（东财/新浪）
