@@ -142,3 +142,18 @@ def test_get_latest_dates(tmp_path):
     result = get_latest_dates(str(db_file))
     assert result.get("daily_bars") == "2026-07-07"
     assert result.get("indicators") == "2026-07-06"
+
+
+def test_get_latest_dates_covers_legacy_panel_tables(tmp_path):
+    """面板查询必须覆盖无注册任务的历史遗留表（institutional_holdings）。"""
+    import sqlite3
+
+    from core.freshness import get_latest_dates
+    db_file = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE institutional_holdings (report_date TEXT)")
+    conn.execute("INSERT INTO institutional_holdings VALUES ('2026-06-30')")
+    conn.commit()
+    conn.close()
+    result = get_latest_dates(str(db_file))
+    assert result["institutional_holdings"] == "2026-06-30"
