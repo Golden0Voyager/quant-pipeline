@@ -186,6 +186,27 @@ def _probe_data_source() -> bool:
     return False
 
 
+def _normalize_eastmoney_df(df: pd.DataFrame) -> pd.DataFrame:
+    """东财 stock_zh_a_hist 返回值统一为标准列名。"""
+    df = df.rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "换手率": "turnover_rate",
+            "涨跌幅": "pct_change",
+            "振幅": "amplitude",
+        }
+    )
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df["data_source"] = "eastmoney"
+    return df
+
+
 def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
     从 AkShare 获取股票历史数据。
@@ -193,6 +214,9 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     根据 _eastmoney_available 全局标记决定使用东财还是新浪：
     - 东财可用 → 尝试东财（3 次退避重试），失败后切新浪并永久标记不可用
     - 东财不可用 → 直接走新浪，不浪费时间重试
+    - 北交所（4/8/920 前缀）：新浪日线不支持，永不走新浪；即使东财被
+      全局禁用也单独为其尝试一次东财，失败则如实入队
+      （2026-08-02 事故：332 只北交所在新浪路径上结构性失败）
     """
     global _eastmoney_available
     if ak is None:
@@ -201,6 +225,7 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
 
     code = symbol.split(".")[0]
     original_timeout = socket.getdefaulttimeout()
+    is_beijing = code.startswith(("4", "8", "920"))
 
     # --- 如果东财可用，尝试东财 (stock_zh_a_hist) ---
     if _eastmoney_available:
@@ -232,23 +257,29 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
                 socket.setdefaulttimeout(original_timeout)
 
         if not df.empty:
-            df = df.rename(
-                columns={
-                    "日期": "date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                    "换手率": "turnover_rate",
-                    "涨跌幅": "pct_change",
-                    "振幅": "amplitude",
-                }
-            )
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-            df["data_source"] = "eastmoney"
-            return df
+            return _normalize_eastmoney_df(df)
+
+    # --- 北交所：新浪不支持，东财被禁用时也单独尝试一次东财 ---
+    if is_beijing:
+        try:
+            socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
+            with no_proxy():
+                df = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="qfq",
+                )
+        except Exception as e:
+            logger.warning(f"  {symbol} 北交所东财获取失败（新浪不支持北交所）: {e}")
+            return pd.DataFrame()
+        finally:
+            socket.setdefaulttimeout(original_timeout)
+        if df.empty:
+            logger.warning(f"  {symbol} 北交所东财无数据")
+            return pd.DataFrame()
+        return _normalize_eastmoney_df(df)
 
     # --- 东财不可用或已失败：直走新浪 (stock_zh_a_daily) ---
     logger.info(f"  {symbol} 使用新浪接口...")
