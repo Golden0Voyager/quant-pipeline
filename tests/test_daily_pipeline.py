@@ -1107,7 +1107,7 @@ class TestMain:
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -1134,7 +1134,7 @@ class TestMain:
         pre_existing = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name}
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}):
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}):
             f.configure.return_value = None
             f.get_db.return_value = db_mock
             f.get_loader.return_value = MagicMock()
@@ -1160,7 +1160,7 @@ class TestMain:
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
@@ -1179,6 +1179,41 @@ class TestMain:
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
             mock_fn.assert_called_once_with(db, loader)
+
+
+class TestDailyTierEntry:
+    def test_task_daily_dispatches_to_daily_core(self, weekday_mock):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "daily"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.update_daily_core") as fn, \
+             patch("daily_pipeline._acquire_lock"), \
+             patch("daily_pipeline._release_lock", create=True), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_daily_core": fn}), \
+             patch("daily_pipeline.logger"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            fn.return_value = {"crashed": False}
+            daily_pipeline.main()
+            fn.assert_called_once()
+
+    def test_task_all_is_daily_alias(self, weekday_mock):
+        """all 收窄为每日层别名：不再跑 WEEKLY/MONTHLY/QUARTERLY 任务。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "all"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.update_daily_core") as fn, \
+             patch("daily_pipeline._acquire_lock"), \
+             patch("daily_pipeline._release_lock", create=True), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_daily_core": fn}), \
+             patch("daily_pipeline.logger"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            fn.return_value = {"crashed": False}
+            daily_pipeline.main()
+            fn.assert_called_once()
 
 
 # ===========================================================================
@@ -1487,12 +1522,12 @@ class TestRefreshTodayCLI:
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
              patch("daily_pipeline.run_close_refresh") as refresh, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as run_all_mock:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as daily_mock:
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-        run_all_mock.assert_called_once()
+        daily_mock.assert_called_once()
         refresh.assert_not_called()
 
     def test_task_conflicts_with_refresh_today(self, capsys):
@@ -2224,12 +2259,12 @@ def test_run_all_notifies_error_with_failed_task_names():
     assert "bars" in message
 
 
-def test_main_exits_one_when_run_all_returns_crashed():
-    """main() must exit with code 1 when run_all returns crashed=True."""
+def test_main_exits_one_when_daily_core_returns_crashed():
+    """main() must exit with code 1 when the daily tier returns crashed=True."""
     with patch.object(sys, "argv",
                       ["daily_pipeline.py", "--task", "all", "--force"]), \
          patch("daily_pipeline._should_update", return_value=True), \
-         patch("daily_pipeline.run_all",
+         patch("daily_pipeline.update_daily_core",
                return_value={"crashed": True, "bars": {"status": "crashed"}}), \
          patch("daily_pipeline._acquire_lock"), \
          patch("daily_pipeline._release_lock"), \
@@ -3543,7 +3578,7 @@ class TestMainMoreTasks:
         """中断必须以 130 退出，调度器/TUI 才能区分'被取消'与'成功'。"""
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", side_effect=KeyboardInterrupt), \
+             patch("daily_pipeline.update_daily_core", side_effect=KeyboardInterrupt), \
              patch("daily_pipeline.logger"):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
