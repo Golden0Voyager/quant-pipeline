@@ -23,6 +23,7 @@ import datetime as _datetime_module  # noqa: F401 — re-export for test patches
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
@@ -582,6 +583,72 @@ def weekly_backfill(
     return results
 
 
+_REPAIR_CHAIN: tuple[str, ...] = (
+    "backup_database.py",
+    "reconcile_with_akshare.py",
+    "validate_and_vacuum.py",
+)
+
+
+def _run_repair_script(script: str) -> dict:
+    """以子进程运行 scripts/ 下的修复脚本，返回 safe_task 兼容结果。"""
+    path = Path(__file__).parent / "scripts" / script
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(path)],
+            capture_output=True, text=True, timeout=3600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"status": "failed", "error": f"{script}: {e}"}
+    if proc.returncode != 0:
+        return {"status": "failed",
+                "error": f"{script} exited {proc.returncode}: {proc.stderr[-500:]}"}
+    return {"status": "ok", "output_tail": proc.stdout[-500:]}
+
+
+def monthly_repair(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    force: bool = False,
+) -> dict:
+    """每月数据修复层：MONTHLY/QUARTERLY 任务 → 备份→对账→vacuum → health。"""
+    start_time = time.time()
+    logger.info("\n🛠️ 每月数据修复层启动 (MONTHLY + QUARTERLY + 修复链)")
+    results: dict[str, Any] = {}
+
+    for spec in TASK_REGISTRY:
+        if spec.cadence in (Cadence.MONTHLY, Cadence.QUARTERLY):
+            results[spec.name] = _run_registry_task(
+                spec.name, db, loader, engine, force=force
+            )
+
+    # 修复链：backup 失败则中止后续（不允许无备份修复），其余失败继续并汇总
+    for script in _REPAIR_CHAIN:
+        step = _run_repair_script(script)
+        results[f"repair:{script}"] = step
+        if script == "backup_database.py" and step.get("status") != "ok":
+            logger.error("❌ 备份失败，中止修复链后续步骤")
+            break
+
+    results["health"] = _run_registry_task("health_check", db, loader, engine)
+
+    db.close()
+    elapsed = time.time() - start_time
+    failed_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict)
+        and v.get("status") in {"degraded", "failed", "aborted"}
+    )
+    results["crashed"] = bool(failed_tasks)
+    if failed_tasks:
+        notify_all("error", "每月修复完成（含失败步骤）",
+                   f"耗时 {elapsed / 60:.1f}min，失败: {', '.join(failed_tasks)}")
+    else:
+        notify_all("info", "每月修复全部完成", f"耗时 {elapsed / 60:.1f}min")
+    return results
+
+
 # ===========================================================================
 # 收盘刷新（--refresh-today）
 # ===========================================================================
@@ -784,6 +851,10 @@ def main():
                 sys.exit(1)
         elif task == "weekly_backfill":
             results = weekly_backfill(db, loader, engine, force=args.force)
+            if results.get("crashed"):
+                sys.exit(1)
+        elif task == "monthly_repair":
+            results = monthly_repair(db, loader, engine, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
         elif task in _TASK_CALLABLES:
