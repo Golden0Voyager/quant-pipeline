@@ -154,6 +154,233 @@ def table_date_columns() -> dict[str, str]:
     return out
 
 
+def task_to_table() -> dict[str, list[str]]:
+    """Derived view: ``{task_name: [tables]}`` for tasks that write tables."""
+    return {spec.name: list(spec.tables) for spec in TASK_REGISTRY if spec.tables}
+
+
+# ── presentation metadata (single source; consumed by tui.py) ─────────
+
+# 以下常量自 tui.py 一次性搬入（2026-08-01 元数据收敛），键为表名/组名。
+TABLE_LABELS: dict[str, str] = {
+    # 行情核心
+    "daily_bars": "Daily Bars",
+    "indicators": "Indicators",
+    # 基本面
+    "fundamentals": "Fundamentals",
+    "historical_valuation": "Valuation",
+    "quarterly_financials": "Quarterly Fin.",
+    "dividend_summary": "Dividends",
+    # 资金面
+    "fund_flow": "Fund Flow",
+    "margin_trading": "Margin Trading",
+    "dragon_tiger": "Dragon Tiger",
+    "block_trade": "Block Trade",
+    "sector_fund_flow": "Sector Flow",
+    "north_hold": "North Hold",
+    # 行业/大盘
+    "sector_industry": "Industry",
+    "index_daily": "Index Daily",
+    "limit_up_down": "Limit U/D",
+    # 股东
+    "shareholder_count": "Shareholders",
+    "institutional_holdings": "Inst. Holdings",
+    # 筹码分布
+    "chip_distribution": "Chip Dist.",
+    "chip_distribution_em": "Chip EM",
+    # 宏观
+    "gold_price": "Gold Price",
+    "crude_oil": "Crude Oil",
+    "fx_rate": "USD/CNY",
+    "global_index": "Global Index",
+    "us_treasury": "US Treasury",
+    # 期货
+    "futures_daily": "Futures",
+    # 衍生数据
+    "south_flow": "South Flow",
+    "ah_premium": "AH Premium",
+    "etf_daily": "ETF Daily",
+    "cb_quotation": "CB Quotation",
+    "cb_redeem": "CB Redeem",
+    "cb_index": "CB Index",
+    "restricted_share": "Restricted Share",
+    "earnings_forecast": "Earnings Forecast",
+    "stock_repurchase": "Stock Repurchase",
+    "institution_survey": "Institution Survey",
+    "stock_pledge": "Stock Pledge",
+    "option_sentiment": "Option Sentiment",
+    "sector_daily": "Sector Daily",
+    "sector_valuation": "Sector Val.",
+    "index_futures_basis": "Futures Basis",
+    # 宏观
+    "macro_monthly": "Macro Monthly",
+    "macro_quarterly": "Macro Quarterly",
+    # 总览
+    "stock_list": "Stock List",
+}
+
+TABLE_LABELS_CN: dict[str, str] = {
+    # 行情核心
+    "daily_bars": "日线行情",
+    "indicators": "技术指标",
+    # 基本面
+    "fundamentals": "基本面数据",
+    "historical_valuation": "历史估值",
+    "quarterly_financials": "季度财务",
+    "dividend_summary": "分红信息",
+    # 资金面
+    "fund_flow": "资金流向",
+    "margin_trading": "融资融券",
+    "dragon_tiger": "龙虎榜",
+    "block_trade": "大宗交易",
+    "sector_fund_flow": "板块资金",
+    "north_hold": "北向持仓",
+    # 行业/大盘
+    "sector_industry": "行业分类",
+    "index_daily": "大盘指数",
+    "limit_up_down": "涨跌停",
+    # 股东
+    "shareholder_count": "股东户数",
+    "institutional_holdings": "机构持仓",
+    # 筹码分布
+    "chip_distribution": "筹码分布",
+    "chip_distribution_em": "筹码分布(EM)",
+    # 宏观
+    "gold_price": "黄金价格",
+    "crude_oil": "原油价格",
+    "fx_rate": "汇率",
+    "global_index": "全球指数",
+    "us_treasury": "美债收益率",
+    # 期货
+    "futures_daily": "期货日线",
+    # 衍生数据
+    "south_flow": "南向资金",
+    "ah_premium": "AH溢价",
+    "etf_daily": "ETF日线",
+    "cb_quotation": "可转债行情",
+    "cb_redeem": "可转债强赎",
+    "cb_index": "可转债指数",
+    "restricted_share": "限售解禁",
+    "earnings_forecast": "业绩预告",
+    "stock_repurchase": "股票回购",
+    "institution_survey": "机构调研",
+    "stock_pledge": "股票质押",
+    "option_sentiment": "期权情绪",
+    "sector_daily": "行业涨跌幅",
+    "sector_valuation": "板块估值",
+    "index_futures_basis": "基差",
+    # 宏观
+    "macro_monthly": "宏观(月)",
+    "macro_quarterly": "宏观(季)",
+    # 总览
+    "stock_list": "股票列表",
+}
+
+# 任务分组：把相似的 single task 聚合成一键顺序执行的按钮组
+TASK_GROUPS: dict[str, list[str]] = {
+    "core": [
+        "update_bars",
+        "update_indicators",
+        "update_fundamentals",
+        "update_chip_distribution",
+        "update_chip_distribution_em",
+        "update_chip_distribution_em_fullmarket",
+        "update_market_snapshot",
+    ],
+    "fund": [
+        "update_fund_flow",
+        "update_sector_fund_flow",
+        "update_north_hold",
+        "update_margin_trading",
+        "update_dragon_tiger",
+        "update_block_trade",
+    ],
+    "valuation": [
+        "update_historical_valuation",
+        "update_quarterly_financials",
+        "update_shareholder_count",
+        "update_dividend_summary",
+    ],
+    "macro": [
+        "update_china_macro",
+        "update_gold_price",
+        "update_crude_oil",
+        "update_usd",
+        "update_global_index",
+        "update_us_treasury",
+        "update_futures",
+    ],
+    "sector_index": [
+        "update_sector_industry",
+        "update_industry",
+        "update_sector_derivatives",
+        "update_index_daily",
+        "update_limit_up_down",
+    ],
+    "derivatives": [
+        "update_etf_daily",
+        "update_cb_quotation",
+        "update_cb_redeem",
+        "update_cb_index",
+        "update_south_flow",
+        "update_ah_premium",
+    ],
+    "events": [
+        "update_restricted_share",
+        "update_earnings_forecast",
+        "update_stock_repurchase",
+        "update_institution_survey",
+        "update_stock_pledge",
+        "update_option_sentiment",
+    ],
+}
+
+# 补齐缺失按钮的任务执行顺序：与 run_all 的"依赖先行、长尾垫底"一致。
+# 一张表可能有多个 owner 任务（如 chip_distribution_em 的日常/全市场版），
+# 按此列表先到先得，确保选到日常任务而非 ON_DEMAND 任务。
+CATCH_UP_TASK_ORDER: tuple[str, ...] = (
+    "update_bars",
+    "update_indicators",
+    "update_chip_distribution",
+    "update_fundamentals",
+    "update_market_snapshot",
+    "update_historical_valuation",
+    "update_sector_fund_flow",
+    "update_sector_industry",
+    "update_fund_flow",
+    "update_margin_trading",
+    "update_dragon_tiger",
+    "update_block_trade",
+    "update_limit_up_down",
+    "update_index_daily",
+    "update_market_valuation",
+    "update_concept_board",
+    "update_south_flow",
+    "update_ah_premium",
+    "update_etf_daily",
+    "update_cb_quotation",
+    "update_cb_redeem",
+    "update_cb_index",
+    "update_sector_derivatives",
+    "update_option_sentiment",
+    "update_stock_repurchase",
+    "update_institution_survey",
+    "update_stock_pledge",
+    "update_restricted_share",
+    "update_earnings_forecast",
+    "update_dividend_summary",
+    "update_gold_price",
+    "update_crude_oil",
+    "update_usd",
+    "update_global_index",
+    "update_us_treasury",
+    "update_futures",
+    "update_china_macro",
+    "update_money_market",
+    "update_chip_distribution_em",
+)
+
+
 def refreshable_trading_tasks() -> tuple[TaskSpec, ...]:
     """Return the trading-day tasks explicitly eligible for close refresh."""
     return tuple(
