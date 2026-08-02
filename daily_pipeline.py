@@ -12,6 +12,8 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
     python daily_pipeline.py --task daily      # 每日层（TRADING_DAY+DAILY+ON_DEMAND）
     python daily_pipeline.py --task all        # daily 的兼容别名
     python daily_pipeline.py --task update_daily_core  # daily 的兼容别名
+    python daily_pipeline.py --task weekly_backfill    # 每周层：WEEKLY 任务+补齐缺漏+retry+health（手动触发）
+    python daily_pipeline.py --task monthly_repair     # 每月层：MONTHLY/QUARTERLY 任务+备份→对账→vacuum 修复链+health（手动触发）
     python daily_pipeline.py --task update_bars
     python daily_pipeline.py --task update_bars --resume
     python daily_pipeline.py --task health_check
