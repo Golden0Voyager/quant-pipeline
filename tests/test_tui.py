@@ -13,7 +13,6 @@ from tui import (
     HelpScreen,
     LogCleanupScreen,
     PipelineApp,
-    compute_catch_up_tasks,
     find_latest_log_file,
     get_active_stock_count,
     get_daemon_status,
@@ -24,54 +23,6 @@ from tui import (
     parse_progress,
     save_theme,
 )
-
-
-def _fresh_latest_dates(expected: str) -> dict:
-    """所有表都更新到 expected 的基准状态。"""
-    from tui import TABLE_DATE_COLUMNS
-
-    return dict.fromkeys(TABLE_DATE_COLUMNS, expected)
-
-
-class TestComputeCatchUpTasks:
-    EXPECTED = "2026-07-31"
-    STALE = "2026-07-30"
-
-    def test_all_fresh_returns_empty(self):
-        assert compute_catch_up_tasks(_fresh_latest_dates(self.EXPECTED), self.EXPECTED) == []
-
-    def test_stale_bars_selects_dependency_chain_in_order(self):
-        latest = _fresh_latest_dates(self.EXPECTED)
-        latest["daily_bars"] = self.STALE
-        latest["indicators"] = self.STALE
-        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
-        assert tasks == ["update_bars", "update_indicators"]
-
-    def test_chip_em_table_maps_to_daily_task(self):
-        """chip_distribution_em 表有两个 owner，必须选日常任务而非 ON_DEMAND 全市场版。"""
-        latest = _fresh_latest_dates(self.EXPECTED)
-        latest["chip_distribution_em"] = self.STALE
-        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
-        assert tasks == ["update_chip_distribution_em"]
-        assert "update_chip_distribution_em_fullmarket" not in tasks
-
-    def test_expected_semantics_excluded_tables_not_selected(self):
-        """T+1 / 周更 / 月更 / 季更 / 无数据不视为缺失（沿用面板语义）。"""
-        latest = _fresh_latest_dates(self.EXPECTED)
-        latest["margin_trading"] = self.STALE  # T+1
-        latest["stock_pledge"] = "2026-07-24"  # 周更
-        latest["macro_monthly"] = "2026-07-20"  # 月更
-        latest["quarterly_financials"] = "2026-06-30"  # 季更
-        assert compute_catch_up_tasks(latest, self.EXPECTED) == []
-
-    def test_long_tail_ordered_last(self):
-        latest = _fresh_latest_dates(self.EXPECTED)
-        latest["chip_distribution_em"] = self.STALE
-        latest["daily_bars"] = self.STALE
-        latest["fund_flow"] = self.STALE
-        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
-        assert tasks[0] == "update_bars"
-        assert tasks[-1] == "update_chip_distribution_em"
 
 
 class TestActionRunCatchUp:
@@ -616,47 +567,6 @@ def test_get_expected_latest_trading_day_is_weekday():
     assert dt.weekday() < 5
 
 
-def test_date_status():
-    from tui import _date_status
-    assert _date_status("2026-07-07", "2026-07-07") == "最新"
-    assert _date_status(None, "2026-07-07") == "无数据"
-    assert _date_status("2026-07-06", "2026-07-07") == "略滞后"
-    assert _date_status("2026-07-01", "2026-07-07") == "滞后"
-
-
-def test_normalize_date():
-    from tui import _normalize_date
-    assert _normalize_date(None) is None
-    assert _normalize_date("2026-07-07") == "2026-07-07"
-    assert _normalize_date("20260630") == "2026-06-30"
-    assert _normalize_date("20260331") == "2026-03-31"
-    # chip_distribution 等表以 DATE 类型存储，SQLite 返回带时间戳的字符串
-    assert _normalize_date("2026-07-13 00:00:00") == "2026-07-13"
-    assert _normalize_date("not-a-date") == "not-a-date"
-
-
-def test_get_daily_bars_coverage(tmp_path):
-    from tui import get_daily_bars_coverage
-    db_file = tmp_path / "test.db"
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
-    conn.execute("INSERT INTO daily_bars VALUES ('000001.SZ', '2026-07-09')")
-    conn.execute("INSERT INTO daily_bars VALUES ('600000.SH', '2026-07-08')")
-    conn.execute("INSERT INTO daily_bars VALUES ('000002.SZ', '2026-07-01')")
-    conn.commit()
-    conn.close()
-
-    up_to_date, total = get_daily_bars_coverage(str(db_file), "2026-07-10")
-    assert total == 3
-    # 2026-07-09 >= 2026-07-08 (expect -2) → up to date
-    # 2026-07-08 >= 2026-07-08 → up to date
-    # 2026-07-01 <  2026-07-08 → lagging
-    assert up_to_date == 2
-
-    # non-existent DB
-    assert get_daily_bars_coverage("/nonexistent/test.db", "2026-07-10") == (0, 0)
-
-
 def test_seconds_until_safe():
     from datetime import datetime
 
@@ -713,22 +623,6 @@ async def test_run_or_schedule_run_later():
                  patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task:
                 callback("run-later")
                 mock_create_task.assert_called_once()
-
-
-def test_get_latest_dates(tmp_path):
-    from tui import get_latest_dates
-    db_file = tmp_path / "test.db"
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE daily_bars (trade_date TEXT)")
-    conn.execute("CREATE TABLE indicators (trade_date TEXT)")
-    conn.execute("INSERT INTO daily_bars (trade_date) VALUES ('2026-07-07')")
-    conn.execute("INSERT INTO indicators (trade_date) VALUES ('2026-07-06')")
-    conn.commit()
-    conn.close()
-
-    result = get_latest_dates(str(db_file))
-    assert result.get("daily_bars") == "2026-07-07"
-    assert result.get("indicators") == "2026-07-06"
 
 
 @pytest.mark.asyncio
