@@ -13,6 +13,7 @@
 - **数据源优先级**: AkShare > 静默（写操作禁用 yfinance fallback）
 - **市场前缀规则**: `6`/`9` → sh, `0`/`2`/`3` → sz, `4`/`8`/`920` → bj
 - **质量保障**: ruff + mypy + pytest CI 校验
+- **三层次入口**: `--task daily`（=`all`）每日层；`weekly_backfill`/`monthly_repair` 每周/每月层仅手动触发（CLI 或 TUI W/M 键）
 
 ---
 
