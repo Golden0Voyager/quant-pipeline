@@ -254,6 +254,7 @@ def _run_registry_task(
     limit: int | None = None,
     resume: bool = False,
     force: bool = False,
+    health_fast: bool = False,
 ) -> Any:
     fn = _TASK_CALLABLES.get(task_name)
     if fn is None:
@@ -302,6 +303,11 @@ def _run_registry_task(
             task_name, fn, db, loader,
             limit=limit, resume=resume, symbols=symbols, force=force,
         )
+
+    if task_name == "health_check":
+        # weekly/monthly 批处理末尾传 health_fast=True 走 page_count 估算；
+        # 手动 --task health_check 不传该参数，保持精确 COUNT(*) 口径
+        return _safe_task(task_name, fn, db, fast=health_fast)
 
     if task_name == "update_daily_core":
         # 编排器：内部各任务已各自经过 safe_task，不再包一层
@@ -502,7 +508,7 @@ def run_all(
         "update_chip_distribution_em", update_chip_distribution_em, db
     )
 
-    results["health"] = _run_task("health_check", health_check, db)
+    results["health"] = _run_task("health_check", health_check, db, fast=True)
 
     db.close()
     elapsed = time.time() - start_time
@@ -565,7 +571,7 @@ def weekly_backfill(
 
     # 3. 失败股票重抓 + 4. 健康报告
     results["retry"] = _run_registry_task("retry", db, loader, engine)
-    results["health"] = _run_registry_task("health_check", db, loader, engine)
+    results["health"] = _run_registry_task("health_check", db, loader, engine, health_fast=True)
 
     db.close()
     elapsed = time.time() - start_time
@@ -631,7 +637,7 @@ def monthly_repair(
             logger.error("❌ 备份失败，中止修复链后续步骤")
             break
 
-    results["health"] = _run_registry_task("health_check", db, loader, engine)
+    results["health"] = _run_registry_task("health_check", db, loader, engine, health_fast=True)
 
     db.close()
     elapsed = time.time() - start_time
