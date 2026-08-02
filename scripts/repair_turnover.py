@@ -26,6 +26,10 @@ socket.setdefaulttimeout(20)
 _CODE_DIR = str(Path("~/Code").expanduser())
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
+# 仓库根目录：fetch_xueqiu_turnover 需要 import core.stock_cyq_em
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 _HUNTER_SRC = str(Path("~/Code/quant_hunter/src").expanduser())
 if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
     sys.path.insert(0, _HUNTER_SRC)
@@ -120,14 +124,45 @@ def fetch_eastmoney_turnover(symbol: str, start_date: str, end_date: str) -> lis
     ]
 
 
-def fetch_turnover(symbol: str, start_date: str, end_date: str) -> list[tuple[str, float]]:
-    """先尝试 Sina，失败或为空则 fallback 到东方财富。
+def fetch_xueqiu_turnover(symbol: str, start_date: str, end_date: str) -> list[tuple[str, float]]:
+    """雪球 K 线换手率（复用筹码模块的抓取），东财被指纹封锁时的兜底。
 
-    北交所（4/8/920 前缀）：新浪日线不支持，直接走东财，
-    不浪费一次注定失败的新浪请求。
+    雪球覆盖北交所；需 XUEQIU_TOKEN（与雪球行情快照任务同一凭证）。
+    """
+    from core.stock_cyq_em import _fetch_kline_xueqiu
+
+    code = symbol.split(".")[0]
+    records = _fetch_kline_xueqiu(code)
+    if not records:
+        return []
+
+    def _dash(d: str) -> str:
+        return d if "-" in d else f"{d[:4]}-{d[4:6]}-{d[6:]}"
+
+    lo, hi = _dash(start_date), _dash(end_date)
+    return [
+        (r["date"], float(r["turnover_rate"]))
+        for r in records
+        if lo <= r["date"] <= hi and (r.get("turnover_rate") or 0) > 0
+    ]
+
+
+def fetch_turnover(symbol: str, start_date: str, end_date: str) -> list[tuple[str, float]]:
+    """多源级联获取换手率。
+
+    - 北交所（4/8/920）：新浪不支持 → 东财 → 雪球
+    - 其余：新浪 → 东财 → 雪球
+    雪球兜底针对东财封锁普通请求 TLS 指纹的时段
+    （2026-08-02：333 只北交所在东财通道全部 RemoteDisconnected）。
     """
     if is_beijing_stock(symbol):
-        return fetch_eastmoney_turnover(symbol, start_date, end_date)
+        try:
+            updates = fetch_eastmoney_turnover(symbol, start_date, end_date)
+            if updates:
+                return updates
+        except Exception:
+            pass
+        return fetch_xueqiu_turnover(symbol, start_date, end_date)
 
     try:
         updates = fetch_sina_turnover(symbol, start_date, end_date)
@@ -137,7 +172,14 @@ def fetch_turnover(symbol: str, start_date: str, end_date: str) -> list[tuple[st
         pass
 
     # Sina 失败或返回空：常见于科创板 CDR，尝试东财接口
-    return fetch_eastmoney_turnover(symbol, start_date, end_date)
+    try:
+        updates = fetch_eastmoney_turnover(symbol, start_date, end_date)
+        if updates:
+            return updates
+    except Exception:
+        pass
+
+    return fetch_xueqiu_turnover(symbol, start_date, end_date)
 
 
 def get_symbols_to_repair(cur: sqlite3.Cursor, cutoff: str) -> list[str]:
