@@ -154,6 +154,15 @@ def table_date_columns() -> dict[str, str]:
     return out
 
 
+# 无注册任务但面板仍监控的历史表（写入任务已下线，表数据真实存在）
+LEGACY_PANEL_DATE_COLUMNS: dict[str, str] = {"institutional_holdings": "report_date"}
+
+
+def panel_date_columns() -> dict[str, str]:
+    """面板新鲜度查询集合：注册表 ∪ 历史遗留监控表。"""
+    return {**table_date_columns(), **LEGACY_PANEL_DATE_COLUMNS}
+
+
 def task_to_table() -> dict[str, list[str]]:
     """Derived view: ``{task_name: [tables]}`` for tasks that write tables."""
     return {spec.name: list(spec.tables) for spec in TASK_REGISTRY if spec.tables}
@@ -569,7 +578,7 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         callable=None,
         tables=("shareholder_count",),
         cadence=Cadence.QUARTERLY,
-        date_columns={"shareholder_count": "trade_date"},
+        date_columns={"shareholder_count": "report_date"},
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="股东户数",
@@ -579,7 +588,7 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         callable=None,
         tables=("quarterly_financials",),
         cadence=Cadence.QUARTERLY,
-        date_columns={"quarterly_financials": "end_date"},
+        date_columns={"quarterly_financials": "report_period"},
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="季度财务",
@@ -812,7 +821,7 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         callable=None,
         tables=("dividend_summary",),
         cadence=Cadence.DAILY,
-        date_columns={"dividend_summary": "trade_date"},
+        date_columns={"dividend_summary": "updated_at"},
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="分红送转",
