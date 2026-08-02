@@ -11,9 +11,11 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from core.task_result import TaskStatus, normalize_task_result
+from tasks.bars import _source_has_trading_day
 from tasks.utility import health_check, retry_failed
 
 # ===========================================================================
@@ -391,3 +393,108 @@ class TestRetryFailed:
             failed_queue=["000001.SZ"],
         )
         mock_clear.assert_not_called()
+
+
+# ===========================================================================
+# retry_failed：源端无新数据（当日停牌/未交易）跳过语义
+# ===========================================================================
+class TestRetrySkipsNoSourceData:
+    def test_skips_symbol_when_source_has_day_but_stock_does_not(self):
+        """哨兵可证源端有预期交易日数据，个股无 → 当日停牌/未交易，移出队列。"""
+        with patch(
+            "tasks.utility.ProgressTracker.load",
+            return_value={"task": "retry", "failed_queue": ["600238", "600439"]},
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar", return_value="failed"
+        ), patch(
+            "tasks.utility.get_expected_latest_trading_day", return_value="2026-07-31"
+        ), patch(
+            "tasks.utility._source_has_trading_day", return_value=True
+        ), patch("tasks.utility.logger"):
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert result["status"] == "success"
+        assert result["failed"] == 0
+        assert result["skipped_no_data"] == 2
+        mock_clear.assert_called_once()
+        mock_save.assert_not_called()
+
+    def test_keeps_symbol_when_source_lacks_day(self):
+        """哨兵也无预期日数据（源端问题）→ 失败保留重试资格。"""
+        with patch(
+            "tasks.utility.ProgressTracker.load",
+            return_value={"task": "retry", "failed_queue": ["600238"]},
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar", return_value="failed"
+        ), patch(
+            "tasks.utility.get_expected_latest_trading_day", return_value="2026-07-31"
+        ), patch(
+            "tasks.utility._source_has_trading_day", return_value=False
+        ), patch("tasks.utility.logger"):
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert result["status"] == "degraded"
+        assert result["failed"] == 1
+        assert result["skipped_no_data"] == 0
+        mock_save.assert_called_once()
+        mock_clear.assert_not_called()
+
+    def test_mixed_outcomes(self):
+        """成功与停牌跳过并存时分别计数；本轮源端有数时所有 failed 均按无数据处理。"""
+        with patch(
+            "tasks.utility.ProgressTracker.load",
+            return_value={"task": "retry", "failed_queue": ["000001", "600238", "600439"]},
+        ), patch(
+            "tasks.utility.ProgressTracker.clear"
+        ) as mock_clear, patch(
+            "tasks.utility.ProgressTracker.save"
+        ) as mock_save, patch(
+            "tasks.utility._update_single_bar",
+            side_effect=["success", "failed", "failed"],
+        ), patch(
+            "tasks.utility.get_expected_latest_trading_day", return_value="2026-07-31"
+        ), patch(
+            "tasks.utility._source_has_trading_day", return_value=True
+        ), patch("tasks.utility.logger"):
+            result = retry_failed(MagicMock(), MagicMock())
+
+        assert result["success"] == 1
+        assert result["skipped_no_data"] == 2
+        assert result["failed"] == 0
+        assert result["status"] == "success"
+        mock_clear.assert_called_once()
+        mock_save.assert_not_called()
+
+
+# ===========================================================================
+# _source_has_trading_day 哨兵判定
+# ===========================================================================
+class TestSourceHasTradingDay:
+    def test_true_when_canary_covers_expected_day(self):
+        loader = MagicMock()
+        loader.get_daily_bars.return_value = pd.DataFrame(
+            {"trade_date": ["2026-07-30", "2026-07-31"]}
+        )
+        assert _source_has_trading_day(loader, "2026-07-31") is True
+
+    def test_false_when_canary_lags(self):
+        loader = MagicMock()
+        loader.get_daily_bars.return_value = pd.DataFrame(
+            {"trade_date": ["2026-07-29", "2026-07-30"]}
+        )
+        assert _source_has_trading_day(loader, "2026-07-31") is False
+
+    def test_false_on_empty_or_error(self):
+        loader = MagicMock()
+        loader.get_daily_bars.return_value = pd.DataFrame()
+        assert _source_has_trading_day(loader, "2026-07-31") is False
+        loader.get_daily_bars.side_effect = ConnectionError("down")
+        assert _source_has_trading_day(loader, "2026-07-31") is False
