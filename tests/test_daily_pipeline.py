@@ -3890,3 +3890,61 @@ class TestWeeklyBackfill:
             results = daily_pipeline.weekly_backfill(db, loader, engine)
         assert results["crashed"] is True
         assert mock_notify.call_args.args[0] == "error"
+
+
+class TestMonthlyRepair:
+    def _mocks(self):
+        return MagicMock(), MagicMock(), MagicMock()
+
+    def test_runs_monthly_quarterly_tasks_then_repair_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        monthly = [s.name for s in daily_pipeline.TASK_REGISTRY
+                   if s.cadence in (daily_pipeline.Cadence.MONTHLY,
+                                    daily_pipeline.Cadence.QUARTERLY)]
+        calls: list[str] = []
+        scripts: list[str] = []
+
+        with patch("daily_pipeline._run_registry_task",
+                   side_effect=lambda n, *a, **k: (calls.append(n), {"status": "ok"})[1]), \
+             patch("daily_pipeline._run_repair_script",
+                   side_effect=lambda s: (scripts.append(s), {"status": "ok"})[1]), \
+             patch("daily_pipeline.notify_all"), patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+
+        for name in monthly:
+            assert name in calls
+        assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
+                           "validate_and_vacuum.py"]
+        assert calls[-1] == "health_check"
+        assert results["crashed"] is False
+
+    def test_backup_failure_aborts_repair_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        scripts: list[str] = []
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline._run_repair_script",
+                   side_effect=lambda s: (scripts.append(s),
+                                          {"status": "failed", "error": "disk full"})[1]), \
+             patch("daily_pipeline.notify_all") as mock_notify, patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+        assert scripts == ["backup_database.py"]  # 不允许无备份修复
+        assert results["crashed"] is True
+        assert mock_notify.call_args.args[0] == "error"
+
+    def test_reconcile_failure_continues_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        scripts: list[str] = []
+
+        def fake_script(s):
+            scripts.append(s)
+            if s == "reconcile_with_akshare.py":
+                return {"status": "failed", "error": "mismatch"}
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline._run_repair_script", side_effect=fake_script), \
+             patch("daily_pipeline.notify_all"), patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+        assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
+                           "validate_and_vacuum.py"]
+        assert results["crashed"] is True
