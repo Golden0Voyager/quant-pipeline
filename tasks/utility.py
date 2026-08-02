@@ -31,7 +31,7 @@ except ImportError:
 
 # 从 core/tasks 模块导入（避免与 daily_pipeline.py 的循环依赖）
 from core.progress import ProgressTracker
-from tasks.bars import _update_single_bar
+from tasks.bars import _normalize_trade_date, _source_has_trading_day, _update_single_bar
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +85,26 @@ def retry_failed(
     logger.info(f"🔄 任务: 重试失败队列 ({len(symbols)} 只)")
     logger.info("=" * 60)
 
+    # 哨兵判定（每轮一次）：数据源是否已有预期交易日数据。
+    # 有 → 个股缺数说明当日停牌/未交易（K 线不存在，重试无意义，移出队列）；
+    # 无 → 源端问题（保留重试资格）。
+    expected_latest = _normalize_trade_date(get_expected_latest_trading_day())
+    source_has_day = bool(expected_latest) and _source_has_trading_day(loader, expected_latest)
+
     success = 0
     still_failed: list[str] = []
+    skipped_no_data: list[str] = []
 
     for symbol in symbols:
         result = _update_single_bar(db, loader, symbol)
         if result == "success":
             success += 1
+        elif result == "failed" and source_has_day:
+            skipped_no_data.append(symbol)
+            logger.info(
+                f"  ⏸️ {symbol} 源端无 {expected_latest} 新数据"
+                "（当日停牌/未交易），移出重试队列"
+            )
         elif result != "skipped":
             still_failed.append(symbol)
 
@@ -114,6 +127,7 @@ def retry_failed(
         "attempted": len(symbols),
         "success": success,
         "failed": len(still_failed),
+        "skipped_no_data": len(skipped_no_data),
         "total": len(symbols),
     }
     if still_failed:
