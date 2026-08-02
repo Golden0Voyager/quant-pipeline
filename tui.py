@@ -548,7 +548,7 @@ class HelpScreen(ModalScreen[None]):
         with Vertical(id="help-dialog"):
             yield Label("[bold]快捷键帮助[/bold]")
             yield Label("")
-            yield Label("[bold]S[/bold] — 全量更新")
+            yield Label("[bold]S[/bold] — 每日更新")
             yield Label("[bold]R[/bold] — 断点续传")
             yield Label("[bold]U[/bold] — 收盘刷新")
             yield Label("[bold]X[/bold] — 停止任务")
@@ -1233,7 +1233,7 @@ class SingleTaskWidget(Static):
         # 避免被 _validate_against_registry 当作未注册任务警告；
         # 每周补全/每月修复同理（它们是 tier 入口，不在 TASK_REGISTRY）
         options: list[tuple[str, str]] = [
-            ("全量更新 (Full Update)", "all"),
+            ("每日更新 (Daily Update)", "all"),
             ("收盘刷新 (Close Refresh)", "__refresh_today__"),
         ]
         for group_name, tasks in cls._SINGLE_TASK_GROUPS:
@@ -1670,7 +1670,7 @@ class LogsWidget(RichLog):
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
     BINDINGS = [
-        Binding("s", "run_pipeline", "Full Update"),
+        Binding("s", "run_pipeline", "Daily Update"),
         Binding("r", "resume_pipeline", "Resume"),
         Binding("u", "refresh_today", "Close Refresh"),
         Binding("x", "stop_pipeline", "Stop"),
@@ -2124,7 +2124,7 @@ class PipelineApp(App):
     async def action_run_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         self._run_or_schedule(
-            "全量更新",
+            "每日更新",
             sys.executable, pipeline_path, "--task", "all", "--force",
         )
 
