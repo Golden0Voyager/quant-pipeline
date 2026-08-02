@@ -10,7 +10,7 @@ import pandas as pd
 from core.calendar import get_expected_latest_trading_day
 from core.config import SHARED_DATA_DIR  # noqa: F401
 from core.lock import skip_if_task_locked
-from core.stock_cyq_em import stock_cyq_em
+from core.stock_cyq_em import InsufficientDataError, stock_cyq_em
 from core.utils import infer_market  # noqa: F401
 from interface import DatabaseInterface
 
@@ -118,6 +118,10 @@ def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:
         ]
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
         return df
+    except InsufficientDataError:
+        # 本地数据前置条件不满足（换手率缺失等）：交由调用方按"跳过"处理，
+        # 不得与网络失败混为一谈（避免触发冷却/熔断）
+        raise
     except Exception as e:
         logger.warning(f"  {symbol} 东方财富筹码获取失败: {e}")
         return None
@@ -315,7 +319,14 @@ def update_chip_distribution_em(
             time.sleep(cool_sec)
 
         _t0 = time.time()
-        df = _fetch_cyq_em(symbol)
+        try:
+            df = _fetch_cyq_em(symbol)
+        except InsufficientDataError as e:
+            # 数据前置条件不满足（如北交所换手率历史尚未积累）：按跳过处理，
+            # 不计连续失败、不冷却——本地判定仅 ~30ms，直接下一只
+            logger.info(f"  ⏭️ {symbol} 数据不足跳过: {e}")
+            skipped_count += 1
+            continue
         # ── 节流仅针对线上源：本地 DB numpy 计算 (~30ms) 无需限速；
         #    耗时超过 0.5s 说明走了线上兜底（EM/雪球/新浪），限速防爆发请求 ──
         if time.time() - _t0 > 0.5:
