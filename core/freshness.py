@@ -13,6 +13,7 @@ from pathlib import Path
 
 from core.task_registry import (
     CATCH_UP_TASK_ORDER,
+    panel_date_columns,
     table_date_columns,
     task_to_table,
 )
@@ -76,7 +77,7 @@ def get_latest_dates(db_path: str) -> dict[str, str | None]:
         conn = sqlite3.connect(db_path, timeout=5.0)
         cur = conn.cursor()
         result: dict[str, str | None] = {}
-        for tbl, col in table_date_columns().items():
+        for tbl, col in panel_date_columns().items():
             try:
                 cur.execute(f"SELECT MAX({col}) FROM {tbl}")
                 value = cur.fetchone()[0]
