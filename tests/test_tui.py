@@ -2112,3 +2112,28 @@ async def test_run_or_schedule_run_later_dedupes_same_action():
                 callback("run-later")
                 assert mock_bg.call_count == 1
                 assert "已在延迟队列" in mock_notify.call_args.args[0]
+
+
+# ===========================================================================
+# 每周补全 / 每月修复入口路由
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_action_weekly_backfill_routes_to_schedule():
+    app = PipelineApp()
+    args_expected = (sys.executable,
+                     str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"),
+                     "--task", "weekly_backfill")
+    with patch.object(app, "_run_or_schedule") as mock_sched:
+        await app.action_weekly_backfill()
+    mock_sched.assert_called_once_with("每周补全", *args_expected)
+
+
+@pytest.mark.asyncio
+async def test_action_monthly_repair_routes_to_schedule():
+    app = PipelineApp()
+    args_expected = (sys.executable,
+                     str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"),
+                     "--task", "monthly_repair")
+    with patch.object(app, "_run_or_schedule") as mock_sched:
+        await app.action_monthly_repair()
+    mock_sched.assert_called_once_with("每月修复", *args_expected)
