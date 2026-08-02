@@ -3833,3 +3833,60 @@ def test_fetch_limit_pool_records_propagates_source_error():
     fake_ak.stock_zt_pool_em.side_effect = ConnectionError("em down")
     with patch.object(macro, "ak", fake_ak), pytest.raises(ConnectionError):
         macro.fetch_limit_pool_records("2026-07-27")
+
+
+
+class TestWeeklyBackfill:
+    def _mocks(self):
+        return MagicMock(), MagicMock(), MagicMock()
+
+    def test_runs_weekly_cadence_tasks_then_catch_up_then_retry(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        weekly = [s.name for s in daily_pipeline.TASK_REGISTRY
+                  if s.cadence is daily_pipeline.Cadence.WEEKLY]
+        calls: list[str] = []
+
+        def fake_run(task_name, db, loader=None, engine=None, **kw):
+            calls.append(task_name)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=["update_bars"]), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+
+        # WEEKLY 任务全部执行；随后补全任务；retry 在补全之后；health 垫底
+        for name in weekly:
+            assert name in calls
+        assert calls.index("update_bars") > max(calls.index(n) for n in weekly)
+        assert calls.index("retry") > calls.index("update_bars")
+        assert calls[-1] == "health_check"
+        assert results["crashed"] is False
+
+    def test_catch_up_failure_does_not_abort_tier(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline.get_latest_dates", side_effect=Exception("db gone")), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+        # 补全判定失败只跳过补全，不影响 WEEKLY 主体与 retry
+        assert "retry" in results
+        assert results["crashed"] is False
+
+    def test_failed_task_marks_crashed_and_notifies(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        with patch("daily_pipeline._run_registry_task",
+                   return_value={"status": "failed", "error": "x"}), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
+             patch("daily_pipeline.notify_all") as mock_notify, \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+        assert results["crashed"] is True
+        assert mock_notify.call_args.args[0] == "error"
