@@ -21,12 +21,15 @@ from core.task_registry import (
 # 按周度更新的表（数据源每周发布一次，不按交易日衡量新鲜度）
 WEEKLY_TABLES: set[str] = {
     "stock_pledge",  # 中登公司每周五更新质押比例
+    "index_member_history",  # 指数成分调整按周节奏发布（valid_from）
 }
 
 # 按月度更新的表（不按交易日衡量新鲜度）
 MONTHLY_TABLES: set[str] = {
     "institutional_holdings",
     "macro_monthly",
+    "stock_list",  # 股票清单按月全量刷新（updated_at）
+    "concept_member",  # 概念成分按月刷新（updated_at）
 }
 
 # 随季报更新的表（使用 report_date/report_period，不按交易日衡量新鲜度）
