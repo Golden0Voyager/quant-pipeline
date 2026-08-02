@@ -321,6 +321,8 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_quarterly_financials",
         "update_shareholder_count",
         "update_dividend_summary",
+        "update_market_valuation",
+        "update_financial_history",
     ],
     "macro": [
         "update_china_macro",
@@ -330,6 +332,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_global_index",
         "update_us_treasury",
         "update_futures",
+        "update_money_market",
     ],
     "sector_index": [
         "update_sector_industry",
@@ -337,6 +340,9 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_sector_derivatives",
         "update_index_daily",
         "update_limit_up_down",
+        "update_concept_board",
+        "update_concept_member",
+        "update_index_membership",
     ],
     "derivatives": [
         "update_etf_daily",
