@@ -1,20 +1,20 @@
 # launchd 调度配置
 
-macOS launchd 的每日全量管道调度配置，纳入仓库以便审查与复现。
+macOS launchd 的三层次管道调度配置，纳入仓库以便审查与复现。
 
 ## 分工
 
 | 入口 | 职责 | 触发方式 |
 |------|------|----------|
-| `com.smartmoney.update.plist` | 每日 20:30 全量管道（`--task all`） | launchd 定时 |
+| `com.smartmoney.update.plist` | 每日层管道（`--task all`，每日 20:30） | launchd 定时 |
+| `com.smartmoney.weekly-backfill.plist` | 每周补全层（`--task weekly_backfill`，周六 10:00） | launchd 定时 |
+| `com.smartmoney.monthly-repair.plist` | 每月修复层（`--task monthly_repair`，每月 1 号 10:30） | launchd 定时 |
 | `scripts/daemon.py` | 盘中每小时 `update_bars` 增量（非交易日自动跳过） | 手动 `start` 常驻 |
-| 每周层（`--task weekly_backfill`） | WEEKLY 任务 + 补齐缺漏 + retry + health | 手动触发 |
-| 每月层（`--task monthly_repair`） | MONTHLY/QUARTERLY 任务 + 备份→对账→vacuum 修复链 + health | 手动触发 |
 
-三者通过同一把全局锁（`core.lock.ProcessLock`）互斥，不会并发写库。
+四层通过同一把全局锁（`core.lock.ProcessLock`）互斥，不会并发写库。
 
-> 注：`--task all` 现已收窄为每日层别名（TRADING_DAY+DAILY+ON_DEMAND），不再跑周/月/季任务；
-> launchd 每日 20:30 的配置无需改动。每周/每月层仅手动触发：
+> 注：`--task all` 是每日层别名（TRADING_DAY+DAILY+ON_DEMAND），不再跑周/月/季任务。
+> 每周/每月层除 launchd 定时外也可手动触发：
 > `uv run python daily_pipeline.py --task weekly_backfill|monthly_repair`，或 TUI 按 W / M 键
 > （弹窗确认立即/稍后/取消），TUI 下拉「工具」分组也有对应入口。
 
@@ -24,6 +24,12 @@ macOS launchd 的每日全量管道调度配置，纳入仓库以便审查与复
 cp scripts/launchd/com.smartmoney.update.plist ~/Library/LaunchAgents/
 # 按需编辑：python 解释器路径、NOTIFICATION_* 告警配置
 launchctl load ~/Library/LaunchAgents/com.smartmoney.update.plist
+
+# 每周/每月层定时（可选，建议安装防止低频表静默停更）：
+cp scripts/launchd/com.smartmoney.weekly-backfill.plist ~/Library/LaunchAgents/
+cp scripts/launchd/com.smartmoney.monthly-repair.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.smartmoney.weekly-backfill.plist
+launchctl load ~/Library/LaunchAgents/com.smartmoney.monthly-repair.plist
 ```
 
 卸载：`launchctl unload ~/Library/LaunchAgents/com.smartmoney.update.plist`
