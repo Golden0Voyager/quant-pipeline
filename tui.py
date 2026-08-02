@@ -55,6 +55,7 @@ from core.task_registry import (
     TABLE_LABELS,
     TABLE_LABELS_CN,
     TASK_GROUPS,
+    lookup_task,
     panel_date_columns,
     refreshable_trading_tasks,
     task_to_table,
@@ -1106,90 +1107,91 @@ class DashboardWidget(Static):
         return self._cached_stocks
 
 
+# ── 单任务下拉：组名与双语标签（成员/组序一律来自 TASK_GROUPS 单一来源）──
+_SINGLE_TASK_GROUP_NAMES: dict[str, str] = {
+    "core": "核心行情",
+    "fund": "资金面",
+    "valuation": "估值/财务",
+    "macro": "宏观/全球",
+    "sector_index": "行业/大盘",
+    "derivatives": "ETF/可转债/港通",
+    "events": "事件信号",
+}
+
+_SINGLE_TASK_LABELS: dict[str, str] = {
+    "update_bars": "日线行情 (Daily Bars)",
+    "update_indicators": "技术指标 (Indicators)",
+    "update_chip_distribution": "筹码分布 (Chip Dist.)",
+    "update_chip_distribution_em": "筹码分布线上 (Chip EM)",
+    "update_chip_distribution_em_fullmarket": "筹码分布全市场 (Full Market Chip EM)",
+    "update_fundamentals": "基本面数据 (Fundamentals)",
+    "update_market_snapshot": "行情快照 (Market Snapshot)",
+    "update_fund_flow": "资金流向 (Fund Flow)",
+    "update_sector_fund_flow": "板块资金 (Sector Fund Flow)",
+    "update_north_hold": "北向持仓 (North Hold)",
+    "update_margin_trading": "融资融券 (Margin Trading)",
+    "update_dragon_tiger": "龙虎榜 (Dragon Tiger)",
+    "update_block_trade": "大宗交易 (Block Trade)",
+    "update_historical_valuation": "历史估值 (Valuation)",
+    "update_quarterly_financials": "季度财务 (Quarterly Fin.)",
+    "update_shareholder_count": "股东户数 (Shareholders)",
+    "update_dividend_summary": "分红信息 (Dividends)",
+    "update_market_valuation": "大盘估值 (Market Valuation)",
+    "update_financial_history": "财务历史 (Financial History)",
+    "update_china_macro": "中国宏观 (China Macro)",
+    "update_gold_price": "黄金价格 (Gold Price)",
+    "update_crude_oil": "原油价格 (Crude Oil)",
+    "update_usd": "汇率 (USD/CNY)",
+    "update_global_index": "全球指数 (Global Index)",
+    "update_us_treasury": "美债收益率 (US Treasury)",
+    "update_futures": "期货日线 (Futures)",
+    "update_money_market": "货币市场 (Money Market)",
+    "update_sector_industry": "行业分类 (Sector Industry)",
+    "update_industry": "行业更新 (Industry)",
+    "update_sector_derivatives": "行业板块 (Sector Derivatives)",
+    "update_index_daily": "大盘指数 (Index Daily)",
+    "update_limit_up_down": "涨跌停 (Limit U/D)",
+    "update_concept_board": "概念板块 (Concept Board)",
+    "update_concept_member": "概念成分 (Concept Members)",
+    "update_index_membership": "指数成分 (Index Membership)",
+    "update_etf_daily": "ETF日线 (ETF Daily)",
+    "update_cb_quotation": "可转债行情 (CB Quotation)",
+    "update_cb_redeem": "可转债强赎 (CB Redeem)",
+    "update_cb_index": "可转债指数 (CB Index)",
+    "update_south_flow": "南向资金 (South Flow)",
+    "update_ah_premium": "AH溢价 (AH Premium)",
+    "update_restricted_share": "限售解禁 (Restricted Share)",
+    "update_earnings_forecast": "业绩预告 (Earnings Forecast)",
+    "update_stock_repurchase": "股票回购 (Stock Repurchase)",
+    "update_institution_survey": "机构调研 (Institution Survey)",
+    "update_stock_pledge": "股票质押 (Stock Pledge)",
+    "update_option_sentiment": "期权情绪 (Option Sentiment)",
+}
+
+
+def _build_single_task_groups() -> list[tuple[str, list[tuple[str, str]]]]:
+    """从 TASK_GROUPS 派生单任务下拉分组（成员与组序的唯一来源在 registry）。"""
+    def _label(task: str) -> str:
+        if task in _SINGLE_TASK_LABELS:
+            return _SINGLE_TASK_LABELS[task]
+        spec = lookup_task(task)
+        return spec.display_label if spec and spec.display_label else task
+
+    return [
+        (
+            _SINGLE_TASK_GROUP_NAMES.get(group_key, group_key),
+            [(_label(task), task) for task in tasks],
+        )
+        for group_key, tasks in TASK_GROUPS.items()
+    ]
+
+
 class SingleTaskWidget(Static):
     """Single task selector with a dropdown, organized by task groups."""
 
-    # 与 Groups tab 保持一致的分组定义。
-    # 成员以 core.task_registry.TASK_GROUPS 为准，此处仅为带标签对的 UI 结构
-    # （派生代价高于收益，保留原样；任务名由 _validate_against_registry 校验防漂移）。
-    _SINGLE_TASK_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
-        (
-            "核心行情",
-            [
-                ("日线行情 (Daily Bars)", "update_bars"),
-                ("技术指标 (Indicators)", "update_indicators"),
-                ("筹码分布 (Chip Dist.)", "update_chip_distribution"),
-                ("筹码分布线上 (Chip EM)", "update_chip_distribution_em"),
-                ("筹码分布全市场 (Full Market Chip EM)", "update_chip_distribution_em_fullmarket"),
-                ("基本面数据 (Fundamentals)", "update_fundamentals"),
-                ("行情快照 (Market Snapshot)", "update_market_snapshot"),
-            ],
-        ),
-        (
-            "资金面",
-            [
-                ("资金流向 (Fund Flow)", "update_fund_flow"),
-                ("板块资金 (Sector Fund Flow)", "update_sector_fund_flow"),
-                ("北向持仓 (North Hold)", "update_north_hold"),
-                ("融资融券 (Margin Trading)", "update_margin_trading"),
-                ("龙虎榜 (Dragon Tiger)", "update_dragon_tiger"),
-                ("大宗交易 (Block Trade)", "update_block_trade"),
-            ],
-        ),
-        (
-            "估值/财务",
-            [
-                ("历史估值 (Valuation)", "update_historical_valuation"),
-                ("季度财务 (Quarterly Fin.)", "update_quarterly_financials"),
-                ("股东户数 (Shareholders)", "update_shareholder_count"),
-                ("分红信息 (Dividends)", "update_dividend_summary"),
-            ],
-        ),
-        (
-            "宏观/全球",
-            [
-                ("中国宏观 (China Macro)", "update_china_macro"),
-                ("黄金价格 (Gold Price)", "update_gold_price"),
-                ("原油价格 (Crude Oil)", "update_crude_oil"),
-                ("汇率 (USD/CNY)", "update_usd"),
-                ("全球指数 (Global Index)", "update_global_index"),
-                ("美债收益率 (US Treasury)", "update_us_treasury"),
-                ("期货日线 (Futures)", "update_futures"),
-            ],
-        ),
-        (
-            "行业/大盘",
-            [
-                ("行业分类 (Sector Industry)", "update_sector_industry"),
-                ("行业更新 (Industry)", "update_industry"),
-                ("行业板块 (Sector Derivatives)", "update_sector_derivatives"),
-                ("大盘指数 (Index Daily)", "update_index_daily"),
-                ("涨跌停 (Limit U/D)", "update_limit_up_down"),
-            ],
-        ),
-        (
-            "ETF/可转债/港通",
-            [
-                ("ETF日线 (ETF Daily)", "update_etf_daily"),
-                ("可转债行情 (CB Quotation)", "update_cb_quotation"),
-                ("可转债强赎 (CB Redeem)", "update_cb_redeem"),
-                ("可转债指数 (CB Index)", "update_cb_index"),
-                ("南向资金 (South Flow)", "update_south_flow"),
-                ("AH溢价 (AH Premium)", "update_ah_premium"),
-            ],
-        ),
-        (
-            "事件信号",
-            [
-                ("限售解禁 (Restricted Share)", "update_restricted_share"),
-                ("业绩预告 (Earnings Forecast)", "update_earnings_forecast"),
-                ("股票回购 (Stock Repurchase)", "update_stock_repurchase"),
-                ("机构调研 (Institution Survey)", "update_institution_survey"),
-                ("股票质押 (Stock Pledge)", "update_stock_pledge"),
-                ("期权情绪 (Option Sentiment)", "update_option_sentiment"),
-            ],
-        ),
-    ]
+    # 成员与组序以 core.task_registry.TASK_GROUPS 为单一来源（防漂移测试锁定），
+    # 下拉结构由模块级 _build_single_task_groups 派生
+    _SINGLE_TASK_GROUPS: list[tuple[str, list[tuple[str, str]]]] = _build_single_task_groups()
 
     _SINGLE_TASK_UTILS: list[tuple[str, str]] = [
         ("股票列表 (Stock List)", "update_stock_list"),
