@@ -121,7 +121,14 @@ def fetch_eastmoney_turnover(symbol: str, start_date: str, end_date: str) -> lis
 
 
 def fetch_turnover(symbol: str, start_date: str, end_date: str) -> list[tuple[str, float]]:
-    """先尝试 Sina，失败或为空则 fallback 到东方财富。"""
+    """先尝试 Sina，失败或为空则 fallback 到东方财富。
+
+    北交所（4/8/920 前缀）：新浪日线不支持，直接走东财，
+    不浪费一次注定失败的新浪请求。
+    """
+    if is_beijing_stock(symbol):
+        return fetch_eastmoney_turnover(symbol, start_date, end_date)
+
     try:
         updates = fetch_sina_turnover(symbol, start_date, end_date)
         if updates:
