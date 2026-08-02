@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 任务标识 -->
+    <key>Label</key>
+    <string>com.smartmoney.monthly-repair</string>
+
+    <!-- 每月 1 号上午 10:30 运行每月修复层（含备份→对账→vacuum 修复链） -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- 运行命令 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin/python3</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/daily_pipeline.py</string>
+        <string>--task</string>
+        <string>monthly_repair</string>
+    </array>
+
+    <!-- 工作目录 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/hainingyu/Code/quant_pipeline</string>
+
+    <!-- 环境变量（与 com.smartmoney.update 保持一致） -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter</string>
+        <key>QUANT_DB_PATH</key>
+        <string>/Users/hainingyu/Code/quant_data/quant_core.db</string>
+        <key>DISABLE_YFINANCE_FALLBACK</key>
+        <string>1</string>
+        <key>NOTIFICATION_TYPE</key>
+        <string>console</string>
+        <key>NOTIFICATION_WEBHOOK_URL</key>
+        <string></string>
+        <key>NOTIFICATION_LEVEL</key>
+        <string>error</string>
+    </dict>
+
+    <!-- 日志输出 -->
+    <key>StandardOutPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_monthly.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_monthly.err.log</string>
+
+    <!-- 超时 6 小时（修复链含备份与 VACUUM，单步子进程上限 1 小时） -->
+    <key>Timeout</key>
+    <integer>21600</integer>
+</dict>
+</plist>
