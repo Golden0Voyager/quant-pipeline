@@ -560,6 +560,8 @@ class HelpScreen(ModalScreen[None]):
             yield Label("[bold]F[/bold] — 数据修复")
             yield Label("[bold]C[/bold] — 复制面板内容")
             yield Label("[bold]L[/bold] — 清理日志")
+            yield Label("[bold]W[/bold] — 每周补全")
+            yield Label("[bold]M[/bold] — 每月修复")
             yield Label("[bold]T[/bold] — 切换主题")
             yield Label("[bold]F5[/bold] — 刷新数据")
             yield Label("[bold]Ctrl+C / Q[/bold] — 退出")
@@ -1228,7 +1230,8 @@ class SingleTaskWidget(Static):
         """把分组定义展开为带分隔符的下拉选项列表。"""
         cls._validate_against_registry()
         # 收盘刷新是哨兵项（仿 __sep__ 惯例），不进 _SINGLE_TASK_GROUPS/_UTILS，
-        # 避免被 _validate_against_registry 当作未注册任务警告
+        # 避免被 _validate_against_registry 当作未注册任务警告；
+        # 每周补全/每月修复同理（它们是 tier 入口，不在 TASK_REGISTRY）
         options: list[tuple[str, str]] = [
             ("全量更新 (Full Update)", "all"),
             ("收盘刷新 (Close Refresh)", "__refresh_today__"),
@@ -1238,6 +1241,8 @@ class SingleTaskWidget(Static):
             options.extend(tasks)
         options.append(("[dim]── 工具 ──[/dim]", "__sep__tools"))
         options.extend(cls._SINGLE_TASK_UTILS)
+        options.append(("每周补全 (Weekly Backfill)", "__weekly_backfill__"))
+        options.append(("每月修复 (Monthly Repair)", "__monthly_repair__"))
         return options
 
     def on_mount(self) -> None:
@@ -1260,6 +1265,14 @@ class SingleTaskWidget(Static):
             # 走专属确认流程而非 _run_or_schedule 延迟调度
             from typing import cast
             await cast(PipelineApp, self.app).action_refresh_today()
+        elif value == "__weekly_backfill__":
+            # 每周补全层哨兵项：路由到专属 action（不带 --force）
+            from typing import cast
+            await cast(PipelineApp, self.app).action_weekly_backfill()
+        elif value == "__monthly_repair__":
+            # 每月修复层哨兵项：路由到专属 action（不带 --force）
+            from typing import cast
+            await cast(PipelineApp, self.app).action_monthly_repair()
         elif isinstance(value, str) and value and not value.startswith("__sep__"):
             from typing import cast
             await cast(PipelineApp, self.app).action_run_single_task(value)
@@ -1669,6 +1682,8 @@ class PipelineApp(App):
         Binding("c", "copy_panel", "Copy Panel", show=False),
         Binding("t", "toggle_theme", "Toggle Theme", show=False),
         Binding("l", "clean_logs", "Clean Logs", show=False),
+        Binding("w", "weekly_backfill", "Weekly Backfill", show=False),
+        Binding("m", "monthly_repair", "Monthly Repair", show=False),
         Binding("f5", "refresh_data", "Refresh", show=False),
         Binding("ctrl+c", "quit", "Quit", priority=True, show=False),
         Binding("q", "quit", "Quit", show=False),
@@ -2214,6 +2229,20 @@ class PipelineApp(App):
         self._run_or_schedule(
             "健康检查",
             sys.executable, pipeline_path, "--task", "health_check", "--force",
+        )
+
+    async def action_weekly_backfill(self) -> None:
+        """每周补全层：完整性优先的缺漏兜底。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            "每周补全", sys.executable, pipeline_path, "--task", "weekly_backfill",
+        )
+
+    async def action_monthly_repair(self) -> None:
+        """每月修复层：正确性优先的校验修复。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            "每月修复", sys.executable, pipeline_path, "--task", "monthly_repair",
         )
 
     async def action_run_reconcile(self) -> None:
