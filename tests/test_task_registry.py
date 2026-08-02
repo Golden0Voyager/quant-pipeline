@@ -331,18 +331,6 @@ class TestRefreshPolicies:
 
 # ── registry 派生视图与展示元数据（Task 1：元数据收敛） ──────────────────
 
-# tui.py 原 TABLE_LABELS / TABLE_LABELS_CN 未覆盖的已注册日期表。
-# 逐字搬入时以 tui.py 原映射为准、不新增标签，故在此显式豁免；
-# 后续由 TUI 收敛任务决定是否补标签，不得静默删表。
-_TABLES_WITHOUT_LABELS = {
-    "concept_board",
-    "concept_member",
-    "index_member_history",
-    "market_valuation",
-    "money_market",
-    "quarterly_financials_history",
-}
-
 
 def test_task_to_table_matches_specs():
     mapping = task_to_table()
@@ -354,8 +342,6 @@ def test_task_to_table_matches_specs():
 
 def test_labels_cover_all_date_tables():
     for table in table_date_columns():
-        if table in _TABLES_WITHOUT_LABELS:
-            continue  # tui.py 原映射即无此表标签，见模块级豁免注释
         assert table in TABLE_LABELS, f"{table} 缺英文标签"
         assert table in TABLE_LABELS_CN, f"{table} 缺中文标签"
 
