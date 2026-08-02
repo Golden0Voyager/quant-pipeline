@@ -106,6 +106,15 @@ def test_status_for_table_weekly_and_delayed():
     assert status_for_table("daily_bars", "2026-07-29", "2026-07-31", None) == "略滞后"
 
 
+def test_status_for_table_newly_paneled_periodic_tables():
+    """裁决 B 新上面板的周期表必须按周期判定，不得按交易日误报滞后。"""
+    from core.freshness import status_for_table
+    assert status_for_table("stock_list", "2026-06-01", "2026-07-31", None) == "按月更新"
+    assert status_for_table("concept_member", "2026-06-01", "2026-07-31", None) == "按月更新"
+    # index_member_history 在按周 10 天窗口内返回「按周更新」
+    assert status_for_table("index_member_history", "2026-07-29", "2026-07-31", None) == "按周更新"
+
+
 def test_get_daily_bars_coverage(tmp_path):
     from core.freshness import get_daily_bars_coverage
     db_file = tmp_path / "test.db"
