@@ -8,8 +8,15 @@ macOS launchd 的每日全量管道调度配置，纳入仓库以便审查与复
 |------|------|----------|
 | `com.smartmoney.update.plist` | 每日 20:30 全量管道（`--task all`） | launchd 定时 |
 | `scripts/daemon.py` | 盘中每小时 `update_bars` 增量（非交易日自动跳过） | 手动 `start` 常驻 |
+| 每周层（`--task weekly_backfill`） | WEEKLY 任务 + 补齐缺漏 + retry + health | 手动触发 |
+| 每月层（`--task monthly_repair`） | MONTHLY/QUARTERLY 任务 + 备份→对账→vacuum 修复链 + health | 手动触发 |
 
-两者通过同一把全局锁（`core.lock.ProcessLock`）互斥，不会并发写库。
+三者通过同一把全局锁（`core.lock.ProcessLock`）互斥，不会并发写库。
+
+> 注：`--task all` 现已收窄为每日层别名（TRADING_DAY+DAILY+ON_DEMAND），不再跑周/月/季任务；
+> launchd 每日 20:30 的配置无需改动。每周/每月层仅手动触发：
+> `uv run python daily_pipeline.py --task weekly_backfill|monthly_repair`，或 TUI 按 W / M 键
+> （弹窗确认立即/稍后/取消），TUI 下拉「工具」分组也有对应入口。
 
 ## 安装
 
