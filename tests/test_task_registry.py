@@ -372,3 +372,28 @@ def test_catch_up_order_subset_of_registered():
     registered = {spec.name for spec in TASK_REGISTRY}
     for task in CATCH_UP_TASK_ORDER:
         assert task in registered
+
+
+def test_registry_date_columns_match_production():
+    """registry 日期列必须与生产库真实列名一致（tui 旧映射为生产验证口径）。"""
+    cols = table_date_columns()
+    assert cols["shareholder_count"] == "report_date"
+    assert cols["quarterly_financials"] == "report_period"
+    assert cols["dividend_summary"] == "updated_at"
+
+
+def test_panel_date_columns_includes_legacy_tables():
+    from core.task_registry import panel_date_columns
+    cols = panel_date_columns()
+    assert cols["institutional_holdings"] == "report_date"
+    # 注册表一张不少
+    for table, col in table_date_columns().items():
+        assert cols[table] == col
+
+
+def test_panel_labels_have_date_columns():
+    """面板的每一张表（TABLE_LABELS 的键）都必须有新鲜度查询列。"""
+    from core.task_registry import panel_date_columns
+    cols = panel_date_columns()
+    for table in TABLE_LABELS:
+        assert table in cols, f"面板表 {table} 缺日期列"
