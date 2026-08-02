@@ -179,6 +179,7 @@ TABLE_LABELS: dict[str, str] = {
     "fundamentals": "Fundamentals",
     "historical_valuation": "Valuation",
     "quarterly_financials": "Quarterly Fin.",
+    "quarterly_financials_history": "Fin. History",
     "dividend_summary": "Dividends",
     # 资金面
     "fund_flow": "Fund Flow",
@@ -191,6 +192,10 @@ TABLE_LABELS: dict[str, str] = {
     "sector_industry": "Industry",
     "index_daily": "Index Daily",
     "limit_up_down": "Limit U/D",
+    "concept_board": "Concept Boards",
+    "concept_member": "Concept Members",
+    "index_member_history": "Index Members",
+    "market_valuation": "Market Valuation",
     # 股东
     "shareholder_count": "Shareholders",
     "institutional_holdings": "Inst. Holdings",
@@ -222,6 +227,7 @@ TABLE_LABELS: dict[str, str] = {
     "sector_valuation": "Sector Val.",
     "index_futures_basis": "Futures Basis",
     # 宏观
+    "money_market": "Money Market",
     "macro_monthly": "Macro Monthly",
     "macro_quarterly": "Macro Quarterly",
     # 总览
@@ -236,6 +242,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "fundamentals": "基本面数据",
     "historical_valuation": "历史估值",
     "quarterly_financials": "季度财务",
+    "quarterly_financials_history": "财务历史",
     "dividend_summary": "分红信息",
     # 资金面
     "fund_flow": "资金流向",
@@ -248,6 +255,10 @@ TABLE_LABELS_CN: dict[str, str] = {
     "sector_industry": "行业分类",
     "index_daily": "大盘指数",
     "limit_up_down": "涨跌停",
+    "concept_board": "概念板块",
+    "concept_member": "概念成分",
+    "index_member_history": "指数成分",
+    "market_valuation": "大盘估值",
     # 股东
     "shareholder_count": "股东户数",
     "institutional_holdings": "机构持仓",
@@ -279,6 +290,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "sector_valuation": "板块估值",
     "index_futures_basis": "基差",
     # 宏观
+    "money_market": "货币市场",
     "macro_monthly": "宏观(月)",
     "macro_quarterly": "宏观(季)",
     # 总览
