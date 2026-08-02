@@ -3953,10 +3953,13 @@ class TestWeeklyBackfill:
              patch("daily_pipeline.get_latest_dates", return_value={}), \
              patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
              patch("daily_pipeline.compute_catch_up_tasks", return_value=["update_bars"]), \
+             patch("daily_pipeline._lower_process_priority") as mock_lower, \
              patch("daily_pipeline.notify_all"), \
              patch("daily_pipeline.logger"):
             results = daily_pipeline.weekly_backfill(db, loader, engine)
 
+        # 与 run_all 一致：tier 入口必须降低进程优先级
+        mock_lower.assert_called_once()
         # WEEKLY 任务全部执行；随后补全任务；retry 在补全之后；health 垫底
         for name in weekly:
             assert name in calls
@@ -4007,9 +4010,12 @@ class TestMonthlyRepair:
                    side_effect=lambda n, *a, **k: (calls.append(n), {"status": "ok"})[1]), \
              patch("daily_pipeline._run_repair_script",
                    side_effect=lambda s: (scripts.append(s), {"status": "ok"})[1]), \
+             patch("daily_pipeline._lower_process_priority") as mock_lower, \
              patch("daily_pipeline.notify_all"), patch("daily_pipeline.logger"):
             results = daily_pipeline.monthly_repair(db, loader, engine)
 
+        # 与 run_all 一致：tier 入口必须降低进程优先级
+        mock_lower.assert_called_once()
         for name in monthly:
             assert name in calls
         assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
