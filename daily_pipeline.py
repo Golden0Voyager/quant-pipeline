@@ -9,6 +9,9 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
                     core/ (基础设施)          tasks/ (业务任务)
 
 用法：
+    python daily_pipeline.py --task daily      # 每日层（TRADING_DAY+DAILY+ON_DEMAND）
+    python daily_pipeline.py --task all        # daily 的兼容别名
+    python daily_pipeline.py --task update_daily_core  # daily 的兼容别名
     python daily_pipeline.py --task update_bars
     python daily_pipeline.py --task update_bars --resume
     python daily_pipeline.py --task health_check
@@ -698,7 +701,7 @@ def main():
     try:
         # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
         # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
-        if task in ("all", "update_daily_core"):
+        if task in ("all", "daily", "update_daily_core"):
             _acquire_lock()
         elif task != "health_check":
             # 全局锁与 TaskLock 互不感知：全量管道（或收盘刷新）运行期间，
@@ -723,11 +726,7 @@ def main():
             def _should_update():
                 return True
 
-        if task == "all":
-            results = run_all(db, loader, engine, resume=args.resume, force=args.force)
-            if results.get("crashed"):
-                sys.exit(1)
-        elif task == "update_daily_core":
+        if task in ("all", "daily", "update_daily_core"):
             results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
