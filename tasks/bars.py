@@ -162,6 +162,24 @@ def _canary_probe(loader: DataLoaderInterface) -> bool:
         return False
 
 
+def _source_has_trading_day(loader: DataLoaderInterface, expected_latest: str) -> bool:
+    """哨兵判定：数据源是否已有预期交易日的数据。
+
+    用于区分「个股当日停牌/未交易」（源端有该日数据但此股无）与
+    「数据源整体不可用」（哨兵也无该日数据）。
+    任何异常按 False 处理（保守：调用方保留重试资格）。
+    """
+    try:
+        start = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
+        df = loader.get_daily_bars(CANARY_SYMBOL, start_date=start)
+        if df is None or df.empty or "trade_date" not in df.columns:
+            return False
+        latest = _normalize_trade_date(df["trade_date"].max())
+        return bool(latest and latest >= expected_latest)
+    except Exception:
+        return False
+
+
 def _normalize_trade_date(value: object) -> str | None:
     """Normalize common trade date forms to YYYY-MM-DD for lexical comparison."""
     if value is None:
