@@ -60,6 +60,7 @@ from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
     read_cross_source_config,
 )
+from core.freshness import compute_catch_up_tasks, get_latest_dates
 from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.notifications import notify_all
@@ -76,7 +77,7 @@ from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
 from core.refresh_store import SQLiteRefreshStore
 from core.runner import safe_task
-from core.task_registry import Cadence, lookup_task, refreshable_trading_tasks
+from core.task_registry import TASK_REGISTRY, Cadence, lookup_task, refreshable_trading_tasks
 from core.task_result import TaskResult, normalize_task_result
 from core.utils import (
     infer_market as _infer_market,  # noqa: F401
@@ -530,6 +531,57 @@ def run_all(
     return results
 
 
+def weekly_backfill(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    force: bool = False,
+) -> dict:
+    """每周数据补全层：WEEKLY 任务 → 补齐缺漏（stale 驱动）→ retry → health。"""
+    start_time = time.time()
+    logger.info("\n🧩 每周数据补全层启动 (WEEKLY + 补齐缺漏 + retry)")
+    results: dict[str, Any] = {}
+
+    # 1. WEEKLY cadence 任务（registry 顺序即声明顺序）
+    for spec in TASK_REGISTRY:
+        if spec.cadence is Cadence.WEEKLY:
+            results[spec.name] = _run_registry_task(
+                spec.name, db, loader, engine, force=force
+            )
+
+    # 2. 补齐缺漏：与完整度面板同一套 stale 语义，不限 cadence；
+    #    判定失败（DB 不可读等）只跳过补全，不影响主体
+    try:
+        latest_dates = get_latest_dates(str(db.db_path))
+        expected = get_expected_latest_trading_day()
+        for task_name in compute_catch_up_tasks(latest_dates, expected):
+            if task_name not in results:
+                results[task_name] = _run_registry_task(
+                    task_name, db, loader, engine, force=force
+                )
+    except Exception as e:
+        logger.warning("⚠️ 补齐缺漏判定失败，跳过补全步骤: %s", e)
+
+    # 3. 失败股票重抓 + 4. 健康报告
+    results["retry"] = _run_registry_task("retry", db, loader, engine)
+    results["health"] = _run_registry_task("health_check", db, loader, engine)
+
+    db.close()
+    elapsed = time.time() - start_time
+    failed_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict)
+        and v.get("status") in {"degraded", "failed", "aborted"}
+    )
+    results["crashed"] = bool(failed_tasks)
+    if failed_tasks:
+        notify_all("error", "每周补全完成（含失败任务）",
+                   f"耗时 {elapsed / 60:.1f}min，失败任务: {', '.join(failed_tasks)}")
+    else:
+        notify_all("info", "每周补全全部完成", f"耗时 {elapsed / 60:.1f}min")
+    return results
+
+
 # ===========================================================================
 # 收盘刷新（--refresh-today）
 # ===========================================================================
@@ -701,7 +753,7 @@ def main():
     try:
         # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
         # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
-        if task in ("all", "daily", "update_daily_core"):
+        if task in ("all", "daily", "update_daily_core", "weekly_backfill", "monthly_repair"):
             _acquire_lock()
         elif task != "health_check":
             # 全局锁与 TaskLock 互不感知：全量管道（或收盘刷新）运行期间，
@@ -728,6 +780,10 @@ def main():
 
         if task in ("all", "daily", "update_daily_core"):
             results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
+            if results.get("crashed"):
+                sys.exit(1)
+        elif task == "weekly_backfill":
+            results = weekly_backfill(db, loader, engine, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
         elif task in _TASK_CALLABLES:
