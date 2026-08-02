@@ -508,7 +508,7 @@ async def test_action_handlers_use_run_in_background():
         callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_report.assert_called_once_with(
-            "全量更新", sys.executable, expected_pipeline_path, "--task", "all", "--force"
+            "每日更新", sys.executable, expected_pipeline_path, "--task", "all", "--force"
         )
 
         mock_run_report.reset_mock()
