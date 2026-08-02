@@ -41,6 +41,16 @@ from py_mini_racer import MiniRacer
 
 logger = logging.getLogger(__name__)
 
+
+class InsufficientDataError(ValueError):
+    """本地数据前置条件不满足（如换手率历史缺失），无法计算筹码。
+
+    与网络/源端失败区分开：调用方应按"跳过"处理，
+    不应计入连续失败触发冷却与熔断（2026-08-02：约 330 只
+    北交所因换手率缺失被当作失败，触发连环冷却爬行半小时）。
+    """
+
+
 # ── 重试配置 ──────────────────────────────────────────────
 _RETRY_TIMES = 3
 _RETRY_BASE_SLEEP = 2.0
@@ -661,7 +671,7 @@ def stock_cyq_em(
     _recent = kline_clean[-_RANGE:]
     _tr_valid = sum(1 for r in _recent if (r.get("turnover_rate") or 0) > 0)
     if _tr_valid < max(1, len(_recent) // 2):
-        raise ValueError(
+        raise InsufficientDataError(
             f"{symbol}: 换手率有效数据仅 {_tr_valid}/{len(_recent)} 条 (源: {src})，"
             "拒绝计算筹码分布以免产出全零伪数据"
         )
@@ -676,7 +686,7 @@ def stock_cyq_em(
         if valid_cnt < 10:
             # numpy 输出无效说明这批 K 线数据本身不可用（换手率缺失/数据不足），
             # 同批数据交给 JS 只会静默输出全零行，直接报错而非降级
-            raise ValueError(
+            raise InsufficientDataError(
                 f"{symbol}: numpy 筹码计算无有效输出 (valid={valid_cnt})，"
                 "K 线数据不足或换手率缺失"
             )

@@ -767,6 +767,32 @@ def test_update_chip_distribution_em_circuit_breaker():
     assert result["processed"] == 4
 
 
+def test_update_chip_distribution_em_insufficient_data_skips():
+    """数据前置条件不满足（换手率缺失）按跳过处理：不计失败、不触发熔断。
+
+    2026-08-02 事故：约 330 只北交所因换手率历史缺失被当作连续失败，
+    触发连环冷却，尾段爬行半小时。
+    """
+    from core.stock_cyq_em import InsufficientDataError
+
+    db = MagicMock()
+    symbols = [f"92000{i}.BJ" for i in range(6)]
+    with patch.object(
+        index_chain,
+        "_fetch_cyq_em",
+        side_effect=InsufficientDataError("换手率有效数据仅 1/120 条"),
+    ), patch.object(index_chain.time, "sleep") as mock_sleep:
+        result = index_chain.update_chip_distribution_em(
+            db, max_consecutive_failures=4, symbols_to_update=symbols
+        )
+    assert result["aborted"] is False
+    assert result["failed"] == 0
+    assert result["skipped"] == 6
+    assert result["total"] == 6
+    mock_sleep.assert_not_called()  # 无冷却、无限速休眠
+    db.save_chip_distribution_em_batch.assert_not_called()
+
+
 def test_fetch_cyq_em_success_and_none():
     df_in = pd.DataFrame(
         {
