@@ -928,6 +928,34 @@ class TestHealthCheck:
             r = daily_pipeline.health_check(db)
         assert "report" in r
 
+    def test_health_check_fast_uses_page_estimate(self, health_db: str):
+        """fast 模式跳过 12 张表的逐表 COUNT(*)，改 PRAGMA page_count 库级估算。"""
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db, fast=True)
+        assert "report" in r
+        assert r["status"] != "failed"
+        # 库级估算行存在；page_count 是库级指标，给不出表级估算，逐表计数行省略
+        assert "估算" in r["report"]
+        assert "日线数据" not in r["report"]
+
+    def test_health_check_fast_structure_matches_exact(self, health_db: str):
+        """fast 与精确模式结果结构一致；fast=False 现行行为（逐表精确计数）零变化。"""
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            fast = daily_pipeline.health_check(db, fast=True)
+            exact = daily_pipeline.health_check(db)
+        assert set(fast) == set(exact)
+        # 覆盖率/最新日期段口径不变（均为 MAX/DISTINCT 索引查询）
+        assert fast["issues"] == exact["issues"]
+        assert fast["coverage_pct"] == exact["coverage_pct"]
+        assert fast["latest_bar"] == exact["latest_bar"]
+        # 精确模式回归：仍输出逐表计数、无估算行
+        assert "估算" not in exact["report"]
+        assert "日线数据" in exact["report"]
+
 
 # ===========================================================================
 # run_all
@@ -1047,6 +1075,19 @@ class TestRunAll:
         assert order.index("update_chip_distribution_em") == len(order) - 2
         assert order.index("health_check") == len(order) - 1
 
+    def test_health_check_runs_fast(self, tmp_path: Path, weekday_mock):
+        """run_all 批量入口的 health_check 走 fast 估算，避免大表 COUNT(*) 全表扫描。"""
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=True), \
+             patch("daily_pipeline._safe_task", return_value={"status": "ok"}) as safe_task, \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.run_all(db, loader, engine)
+        health_call = next(c for c in safe_task.call_args_list if c.args[0] == "health_check")
+        assert health_call.kwargs.get("fast") is True
+
 
 # ===========================================================================
 # main() / CLI
@@ -1107,7 +1148,7 @@ class TestMain:
     def test_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
@@ -1134,7 +1175,7 @@ class TestMain:
         pre_existing = {p for p in Path.cwd().iterdir() if p.is_file() and "MagicMock" in p.name}
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}):
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}):
             f.configure.return_value = None
             f.get_db.return_value = db_mock
             f.get_loader.return_value = MagicMock()
@@ -1160,7 +1201,7 @@ class TestMain:
     def test_with_force_and_resume(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py", "--force", "--resume"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as fn:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as fn:
             f.configure.return_value = None
             f.get_db.return_value = db = MagicMock()
             f.get_loader.return_value = loader = MagicMock()
@@ -1179,6 +1220,41 @@ class TestMain:
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
             mock_fn.assert_called_once_with(db, loader)
+
+
+class TestDailyTierEntry:
+    def test_task_daily_dispatches_to_daily_core(self, weekday_mock):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "daily"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.update_daily_core") as fn, \
+             patch("daily_pipeline._acquire_lock"), \
+             patch("daily_pipeline._release_lock", create=True), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_daily_core": fn}), \
+             patch("daily_pipeline.logger"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            fn.return_value = {"crashed": False}
+            daily_pipeline.main()
+            fn.assert_called_once()
+
+    def test_task_all_is_daily_alias(self, weekday_mock):
+        """all 收窄为每日层别名：不再跑 WEEKLY/MONTHLY/QUARTERLY 任务。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "all"]), \
+             patch("daily_pipeline.ProviderFactory") as f, \
+             patch("daily_pipeline.update_daily_core") as fn, \
+             patch("daily_pipeline._acquire_lock"), \
+             patch("daily_pipeline._release_lock", create=True), \
+             patch.dict("daily_pipeline._TASK_CALLABLES", {"update_daily_core": fn}), \
+             patch("daily_pipeline.logger"):
+            f.configure.return_value = None
+            f.get_db.return_value = MagicMock()
+            f.get_loader.return_value = MagicMock()
+            f.get_indicator_engine.return_value = MagicMock()
+            fn.return_value = {"crashed": False}
+            daily_pipeline.main()
+            fn.assert_called_once()
 
 
 # ===========================================================================
@@ -1487,12 +1563,12 @@ class TestRefreshTodayCLI:
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
              patch("daily_pipeline.run_close_refresh") as refresh, \
-             patch("daily_pipeline.run_all", return_value={"bars": {"status": "ok"}}) as run_all_mock:
+             patch("daily_pipeline.update_daily_core", return_value={"bars": {"status": "ok"}}) as daily_mock:
             f.get_db.return_value = MagicMock()
             f.get_loader.return_value = MagicMock()
             f.get_indicator_engine.return_value = MagicMock()
             daily_pipeline.main()
-        run_all_mock.assert_called_once()
+        daily_mock.assert_called_once()
         refresh.assert_not_called()
 
     def test_task_conflicts_with_refresh_today(self, capsys):
@@ -2224,12 +2300,12 @@ def test_run_all_notifies_error_with_failed_task_names():
     assert "bars" in message
 
 
-def test_main_exits_one_when_run_all_returns_crashed():
-    """main() must exit with code 1 when run_all returns crashed=True."""
+def test_main_exits_one_when_daily_core_returns_crashed():
+    """main() must exit with code 1 when the daily tier returns crashed=True."""
     with patch.object(sys, "argv",
                       ["daily_pipeline.py", "--task", "all", "--force"]), \
          patch("daily_pipeline._should_update", return_value=True), \
-         patch("daily_pipeline.run_all",
+         patch("daily_pipeline.update_daily_core",
                return_value={"crashed": True, "bars": {"status": "crashed"}}), \
          patch("daily_pipeline._acquire_lock"), \
          patch("daily_pipeline._release_lock"), \
@@ -3543,7 +3619,7 @@ class TestMainMoreTasks:
         """中断必须以 130 退出，调度器/TUI 才能区分'被取消'与'成功'。"""
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
              patch("daily_pipeline.ProviderFactory") as f, \
-             patch("daily_pipeline.run_all", side_effect=KeyboardInterrupt), \
+             patch("daily_pipeline.update_daily_core", side_effect=KeyboardInterrupt), \
              patch("daily_pipeline.logger"):
             f.configure.return_value = None
             f.get_db.return_value = MagicMock()
@@ -3798,3 +3874,182 @@ def test_fetch_limit_pool_records_propagates_source_error():
     fake_ak.stock_zt_pool_em.side_effect = ConnectionError("em down")
     with patch.object(macro, "ak", fake_ak), pytest.raises(ConnectionError):
         macro.fetch_limit_pool_records("2026-07-27")
+
+
+
+class TestHealthCheckFastDispatch:
+    """health_check fast 模式的 _run_registry_task 特判与 weekly/monthly 透传。"""
+
+    def test_registry_health_check_manual_stays_exact(self, weekday_mock):
+        """手动 --task health_check 不传 health_fast，保持精确 COUNT(*) 口径。"""
+        fn = MagicMock(return_value={"status": "success", "saved": 0})
+        with patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": fn}), \
+             patch("daily_pipeline._safe_task",
+                   side_effect=lambda name, f, *a, **kw: f(*a, **kw)):
+            daily_pipeline._run_registry_task("health_check", MagicMock())
+        assert fn.call_args.kwargs.get("fast") is False
+
+    def test_registry_health_check_fast_passthrough(self, weekday_mock):
+        """health_fast=True 时透传 fast=True 给 health_check。"""
+        fn = MagicMock(return_value={"status": "success", "saved": 0})
+        with patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": fn}), \
+             patch("daily_pipeline._safe_task",
+                   side_effect=lambda name, f, *a, **kw: f(*a, **kw)):
+            daily_pipeline._run_registry_task("health_check", MagicMock(), health_fast=True)
+        assert fn.call_args.kwargs.get("fast") is True
+
+    def test_weekly_health_check_fast(self, weekday_mock):
+        """weekly_backfill 末尾的 health_check 走 fast 估算。"""
+        db, loader, engine = MagicMock(), MagicMock(), MagicMock()
+        captured: dict = {}
+
+        def fake_run(task_name, *a, **kw):
+            if task_name == "health_check":
+                captured.update(kw)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.weekly_backfill(db, loader, engine)
+        assert captured.get("health_fast") is True
+
+    def test_monthly_health_check_fast(self, weekday_mock):
+        """monthly_repair 末尾的 health_check 走 fast 估算。"""
+        db, loader, engine = MagicMock(), MagicMock(), MagicMock()
+        captured: dict = {}
+
+        def fake_run(task_name, *a, **kw):
+            if task_name == "health_check":
+                captured.update(kw)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline._run_repair_script", return_value={"status": "ok"}), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.monthly_repair(db, loader, engine)
+        assert captured.get("health_fast") is True
+
+
+class TestWeeklyBackfill:
+    def _mocks(self):
+        return MagicMock(), MagicMock(), MagicMock()
+
+    def test_runs_weekly_cadence_tasks_then_catch_up_then_retry(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        weekly = [s.name for s in daily_pipeline.TASK_REGISTRY
+                  if s.cadence is daily_pipeline.Cadence.WEEKLY]
+        calls: list[str] = []
+
+        def fake_run(task_name, db, loader=None, engine=None, **kw):
+            calls.append(task_name)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=["update_bars"]), \
+             patch("daily_pipeline._lower_process_priority") as mock_lower, \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+
+        # 与 run_all 一致：tier 入口必须降低进程优先级
+        mock_lower.assert_called_once()
+        # WEEKLY 任务全部执行；随后补全任务；retry 在补全之后；health 垫底
+        for name in weekly:
+            assert name in calls
+        assert calls.index("update_bars") > max(calls.index(n) for n in weekly)
+        assert calls.index("retry") > calls.index("update_bars")
+        assert calls[-1] == "health_check"
+        assert results["crashed"] is False
+
+    def test_catch_up_failure_does_not_abort_tier(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline.get_latest_dates", side_effect=Exception("db gone")), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+        # 补全判定失败只跳过补全，不影响 WEEKLY 主体与 retry
+        assert "retry" in results
+        assert results["crashed"] is False
+
+    def test_failed_task_marks_crashed_and_notifies(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        with patch("daily_pipeline._run_registry_task",
+                   return_value={"status": "failed", "error": "x"}), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
+             patch("daily_pipeline.notify_all") as mock_notify, \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+        assert results["crashed"] is True
+        assert mock_notify.call_args.args[0] == "error"
+
+
+class TestMonthlyRepair:
+    def _mocks(self):
+        return MagicMock(), MagicMock(), MagicMock()
+
+    def test_runs_monthly_quarterly_tasks_then_repair_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        monthly = [s.name for s in daily_pipeline.TASK_REGISTRY
+                   if s.cadence in (daily_pipeline.Cadence.MONTHLY,
+                                    daily_pipeline.Cadence.QUARTERLY)]
+        calls: list[str] = []
+        scripts: list[str] = []
+
+        with patch("daily_pipeline._run_registry_task",
+                   side_effect=lambda n, *a, **k: (calls.append(n), {"status": "ok"})[1]), \
+             patch("daily_pipeline._run_repair_script",
+                   side_effect=lambda s: (scripts.append(s), {"status": "ok"})[1]), \
+             patch("daily_pipeline._lower_process_priority") as mock_lower, \
+             patch("daily_pipeline.notify_all"), patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+
+        # 与 run_all 一致：tier 入口必须降低进程优先级
+        mock_lower.assert_called_once()
+        for name in monthly:
+            assert name in calls
+        assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
+                           "validate_and_vacuum.py"]
+        assert calls[-1] == "health_check"
+        assert results["crashed"] is False
+
+    def test_backup_failure_aborts_repair_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        scripts: list[str] = []
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline._run_repair_script",
+                   side_effect=lambda s: (scripts.append(s),
+                                          {"status": "failed", "error": "disk full"})[1]), \
+             patch("daily_pipeline.notify_all") as mock_notify, patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+        assert scripts == ["backup_database.py"]  # 不允许无备份修复
+        assert results["crashed"] is True
+        assert mock_notify.call_args.args[0] == "error"
+
+    def test_reconcile_failure_continues_chain(self, weekday_mock):
+        db, loader, engine = self._mocks()
+        scripts: list[str] = []
+
+        def fake_script(s):
+            scripts.append(s)
+            if s == "reconcile_with_akshare.py":
+                return {"status": "failed", "error": "mismatch"}
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", return_value={"status": "ok"}), \
+             patch("daily_pipeline._run_repair_script", side_effect=fake_script), \
+             patch("daily_pipeline.notify_all"), patch("daily_pipeline.logger"):
+            results = daily_pipeline.monthly_repair(db, loader, engine)
+        assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
+                           "validate_and_vacuum.py"]
+        assert results["crashed"] is True

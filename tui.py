@@ -35,8 +35,30 @@ from textual.widgets import (
 )
 
 from core.calendar import get_expected_latest_trading_day
+from core.freshness import (
+    DELAYED_PUBLISH_TABLES,  # noqa: F401  # re-export，兼容 from tui import
+    MONTHLY_TABLES,  # noqa: F401  # re-export，兼容 from tui import
+    QUARTERLY_TABLES,  # noqa: F401  # re-export，兼容 from tui import
+    WEEKLY_TABLES,  # noqa: F401  # re-export，兼容 from tui import
+    compute_catch_up_tasks,
+    get_daily_bars_coverage,
+    get_latest_dates,
+    status_for_table,
+)
+from core.freshness import date_status as _date_status  # noqa: F401  # re-export，兼容 from tui import
+from core.freshness import normalize_date as _normalize_date  # noqa: F401  # re-export，兼容 from tui import
 from core.log_cleanup import cleanup_logs
-from core.task_registry import refreshable_trading_tasks
+from core.task_registry import (
+    CATCH_UP_TASK_ORDER as _CATCH_UP_TASK_ORDER,  # noqa: F401  # re-export，兼容 from tui import
+)
+from core.task_registry import (
+    TABLE_LABELS,
+    TABLE_LABELS_CN,
+    TASK_GROUPS,
+    panel_date_columns,
+    refreshable_trading_tasks,
+    task_to_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -526,7 +548,7 @@ class HelpScreen(ModalScreen[None]):
         with Vertical(id="help-dialog"):
             yield Label("[bold]快捷键帮助[/bold]")
             yield Label("")
-            yield Label("[bold]S[/bold] — 全量更新")
+            yield Label("[bold]S[/bold] — 每日更新")
             yield Label("[bold]R[/bold] — 断点续传")
             yield Label("[bold]U[/bold] — 收盘刷新")
             yield Label("[bold]X[/bold] — 停止任务")
@@ -538,6 +560,8 @@ class HelpScreen(ModalScreen[None]):
             yield Label("[bold]F[/bold] — 数据修复")
             yield Label("[bold]C[/bold] — 复制面板内容")
             yield Label("[bold]L[/bold] — 清理日志")
+            yield Label("[bold]W[/bold] — 每周补全")
+            yield Label("[bold]M[/bold] — 每月修复")
             yield Label("[bold]T[/bold] — 切换主题")
             yield Label("[bold]F5[/bold] — 刷新数据")
             yield Label("[bold]Ctrl+C / Q[/bold] — 退出")
@@ -870,79 +894,9 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
             conn.close()
 
 
-TABLE_DATE_COLUMNS: dict[str, str] = {
-    "daily_bars": "trade_date",
-    "indicators": "trade_date",
-    "fundamentals": "trade_date",
-    "fund_flow": "trade_date",
-    "margin_trading": "trade_date",
-    "dragon_tiger": "trade_date",
-    "block_trade": "trade_date",
-    "sector_fund_flow": "trade_date",
-    "shareholder_count": "report_date",
-    "quarterly_financials": "report_period",
-    "historical_valuation": "trade_date",
-    "sector_industry": "trade_date",
-    "institutional_holdings": "report_date",
-    "north_hold": "trade_date",
-    "index_daily": "trade_date",
-    "limit_up_down": "trade_date",
-    "gold_price": "trade_date",
-    "crude_oil": "trade_date",
-    "fx_rate": "trade_date",
-    "global_index": "trade_date",
-    "us_treasury": "trade_date",
-    "chip_distribution": "trade_date",
-    "chip_distribution_em": "trade_date",
-    "dividend_summary": "updated_at",
-    "futures_daily": "trade_date",
-    "south_flow": "trade_date",
-    "ah_premium": "trade_date",
-    "etf_daily": "trade_date",
-    "cb_index": "trade_date",
-    "cb_quotation": "updated_at",
-    "cb_redeem": "updated_at",
-    "restricted_share": "release_date",
-    "earnings_forecast": "end_date",
-    "stock_repurchase": "trade_date",
-    "institution_survey": "trade_date",
-    "stock_pledge": "trade_date",
-    "option_sentiment": "trade_date",
-    "sector_daily": "trade_date",
-    "sector_valuation": "trade_date",
-    "index_futures_basis": "trade_date",
-    "macro_monthly": "date",
-    "macro_quarterly": "date",
-}
-
-# 按周度更新的表（数据源每周发布一次，不按交易日衡量新鲜度）
-WEEKLY_TABLES: set[str] = {
-    "stock_pledge",  # 中登公司每周五更新质押比例
-}
-
-# 按月度更新的表（不按交易日衡量新鲜度）
-MONTHLY_TABLES: set[str] = {
-    "institutional_holdings",
-    "macro_monthly",
-}
-
-# 随季报更新的表（使用 report_date/report_period，不按交易日衡量新鲜度）
-QUARTERLY_TABLES: set[str] = {
-    "shareholder_count",
-    "quarterly_financials",
-    "macro_quarterly",
-    "north_hold",
-    "earnings_forecast",
-}
-
-# T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
-DELAYED_PUBLISH_TABLES: set[str] = {
-    "fx_rate",
-    "us_treasury",
-    "margin_trading",
-    "dragon_tiger",
-    "block_trade",
-}
+# 面板新鲜度监控的 {表: 日期列} 映射，由 core.task_registry 派生（注册表
+# 全集 ∪ 遗留表 institutional_holdings）；面板渲染只遍历 TABLE_LABELS。
+TABLE_DATE_COLUMNS: dict[str, str] = panel_date_columns()
 
 # 无有意义日期列的表（不显示新鲜度标记，只显示行数）
 NO_DATE_TABLES: set[str] = {
@@ -956,105 +910,6 @@ _HEALTHY_STATUSES: tuple[str, ...] = (
     "按月更新",
     "按季更新",
 )
-
-
-
-
-def _normalize_date(value: object) -> str | None:
-    """将日期/报告期归一化为 YYYY-MM-DD。
-
-    部分表（margin_trading、dragon_tiger、block_trade、shareholder_count、
-    quarterly_financials）的日期列以 YYYYMMDD 无横线格式存储；
-    chip_distribution 等表以 YYYY-MM-DD HH:MM:SS 格式存储。需归一化后
-    才能与期望日做新鲜度比较，否则会被 _date_status 误判为滞后。
-    """
-    if value is None:
-        return None
-    s = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return s
-
-
-def get_latest_dates(db_path: str) -> dict[str, str | None]:
-    """查询每个表最新日期/报告期（已归一化为 YYYY-MM-DD）。"""
-    p = Path(db_path)
-    if not p.exists():
-        return {}
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        cur = conn.cursor()
-        result: dict[str, str | None] = {}
-        for tbl, col in TABLE_DATE_COLUMNS.items():
-            try:
-                cur.execute(f"SELECT MAX({col}) FROM {tbl}")
-                value = cur.fetchone()[0]
-                result[tbl] = _normalize_date(value)
-            except Exception:
-                result[tbl] = None
-        return result
-    except Exception:
-        return {}
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]:
-    """返回 (已更新到期望交易日的股票数, 有日线数据的股票总数)。
-
-    用「各股最新交易日是否达到期望日」衡量覆盖率，比按行数对比更符合实际
-    （新股历史不足、节假日等会导致行数天然少于理想值）。
-    """
-    p = Path(db_path)
-    if not p.exists():
-        return 0, 0
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        cur = conn.cursor()
-        # 容忍期望日前 2 个自然日（周末/节假日），视为已更新
-        cur.execute(
-            """
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN max_date >= date(?, '-2 days') THEN 1 ELSE 0 END) AS up_to_date
-            FROM (SELECT ts_code, MAX(trade_date) AS max_date FROM daily_bars GROUP BY ts_code)
-            """,
-            (expected_date,),
-        )
-        total, up_to_date = cur.fetchone()
-        return int(up_to_date or 0), int(total or 0)
-    except Exception:
-        return 0, 0
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def _date_status(latest: str | None, expected: str) -> str:
-    """返回日期新鲜度状态标签（纯文本，颜色由调用方根据 STATUS_STYLES 渲染）。"""
-    if not latest:
-        return "无数据"
-    if latest == expected:
-        return "最新"
-    try:
-        from datetime import datetime, timedelta
-
-        latest_dt = datetime.strptime(latest, "%Y-%m-%d")
-        expected_dt = datetime.strptime(expected, "%Y-%m-%d")
-        # 数据日期 >= 期望日期 → 已更新到或超过预期（非交易日也有数据）
-        if latest_dt >= expected_dt:
-            return "最新"
-        if latest_dt >= expected_dt - timedelta(days=2):
-            return "略滞后"
-    except Exception:
-        pass
-    return "滞后"
 
 
 def format_count(n: int) -> str:
@@ -1254,7 +1109,9 @@ class DashboardWidget(Static):
 class SingleTaskWidget(Static):
     """Single task selector with a dropdown, organized by task groups."""
 
-    # 与 Groups tab 保持一致的分组定义
+    # 与 Groups tab 保持一致的分组定义。
+    # 成员以 core.task_registry.TASK_GROUPS 为准，此处仅为带标签对的 UI 结构
+    # （派生代价高于收益，保留原样；任务名由 _validate_against_registry 校验防漂移）。
     _SINGLE_TASK_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         (
             "核心行情",
@@ -1373,9 +1230,10 @@ class SingleTaskWidget(Static):
         """把分组定义展开为带分隔符的下拉选项列表。"""
         cls._validate_against_registry()
         # 收盘刷新是哨兵项（仿 __sep__ 惯例），不进 _SINGLE_TASK_GROUPS/_UTILS，
-        # 避免被 _validate_against_registry 当作未注册任务警告
+        # 避免被 _validate_against_registry 当作未注册任务警告；
+        # 每周补全/每月修复同理（它们是 tier 入口，不在 TASK_REGISTRY）
         options: list[tuple[str, str]] = [
-            ("全量更新 (Full Update)", "all"),
+            ("每日更新 (Daily Update)", "all"),
             ("收盘刷新 (Close Refresh)", "__refresh_today__"),
         ]
         for group_name, tasks in cls._SINGLE_TASK_GROUPS:
@@ -1383,6 +1241,8 @@ class SingleTaskWidget(Static):
             options.extend(tasks)
         options.append(("[dim]── 工具 ──[/dim]", "__sep__tools"))
         options.extend(cls._SINGLE_TASK_UTILS)
+        options.append(("每周补全 (Weekly Backfill)", "__weekly_backfill__"))
+        options.append(("每月修复 (Monthly Repair)", "__monthly_repair__"))
         return options
 
     def on_mount(self) -> None:
@@ -1405,6 +1265,14 @@ class SingleTaskWidget(Static):
             # 走专属确认流程而非 _run_or_schedule 延迟调度
             from typing import cast
             await cast(PipelineApp, self.app).action_refresh_today()
+        elif value == "__weekly_backfill__":
+            # 每周补全层哨兵项：路由到专属 action（不带 --force）
+            from typing import cast
+            await cast(PipelineApp, self.app).action_weekly_backfill()
+        elif value == "__monthly_repair__":
+            # 每月修复层哨兵项：路由到专属 action（不带 --force）
+            from typing import cast
+            await cast(PipelineApp, self.app).action_monthly_repair()
         elif isinstance(value, str) and value and not value.startswith("__sep__"):
             from typing import cast
             await cast(PipelineApp, self.app).action_run_single_task(value)
@@ -1414,66 +1282,9 @@ class SingleTaskWidget(Static):
 
 
 # ===========================================================================
-# 任务分组：把相似的 single task 聚合成一键顺序执行的按钮组
+# 任务分组 TASK_GROUPS 由 core.task_registry 统一供给（本文件顶部 import），
+# 把相似的 single task 聚合成一键顺序执行的按钮组
 # ===========================================================================
-
-TASK_GROUPS: dict[str, list[str]] = {
-    "core": [
-        "update_bars",
-        "update_indicators",
-        "update_fundamentals",
-        "update_chip_distribution",
-        "update_chip_distribution_em",
-        "update_chip_distribution_em_fullmarket",
-        "update_market_snapshot",
-    ],
-    "fund": [
-        "update_fund_flow",
-        "update_sector_fund_flow",
-        "update_north_hold",
-        "update_margin_trading",
-        "update_dragon_tiger",
-        "update_block_trade",
-    ],
-    "valuation": [
-        "update_historical_valuation",
-        "update_quarterly_financials",
-        "update_shareholder_count",
-        "update_dividend_summary",
-    ],
-    "macro": [
-        "update_china_macro",
-        "update_gold_price",
-        "update_crude_oil",
-        "update_usd",
-        "update_global_index",
-        "update_us_treasury",
-        "update_futures",
-    ],
-    "sector_index": [
-        "update_sector_industry",
-        "update_industry",
-        "update_sector_derivatives",
-        "update_index_daily",
-        "update_limit_up_down",
-    ],
-    "derivatives": [
-        "update_etf_daily",
-        "update_cb_quotation",
-        "update_cb_redeem",
-        "update_cb_index",
-        "update_south_flow",
-        "update_ah_premium",
-    ],
-    "events": [
-        "update_restricted_share",
-        "update_earnings_forecast",
-        "update_stock_repurchase",
-        "update_institution_survey",
-        "update_stock_pledge",
-        "update_option_sentiment",
-    ],
-}
 
 
 class TaskGroupWidget(Static):
@@ -1510,163 +1321,13 @@ class TaskGroupWidget(Static):
 
 
 class DataCompletenessWidget(VerticalScroll):
-    # 任务名 → 表名列表的映射（用于判断哪些表正在更新）
-    TASK_TO_TABLE: dict[str, list[str]] = {
-        "update_stock_list": ["stock_list"],
-        "update_bars": ["daily_bars"],
-        "update_indicators": ["indicators"],
-        "update_fundamentals": ["fundamentals"],
-        "update_fund_flow": ["fund_flow"],
-        "update_margin_trading": ["margin_trading"],
-        "update_dragon_tiger": ["dragon_tiger"],
-        "update_block_trade": ["block_trade"],
-        "update_sector_fund_flow": ["sector_fund_flow"],
-        "update_shareholder_count": ["shareholder_count"],
-        "update_quarterly_financials": ["quarterly_financials"],
-        "update_historical_valuation": ["historical_valuation"],
-        "update_sector_industry": ["sector_industry"],
-        "update_institutional_holdings": ["institutional_holdings"],
-        "update_north_hold": ["north_hold"],
-        "update_index_daily": ["index_daily"],
-        "update_limit_up_down": ["limit_up_down"],
-        "update_dividend_summary": ["dividend_summary"],
-        "update_gold_price": ["gold_price"],
-        "update_crude_oil": ["crude_oil"],
-        "update_usd": ["fx_rate"],
-        "update_global_index": ["global_index"],
-        "update_us_treasury": ["us_treasury"],
-        "update_futures": ["futures_daily"],
-        "update_chip_distribution": ["chip_distribution"],
-        "update_chip_distribution_em": ["chip_distribution_em"],
-        "update_south_flow": ["south_flow"],
-        "update_ah_premium": ["ah_premium"],
-        "update_etf_daily": ["etf_daily"],
-        "update_cb_quotation": ["cb_quotation"],
-        "update_cb_redeem": ["cb_redeem"],
-        "update_cb_index": ["cb_index"],
-        "update_restricted_share": ["restricted_share"],
-        "update_earnings_forecast": ["earnings_forecast"],
-        "update_stock_repurchase": ["stock_repurchase"],
-        "update_institution_survey": ["institution_survey"],
-        "update_stock_pledge": ["stock_pledge"],
-        "update_option_sentiment": ["option_sentiment"],
-        "update_sector_derivatives": ["sector_daily", "sector_valuation", "index_futures_basis"],
-        "update_china_macro": ["macro_monthly", "macro_quarterly"],
-    }
+    # 任务名 → 表名列表的映射（用于判断哪些表正在更新），由 core.task_registry 派生
+    TASK_TO_TABLE: dict[str, list[str]] = task_to_table()
 
-    TABLE_LABELS: dict[str, str] = {
-        # 行情核心
-        "daily_bars": "Daily Bars",
-        "indicators": "Indicators",
-        # 基本面
-        "fundamentals": "Fundamentals",
-        "historical_valuation": "Valuation",
-        "quarterly_financials": "Quarterly Fin.",
-        "dividend_summary": "Dividends",
-        # 资金面
-        "fund_flow": "Fund Flow",
-        "margin_trading": "Margin Trading",
-        "dragon_tiger": "Dragon Tiger",
-        "block_trade": "Block Trade",
-        "sector_fund_flow": "Sector Flow",
-        "north_hold": "North Hold",
-        # 行业/大盘
-        "sector_industry": "Industry",
-        "index_daily": "Index Daily",
-        "limit_up_down": "Limit U/D",
-        # 股东
-        "shareholder_count": "Shareholders",
-        "institutional_holdings": "Inst. Holdings",
-        # 筹码分布
-        "chip_distribution": "Chip Dist.",
-        "chip_distribution_em": "Chip EM",
-        # 宏观
-        "gold_price": "Gold Price",
-        "crude_oil": "Crude Oil",
-        "fx_rate": "USD/CNY",
-        "global_index": "Global Index",
-        "us_treasury": "US Treasury",
-        # 期货
-        "futures_daily": "Futures",
-        # 衍生数据
-        "south_flow": "South Flow",
-        "ah_premium": "AH Premium",
-        "etf_daily": "ETF Daily",
-        "cb_quotation": "CB Quotation",
-        "cb_redeem": "CB Redeem",
-        "cb_index": "CB Index",
-        "restricted_share": "Restricted Share",
-        "earnings_forecast": "Earnings Forecast",
-        "stock_repurchase": "Stock Repurchase",
-        "institution_survey": "Institution Survey",
-        "stock_pledge": "Stock Pledge",
-        "option_sentiment": "Option Sentiment",
-        "sector_daily": "Sector Daily",
-        "sector_valuation": "Sector Val.",
-        "index_futures_basis": "Futures Basis",
-        # 宏观
-        "macro_monthly": "Macro Monthly",
-        "macro_quarterly": "Macro Quarterly",
-        # 总览
-        "stock_list": "Stock List",
-    }
-
-    TABLE_LABELS_CN: dict[str, str] = {
-        # 行情核心
-        "daily_bars": "日线行情",
-        "indicators": "技术指标",
-        # 基本面
-        "fundamentals": "基本面数据",
-        "historical_valuation": "历史估值",
-        "quarterly_financials": "季度财务",
-        "dividend_summary": "分红信息",
-        # 资金面
-        "fund_flow": "资金流向",
-        "margin_trading": "融资融券",
-        "dragon_tiger": "龙虎榜",
-        "block_trade": "大宗交易",
-        "sector_fund_flow": "板块资金",
-        "north_hold": "北向持仓",
-        # 行业/大盘
-        "sector_industry": "行业分类",
-        "index_daily": "大盘指数",
-        "limit_up_down": "涨跌停",
-        # 股东
-        "shareholder_count": "股东户数",
-        "institutional_holdings": "机构持仓",
-        # 筹码分布
-        "chip_distribution": "筹码分布",
-        "chip_distribution_em": "筹码分布(EM)",
-        # 宏观
-        "gold_price": "黄金价格",
-        "crude_oil": "原油价格",
-        "fx_rate": "汇率",
-        "global_index": "全球指数",
-        "us_treasury": "美债收益率",
-        # 期货
-        "futures_daily": "期货日线",
-        # 衍生数据
-        "south_flow": "南向资金",
-        "ah_premium": "AH溢价",
-        "etf_daily": "ETF日线",
-        "cb_quotation": "可转债行情",
-        "cb_redeem": "可转债强赎",
-        "cb_index": "可转债指数",
-        "restricted_share": "限售解禁",
-        "earnings_forecast": "业绩预告",
-        "stock_repurchase": "股票回购",
-        "institution_survey": "机构调研",
-        "stock_pledge": "股票质押",
-        "option_sentiment": "期权情绪",
-        "sector_daily": "行业涨跌幅",
-        "sector_valuation": "板块估值",
-        "index_futures_basis": "基差",
-        # 宏观
-        "macro_monthly": "宏观(月)",
-        "macro_quarterly": "宏观(季)",
-        # 总览
-        "stock_list": "股票列表",
-    }
+    # 表标签元数据由 core.task_registry 统一供给（模块级 import）；
+    # 此处保留类属性别名，维持 DataCompletenessWidget.TABLE_LABELS 既有访问路径
+    TABLE_LABELS: dict[str, str] = TABLE_LABELS
+    TABLE_LABELS_CN: dict[str, str] = TABLE_LABELS_CN
 
     async def on_mount(self) -> None:
         self.border_title = "Data Completeness"
@@ -1764,27 +1425,8 @@ class DataCompletenessWidget(VerticalScroll):
         expected_date: str,
         updating_tables: list[str] | None,
     ) -> str:
-        """返回指定表的新鲜度状态标签（纯文本）。"""
-        if updating_tables and tbl in updating_tables:
-            return "更新中"
-        if tbl in WEEKLY_TABLES and latest:
-            # 中登每周五发布；超过 10 个自然日未更新才判定为滞后，
-            # 解析失败时保守地保留“按周更新”标记。
-            try:
-                latest_dt = datetime.strptime(latest, "%Y-%m-%d")
-                expected_dt = datetime.strptime(expected_date, "%Y-%m-%d")
-                if (expected_dt - latest_dt).days > 10:
-                    return _date_status(latest, expected_date)
-            except (ValueError, TypeError):
-                pass
-            return "按周更新"
-        if tbl in MONTHLY_TABLES and latest:
-            return "按月更新"
-        if tbl in QUARTERLY_TABLES and latest:
-            return "按季更新"
-        if tbl in DELAYED_PUBLISH_TABLES and latest:
-            return "T+1"
-        return _date_status(latest, expected_date)
+        """返回指定表的新鲜度状态标签（纯文本）。实现已收敛至 core.freshness.status_for_table。"""
+        return status_for_table(tbl, latest, expected_date, updating_tables)
 
     def _rebuild_content(self) -> None:
         counts = self._counts
@@ -1898,82 +1540,6 @@ class DataCompletenessWidget(VerticalScroll):
         filled = max(0, min(length, round(length * pct_int / 100)))
         bar = "█" * filled + "░" * (length - filled)
         return f"[bold #22c55e]{bar}[/bold #22c55e]", pct_int
-
-
-# 补齐缺失按钮的任务执行顺序：与 run_all 的"依赖先行、长尾垫底"一致。
-# 一张表可能有多个 owner 任务（如 chip_distribution_em 的日常/全市场版），
-# 按此列表先到先得，确保选到日常任务而非 ON_DEMAND 任务。
-_CATCH_UP_TASK_ORDER: tuple[str, ...] = (
-    "update_bars",
-    "update_indicators",
-    "update_chip_distribution",
-    "update_fundamentals",
-    "update_market_snapshot",
-    "update_historical_valuation",
-    "update_sector_fund_flow",
-    "update_sector_industry",
-    "update_fund_flow",
-    "update_margin_trading",
-    "update_dragon_tiger",
-    "update_block_trade",
-    "update_limit_up_down",
-    "update_index_daily",
-    "update_market_valuation",
-    "update_concept_board",
-    "update_south_flow",
-    "update_ah_premium",
-    "update_etf_daily",
-    "update_cb_quotation",
-    "update_cb_redeem",
-    "update_cb_index",
-    "update_sector_derivatives",
-    "update_option_sentiment",
-    "update_stock_repurchase",
-    "update_institution_survey",
-    "update_stock_pledge",
-    "update_restricted_share",
-    "update_earnings_forecast",
-    "update_dividend_summary",
-    "update_gold_price",
-    "update_crude_oil",
-    "update_usd",
-    "update_global_index",
-    "update_us_treasury",
-    "update_futures",
-    "update_china_macro",
-    "update_money_market",
-    "update_chip_distribution_em",
-)
-
-
-def compute_catch_up_tasks(
-    latest_dates: dict[str, str | None], expected_date: str
-) -> list[str]:
-    """根据完整度面板的新鲜度判定，计算需要补齐的任务清单（按执行顺序）。
-
-    只补面板会标「略滞后/滞后」的表；T+1、周/月/季更、无数据（如北向
-    资金停止披露）沿用面板既有语义，不视为缺失。
-    """
-    stale_tables = {
-        tbl
-        for tbl in TABLE_DATE_COLUMNS
-        if DataCompletenessWidget._get_status_for_table(
-            tbl, latest_dates.get(tbl), expected_date, None
-        )
-        in ("略滞后", "滞后")
-    }
-    if not stale_tables:
-        return []
-
-    tasks: list[str] = []
-    claimed: set[str] = set()
-    for task in _CATCH_UP_TASK_ORDER:
-        tables = DataCompletenessWidget.TASK_TO_TABLE.get(task, [])
-        hit = [t for t in tables if t in stale_tables and t not in claimed]
-        if hit:
-            tasks.append(task)
-            claimed.update(hit)
-    return tasks
 
 
 class ProgressWidget(Static):
@@ -2104,7 +1670,7 @@ class LogsWidget(RichLog):
 class PipelineApp(App):
     TITLE = "SmartMoney Pipeline Manager"
     BINDINGS = [
-        Binding("s", "run_pipeline", "Full Update"),
+        Binding("s", "run_pipeline", "Daily Update"),
         Binding("r", "resume_pipeline", "Resume"),
         Binding("u", "refresh_today", "Close Refresh"),
         Binding("x", "stop_pipeline", "Stop"),
@@ -2116,6 +1682,8 @@ class PipelineApp(App):
         Binding("c", "copy_panel", "Copy Panel", show=False),
         Binding("t", "toggle_theme", "Toggle Theme", show=False),
         Binding("l", "clean_logs", "Clean Logs", show=False),
+        Binding("w", "weekly_backfill", "Weekly Backfill", show=False),
+        Binding("m", "monthly_repair", "Monthly Repair", show=False),
         Binding("f5", "refresh_data", "Refresh", show=False),
         Binding("ctrl+c", "quit", "Quit", priority=True, show=False),
         Binding("q", "quit", "Quit", show=False),
@@ -2556,7 +2124,7 @@ class PipelineApp(App):
     async def action_run_pipeline(self) -> None:
         pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
         self._run_or_schedule(
-            "全量更新",
+            "每日更新",
             sys.executable, pipeline_path, "--task", "all", "--force",
         )
 
@@ -2661,6 +2229,20 @@ class PipelineApp(App):
         self._run_or_schedule(
             "健康检查",
             sys.executable, pipeline_path, "--task", "health_check", "--force",
+        )
+
+    async def action_weekly_backfill(self) -> None:
+        """每周补全层：完整性优先的缺漏兜底。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            "每周补全", sys.executable, pipeline_path, "--task", "weekly_backfill",
+        )
+
+    async def action_monthly_repair(self) -> None:
+        """每月修复层：正确性优先的校验修复。"""
+        pipeline_path = str(Path(__file__).parent / "daily_pipeline.py")
+        self._run_or_schedule(
+            "每月修复", sys.executable, pipeline_path, "--task", "monthly_repair",
         )
 
     async def action_run_reconcile(self) -> None:

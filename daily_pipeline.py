@@ -9,6 +9,11 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
                     core/ (基础设施)          tasks/ (业务任务)
 
 用法：
+    python daily_pipeline.py --task daily      # 每日层（TRADING_DAY+DAILY+ON_DEMAND）
+    python daily_pipeline.py --task all        # daily 的兼容别名
+    python daily_pipeline.py --task update_daily_core  # daily 的兼容别名
+    python daily_pipeline.py --task weekly_backfill    # 每周层：WEEKLY 任务+补齐缺漏+retry+health（手动触发）
+    python daily_pipeline.py --task monthly_repair     # 每月层：MONTHLY/QUARTERLY 任务+备份→对账→vacuum 修复链+health（手动触发）
     python daily_pipeline.py --task update_bars
     python daily_pipeline.py --task update_bars --resume
     python daily_pipeline.py --task health_check
@@ -20,6 +25,7 @@ import datetime as _datetime_module  # noqa: F401 — re-export for test patches
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
@@ -57,6 +63,7 @@ from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
     read_cross_source_config,
 )
+from core.freshness import compute_catch_up_tasks, get_latest_dates
 from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.notifications import notify_all
@@ -73,7 +80,7 @@ from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
 from core.refresh_store import SQLiteRefreshStore
 from core.runner import safe_task
-from core.task_registry import Cadence, lookup_task, refreshable_trading_tasks
+from core.task_registry import TASK_REGISTRY, Cadence, lookup_task, refreshable_trading_tasks
 from core.task_result import TaskResult, normalize_task_result
 from core.utils import (
     infer_market as _infer_market,  # noqa: F401
@@ -249,6 +256,7 @@ def _run_registry_task(
     limit: int | None = None,
     resume: bool = False,
     force: bool = False,
+    health_fast: bool = False,
 ) -> Any:
     fn = _TASK_CALLABLES.get(task_name)
     if fn is None:
@@ -297,6 +305,11 @@ def _run_registry_task(
             task_name, fn, db, loader,
             limit=limit, resume=resume, symbols=symbols, force=force,
         )
+
+    if task_name == "health_check":
+        # weekly/monthly 批处理末尾传 health_fast=True 走 page_count 估算；
+        # 手动 --task health_check 不传该参数，保持精确 COUNT(*) 口径
+        return _safe_task(task_name, fn, db, fast=health_fast)
 
     if task_name == "update_daily_core":
         # 编排器：内部各任务已各自经过 safe_task，不再包一层
@@ -497,7 +510,7 @@ def run_all(
         "update_chip_distribution_em", update_chip_distribution_em, db
     )
 
-    results["health"] = _run_task("health_check", health_check, db)
+    results["health"] = _run_task("health_check", health_check, db, fast=True)
 
     db.close()
     elapsed = time.time() - start_time
@@ -524,6 +537,125 @@ def run_all(
         )
     else:
         notify_all("info", "数据管道全部完成", f"耗时 {elapsed / 60:.1f}min")
+    return results
+
+
+def weekly_backfill(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    force: bool = False,
+) -> dict:
+    """每周数据补全层：WEEKLY 任务 → 补齐缺漏（stale 驱动）→ retry → health。"""
+    start_time = time.time()
+    _lower_process_priority()
+    logger.info("\n🧩 每周数据补全层启动 (WEEKLY + 补齐缺漏 + retry)")
+    results: dict[str, Any] = {}
+
+    # 1. WEEKLY cadence 任务（registry 顺序即声明顺序）
+    for spec in TASK_REGISTRY:
+        if spec.cadence is Cadence.WEEKLY:
+            results[spec.name] = _run_registry_task(
+                spec.name, db, loader, engine, force=force
+            )
+
+    # 2. 补齐缺漏：与完整度面板同一套 stale 语义，不限 cadence；
+    #    判定失败（DB 不可读等）只跳过补全，不影响主体
+    try:
+        latest_dates = get_latest_dates(str(db.db_path))
+        expected = get_expected_latest_trading_day()
+        for task_name in compute_catch_up_tasks(latest_dates, expected):
+            if task_name not in results:
+                results[task_name] = _run_registry_task(
+                    task_name, db, loader, engine, force=force
+                )
+    except Exception as e:
+        logger.warning("⚠️ 补齐缺漏判定失败，跳过补全步骤: %s", e)
+
+    # 3. 失败股票重抓 + 4. 健康报告
+    results["retry"] = _run_registry_task("retry", db, loader, engine)
+    results["health"] = _run_registry_task("health_check", db, loader, engine, health_fast=True)
+
+    db.close()
+    elapsed = time.time() - start_time
+    failed_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict)
+        and v.get("status") in {"degraded", "failed", "aborted"}
+    )
+    results["crashed"] = bool(failed_tasks)
+    if failed_tasks:
+        notify_all("error", "每周补全完成（含失败任务）",
+                   f"耗时 {elapsed / 60:.1f}min，失败任务: {', '.join(failed_tasks)}")
+    else:
+        notify_all("info", "每周补全全部完成", f"耗时 {elapsed / 60:.1f}min")
+    return results
+
+
+_REPAIR_CHAIN: tuple[str, ...] = (
+    "backup_database.py",
+    "reconcile_with_akshare.py",
+    "validate_and_vacuum.py",
+)
+
+
+def _run_repair_script(script: str) -> dict:
+    """以子进程运行 scripts/ 下的修复脚本，返回 safe_task 兼容结果。"""
+    path = Path(__file__).parent / "scripts" / script
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(path)],
+            capture_output=True, text=True, timeout=3600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"status": "failed", "error": f"{script}: {e}"}
+    if proc.returncode != 0:
+        return {"status": "failed",
+                "error": f"{script} exited {proc.returncode}: {proc.stderr[-500:]}"}
+    return {"status": "ok", "output_tail": proc.stdout[-500:]}
+
+
+def monthly_repair(
+    db: DatabaseInterface,
+    loader: DataLoaderInterface,
+    engine: IndicatorEngineInterface,
+    force: bool = False,
+) -> dict:
+    """每月数据修复层：MONTHLY/QUARTERLY 任务 → 备份→对账→vacuum → health。"""
+    start_time = time.time()
+    _lower_process_priority()
+    logger.info("\n🛠️ 每月数据修复层启动 (MONTHLY + QUARTERLY + 修复链)")
+    results: dict[str, Any] = {}
+
+    for spec in TASK_REGISTRY:
+        if spec.cadence in (Cadence.MONTHLY, Cadence.QUARTERLY):
+            results[spec.name] = _run_registry_task(
+                spec.name, db, loader, engine, force=force
+            )
+
+    # 修复链：backup 失败则中止后续（不允许无备份修复），其余失败继续并汇总
+    for script in _REPAIR_CHAIN:
+        step = _run_repair_script(script)
+        results[f"repair:{script}"] = step
+        if script == "backup_database.py" and step.get("status") != "ok":
+            logger.error("❌ 备份失败，中止修复链后续步骤")
+            break
+
+    results["health"] = _run_registry_task("health_check", db, loader, engine, health_fast=True)
+
+    db.close()
+    elapsed = time.time() - start_time
+    failed_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict)
+        and v.get("status") in {"degraded", "failed", "aborted"}
+    )
+    results["crashed"] = bool(failed_tasks)
+    if failed_tasks:
+        notify_all("error", "每月修复完成（含失败步骤）",
+                   f"耗时 {elapsed / 60:.1f}min，失败: {', '.join(failed_tasks)}")
+    else:
+        notify_all("info", "每月修复全部完成", f"耗时 {elapsed / 60:.1f}min")
     return results
 
 
@@ -698,7 +830,7 @@ def main():
     try:
         # 进程锁：all 任务使用全局锁；single task 使用按任务名锁，
         # 允许不同任务并行，避免 TUI 连续启动多个 single task 时互相冲突。
-        if task in ("all", "update_daily_core"):
+        if task in ("all", "daily", "update_daily_core", "weekly_backfill", "monthly_repair"):
             _acquire_lock()
         elif task != "health_check":
             # 全局锁与 TaskLock 互不感知：全量管道（或收盘刷新）运行期间，
@@ -723,12 +855,16 @@ def main():
             def _should_update():
                 return True
 
-        if task == "all":
-            results = run_all(db, loader, engine, resume=args.resume, force=args.force)
+        if task in ("all", "daily", "update_daily_core"):
+            results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
-        elif task == "update_daily_core":
-            results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
+        elif task == "weekly_backfill":
+            results = weekly_backfill(db, loader, engine, force=args.force)
+            if results.get("crashed"):
+                sys.exit(1)
+        elif task == "monthly_repair":
+            results = monthly_repair(db, loader, engine, force=args.force)
             if results.get("crashed"):
                 sys.exit(1)
         elif task in _TASK_CALLABLES:

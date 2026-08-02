@@ -1,0 +1,168 @@
+"""core.freshness 的测试（自 test_tui.py 平移并补充边界断言）。
+
+期望值以 tui.py 原函数搬运前的真实行为为准，锁定搬运零语义变化。
+"""
+
+import sqlite3
+
+from core.freshness import compute_catch_up_tasks
+from core.task_registry import table_date_columns
+
+
+def _fresh_latest_dates(expected: str) -> dict:
+    """所有表都更新到 expected 的基准状态。"""
+    return dict.fromkeys(table_date_columns(), expected)
+
+
+class TestComputeCatchUpTasks:
+    EXPECTED = "2026-07-31"
+    STALE = "2026-07-30"
+
+    def test_all_fresh_returns_empty(self):
+        assert compute_catch_up_tasks(_fresh_latest_dates(self.EXPECTED), self.EXPECTED) == []
+
+    def test_stale_bars_selects_dependency_chain_in_order(self):
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["daily_bars"] = self.STALE
+        latest["indicators"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks == ["update_bars", "update_indicators"]
+
+    def test_chip_em_table_maps_to_daily_task(self):
+        """chip_distribution_em 表有两个 owner，必须选日常任务而非 ON_DEMAND 全市场版。"""
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["chip_distribution_em"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks == ["update_chip_distribution_em"]
+        assert "update_chip_distribution_em_fullmarket" not in tasks
+
+    def test_expected_semantics_excluded_tables_not_selected(self):
+        """T+1 / 周更 / 月更 / 季更 / 无数据不视为缺失（沿用面板语义）。"""
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["margin_trading"] = self.STALE  # T+1
+        latest["stock_pledge"] = "2026-07-24"  # 周更
+        latest["macro_monthly"] = "2026-07-20"  # 月更
+        latest["quarterly_financials"] = "2026-06-30"  # 季更
+        assert compute_catch_up_tasks(latest, self.EXPECTED) == []
+
+    def test_long_tail_ordered_last(self):
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["chip_distribution_em"] = self.STALE
+        latest["daily_bars"] = self.STALE
+        latest["fund_flow"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks[0] == "update_bars"
+        assert tasks[-1] == "update_chip_distribution_em"
+
+
+def test_date_status():
+    from core.freshness import date_status
+    assert date_status("2026-07-07", "2026-07-07") == "最新"
+    assert date_status(None, "2026-07-07") == "无数据"
+    assert date_status("2026-07-06", "2026-07-07") == "略滞后"
+    assert date_status("2026-07-01", "2026-07-07") == "滞后"
+
+
+def test_date_status_boundaries():
+    from core.freshness import date_status
+    assert date_status(None, "2026-07-31") == "无数据"
+    assert date_status("2026-07-31", "2026-07-31") == "最新"
+    # 数据日期超过期望日（非交易日也有数据）仍视为最新
+    assert date_status("2026-08-01", "2026-07-31") == "最新"
+    # 2 个自然日以内（含第 2 天）为「略滞后」
+    assert date_status("2026-07-30", "2026-07-31") == "略滞后"
+    assert date_status("2026-07-29", "2026-07-31") == "略滞后"
+    # 超过 2 个自然日为「滞后」
+    assert date_status("2026-07-28", "2026-07-31") == "滞后"
+    # 无法解析的日期按「滞后」处理
+    assert date_status("not-a-date", "2026-07-31") == "滞后"
+
+
+def test_normalize_date():
+    from core.freshness import normalize_date
+    assert normalize_date(None) is None
+    assert normalize_date("2026-07-07") == "2026-07-07"
+    assert normalize_date("20260630") == "2026-06-30"
+    assert normalize_date("20260331") == "2026-03-31"
+    # chip_distribution 等表以 DATE 类型存储，SQLite 返回带时间戳的字符串
+    assert normalize_date("2026-07-13 00:00:00") == "2026-07-13"
+    assert normalize_date("not-a-date") == "not-a-date"
+
+
+def test_status_for_table_weekly_and_delayed():
+    from core.freshness import status_for_table
+    # stock_pledge 为按周更新表：10 个自然日内返回「按周更新」
+    assert status_for_table("stock_pledge", "2026-07-24", "2026-07-31", None) == "按周更新"
+    # 超过 10 个自然日未更新时回退到日期判定（滞后）
+    assert status_for_table("stock_pledge", "2020-01-01", "2026-07-31", None) == "滞后"
+    # T+1 表在只差一天时返回「T+1」而非滞后
+    assert status_for_table("fx_rate", "2026-07-30", "2026-07-31", None) == "T+1"
+    # 月更/季更表有数据即返回周期性标记
+    assert status_for_table("macro_monthly", "2026-07-20", "2026-07-31", None) == "按月更新"
+    assert status_for_table("quarterly_financials", "2026-06-30", "2026-07-31", None) == "按季更新"
+    # 更新中的表优先返回「更新中」
+    assert status_for_table("daily_bars", "2026-07-31", "2026-07-31", ["daily_bars"]) == "更新中"
+    # 普通表回退到日期判定
+    assert status_for_table("daily_bars", "2026-07-29", "2026-07-31", None) == "略滞后"
+
+
+def test_status_for_table_newly_paneled_periodic_tables():
+    """裁决 B 新上面板的周期表必须按周期判定，不得按交易日误报滞后。"""
+    from core.freshness import status_for_table
+    assert status_for_table("stock_list", "2026-06-01", "2026-07-31", None) == "按月更新"
+    assert status_for_table("concept_member", "2026-06-01", "2026-07-31", None) == "按月更新"
+    # index_member_history 在按周 10 天窗口内返回「按周更新」
+    assert status_for_table("index_member_history", "2026-07-29", "2026-07-31", None) == "按周更新"
+
+
+def test_get_daily_bars_coverage(tmp_path):
+    from core.freshness import get_daily_bars_coverage
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars VALUES ('000001.SZ', '2026-07-09')")
+    conn.execute("INSERT INTO daily_bars VALUES ('600000.SH', '2026-07-08')")
+    conn.execute("INSERT INTO daily_bars VALUES ('000002.SZ', '2026-07-01')")
+    conn.commit()
+    conn.close()
+
+    up_to_date, total = get_daily_bars_coverage(str(db_file), "2026-07-10")
+    assert total == 3
+    # 2026-07-09 >= 2026-07-08 (expect -2) → up to date
+    # 2026-07-08 >= 2026-07-08 → up to date
+    # 2026-07-01 <  2026-07-08 → lagging
+    assert up_to_date == 2
+
+    # non-existent DB
+    assert get_daily_bars_coverage("/nonexistent/test.db", "2026-07-10") == (0, 0)
+
+
+def test_get_latest_dates(tmp_path):
+    from core.freshness import get_latest_dates
+    db_file = tmp_path / "test.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE daily_bars (trade_date TEXT)")
+    conn.execute("CREATE TABLE indicators (trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars (trade_date) VALUES ('2026-07-07')")
+    conn.execute("INSERT INTO indicators (trade_date) VALUES ('2026-07-06')")
+    conn.commit()
+    conn.close()
+
+    result = get_latest_dates(str(db_file))
+    assert result.get("daily_bars") == "2026-07-07"
+    assert result.get("indicators") == "2026-07-06"
+
+
+def test_get_latest_dates_covers_legacy_panel_tables(tmp_path):
+    """面板查询必须覆盖无注册任务的历史遗留表（institutional_holdings）。"""
+    import sqlite3
+
+    from core.freshness import get_latest_dates
+    db_file = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE institutional_holdings (report_date TEXT)")
+    conn.execute("INSERT INTO institutional_holdings VALUES ('2026-06-30')")
+    conn.commit()
+    conn.close()
+    result = get_latest_dates(str(db_file))
+    assert result["institutional_holdings"] == "2026-06-30"

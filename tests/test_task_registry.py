@@ -4,6 +4,10 @@ from __future__ import annotations
 import pytest
 
 from core.task_registry import (
+    CATCH_UP_TASK_ORDER,
+    TABLE_LABELS,
+    TABLE_LABELS_CN,
+    TASK_GROUPS,
     TASK_REGISTRY,
     Cadence,
     DateStrategy,
@@ -13,6 +17,7 @@ from core.task_registry import (
     refreshable_trading_tasks,
     table_date_columns,
     task_names,
+    task_to_table,
 )
 
 
@@ -322,3 +327,59 @@ class TestRefreshPolicies:
             "update_chip_distribution",
             "update_chip_distribution_em",
         }
+
+
+# ── registry 派生视图与展示元数据（Task 1：元数据收敛） ──────────────────
+
+
+def test_task_to_table_matches_specs():
+    mapping = task_to_table()
+    for spec in TASK_REGISTRY:
+        if spec.tables:
+            assert list(spec.tables) == mapping[spec.name]
+    assert mapping["update_bars"] == ["daily_bars"]
+
+
+def test_labels_cover_all_date_tables():
+    for table in table_date_columns():
+        assert table in TABLE_LABELS, f"{table} 缺英文标签"
+        assert table in TABLE_LABELS_CN, f"{table} 缺中文标签"
+
+
+def test_task_groups_reference_registered_tasks():
+    registered = {spec.name for spec in TASK_REGISTRY}
+    for group, tasks in TASK_GROUPS.items():
+        assert isinstance(group, str) and tasks
+        for task in tasks:
+            assert task in registered, f"{group} 组引用了未注册任务 {task}"
+
+
+def test_catch_up_order_subset_of_registered():
+    registered = {spec.name for spec in TASK_REGISTRY}
+    for task in CATCH_UP_TASK_ORDER:
+        assert task in registered
+
+
+def test_registry_date_columns_match_production():
+    """registry 日期列必须与生产库真实列名一致（tui 旧映射为生产验证口径）。"""
+    cols = table_date_columns()
+    assert cols["shareholder_count"] == "report_date"
+    assert cols["quarterly_financials"] == "report_period"
+    assert cols["dividend_summary"] == "updated_at"
+
+
+def test_panel_date_columns_includes_legacy_tables():
+    from core.task_registry import panel_date_columns
+    cols = panel_date_columns()
+    assert cols["institutional_holdings"] == "report_date"
+    # 注册表一张不少
+    for table, col in table_date_columns().items():
+        assert cols[table] == col
+
+
+def test_panel_labels_have_date_columns():
+    """面板的每一张表（TABLE_LABELS 的键）都必须有新鲜度查询列。"""
+    from core.task_registry import panel_date_columns
+    cols = panel_date_columns()
+    for table in TABLE_LABELS:
+        assert table in cols, f"面板表 {table} 缺日期列"
