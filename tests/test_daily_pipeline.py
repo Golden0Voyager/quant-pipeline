@@ -928,6 +928,34 @@ class TestHealthCheck:
             r = daily_pipeline.health_check(db)
         assert "report" in r
 
+    def test_health_check_fast_uses_page_estimate(self, health_db: str):
+        """fast 模式跳过 12 张表的逐表 COUNT(*)，改 PRAGMA page_count 库级估算。"""
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db, fast=True)
+        assert "report" in r
+        assert r["status"] != "failed"
+        # 库级估算行存在；page_count 是库级指标，给不出表级估算，逐表计数行省略
+        assert "估算" in r["report"]
+        assert "日线数据" not in r["report"]
+
+    def test_health_check_fast_structure_matches_exact(self, health_db: str):
+        """fast 与精确模式结果结构一致；fast=False 现行行为（逐表精确计数）零变化。"""
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            fast = daily_pipeline.health_check(db, fast=True)
+            exact = daily_pipeline.health_check(db)
+        assert set(fast) == set(exact)
+        # 覆盖率/最新日期段口径不变（均为 MAX/DISTINCT 索引查询）
+        assert fast["issues"] == exact["issues"]
+        assert fast["coverage_pct"] == exact["coverage_pct"]
+        assert fast["latest_bar"] == exact["latest_bar"]
+        # 精确模式回归：仍输出逐表计数、无估算行
+        assert "估算" not in exact["report"]
+        assert "日线数据" in exact["report"]
+
 
 # ===========================================================================
 # run_all
@@ -1046,6 +1074,19 @@ class TestRunAll:
         # 最长尾的逐股任务垫底，仅在 health_check 之前
         assert order.index("update_chip_distribution_em") == len(order) - 2
         assert order.index("health_check") == len(order) - 1
+
+    def test_health_check_runs_fast(self, tmp_path: Path, weekday_mock):
+        """run_all 批量入口的 health_check 走 fast 估算，避免大表 COUNT(*) 全表扫描。"""
+        db = MagicMock()
+        db.db_path = str(tmp_path / "quant_core.db")
+        loader = MagicMock()
+        engine = MagicMock()
+        with patch("daily_pipeline._should_update", return_value=True), \
+             patch("daily_pipeline._safe_task", return_value={"status": "ok"}) as safe_task, \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.run_all(db, loader, engine)
+        health_call = next(c for c in safe_task.call_args_list if c.args[0] == "health_check")
+        assert health_call.kwargs.get("fast") is True
 
 
 # ===========================================================================
@@ -3834,6 +3875,64 @@ def test_fetch_limit_pool_records_propagates_source_error():
     with patch.object(macro, "ak", fake_ak), pytest.raises(ConnectionError):
         macro.fetch_limit_pool_records("2026-07-27")
 
+
+
+class TestHealthCheckFastDispatch:
+    """health_check fast 模式的 _run_registry_task 特判与 weekly/monthly 透传。"""
+
+    def test_registry_health_check_manual_stays_exact(self, weekday_mock):
+        """手动 --task health_check 不传 health_fast，保持精确 COUNT(*) 口径。"""
+        fn = MagicMock(return_value={"status": "success", "saved": 0})
+        with patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": fn}), \
+             patch("daily_pipeline._safe_task",
+                   side_effect=lambda name, f, *a, **kw: f(*a, **kw)):
+            daily_pipeline._run_registry_task("health_check", MagicMock())
+        assert fn.call_args.kwargs.get("fast") is False
+
+    def test_registry_health_check_fast_passthrough(self, weekday_mock):
+        """health_fast=True 时透传 fast=True 给 health_check。"""
+        fn = MagicMock(return_value={"status": "success", "saved": 0})
+        with patch.dict("daily_pipeline._TASK_CALLABLES", {"health_check": fn}), \
+             patch("daily_pipeline._safe_task",
+                   side_effect=lambda name, f, *a, **kw: f(*a, **kw)):
+            daily_pipeline._run_registry_task("health_check", MagicMock(), health_fast=True)
+        assert fn.call_args.kwargs.get("fast") is True
+
+    def test_weekly_health_check_fast(self, weekday_mock):
+        """weekly_backfill 末尾的 health_check 走 fast 估算。"""
+        db, loader, engine = MagicMock(), MagicMock(), MagicMock()
+        captured: dict = {}
+
+        def fake_run(task_name, *a, **kw):
+            if task_name == "health_check":
+                captured.update(kw)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.weekly_backfill(db, loader, engine)
+        assert captured.get("health_fast") is True
+
+    def test_monthly_health_check_fast(self, weekday_mock):
+        """monthly_repair 末尾的 health_check 走 fast 估算。"""
+        db, loader, engine = MagicMock(), MagicMock(), MagicMock()
+        captured: dict = {}
+
+        def fake_run(task_name, *a, **kw):
+            if task_name == "health_check":
+                captured.update(kw)
+            return {"status": "ok"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
+             patch("daily_pipeline._run_repair_script", return_value={"status": "ok"}), \
+             patch("daily_pipeline.notify_all"), \
+             patch("daily_pipeline.logger"):
+            daily_pipeline.monthly_repair(db, loader, engine)
+        assert captured.get("health_fast") is True
 
 
 class TestWeeklyBackfill:
