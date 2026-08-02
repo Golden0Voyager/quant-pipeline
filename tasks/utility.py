@@ -121,8 +121,15 @@ def retry_failed(
     return result
 
 
-def health_check(db: DatabaseInterface) -> dict:
-    """检查数据库健康状态并生成报告。"""
+def health_check(db: DatabaseInterface, fast: bool = False) -> dict:
+    """检查数据库健康状态并生成报告。
+
+    fast=True 时跳过 12 张表的逐表 COUNT(*)（千万行大表全表扫描，耗时分钟级），
+    改用 PRAGMA page_count 做库级行数估算（与 tui.get_all_table_counts 同口径：
+    page_count * page_size / 500）。page_count 是库级指标，给不出表级估算，
+    故 fast 报告省略逐表行数行；覆盖率/最新日期/字段级断言不受影响。
+    手动 --task health_check 入口默认 fast=False，保持精确口径。
+    """
     logger.info("\n" + "=" * 60)
     logger.info("🏥 任务: 数据质量健康检查")
     logger.info("=" * 60)
@@ -169,10 +176,23 @@ def health_check(db: DatabaseInterface) -> dict:
         ("shareholder_count", "股东户数"),
     ]
 
-    for table, label in tables:
-        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-        count = cursor.fetchone()[0]
-        report_lines.append(f"  {label:12s}: {count:>8,} 条")
+    if fast:
+        # 库级估算（与 tui.get_all_table_counts(fast=True) 同口径）：
+        # page_count 是库级指标，无法拆出表级行数，逐表计数行在 fast 报告中
+        # 省略而非虚构；每行约 500 bytes（含索引开销）为粗略经验值。
+        cursor.execute("PRAGMA page_count")
+        page_count = cursor.fetchone()[0]
+        cursor.execute("PRAGMA page_size")
+        page_size = cursor.fetchone()[0]
+        estimated_total = max(1, page_count * page_size // 500)
+        report_lines.append(
+            f"  全库估算行数: ~{estimated_total:,} 条 (page_count 库级估算，逐表精确计数已跳过)"
+        )
+    else:
+        for table, label in tables:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            count = cursor.fetchone()[0]
+            report_lines.append(f"  {label:12s}: {count:>8,} 条")
 
     cursor.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_bars")
     bars_coverage = cursor.fetchone()[0]
