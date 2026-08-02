@@ -548,6 +548,7 @@ def weekly_backfill(
 ) -> dict:
     """每周数据补全层：WEEKLY 任务 → 补齐缺漏（stale 驱动）→ retry → health。"""
     start_time = time.time()
+    _lower_process_priority()
     logger.info("\n🧩 每周数据补全层启动 (WEEKLY + 补齐缺漏 + retry)")
     results: dict[str, Any] = {}
 
@@ -622,6 +623,7 @@ def monthly_repair(
 ) -> dict:
     """每月数据修复层：MONTHLY/QUARTERLY 任务 → 备份→对账→vacuum → health。"""
     start_time = time.time()
+    _lower_process_priority()
     logger.info("\n🛠️ 每月数据修复层启动 (MONTHLY + QUARTERLY + 修复链)")
     results: dict[str, Any] = {}
 
