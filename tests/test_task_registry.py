@@ -383,3 +383,19 @@ def test_panel_labels_have_date_columns():
     cols = panel_date_columns()
     for table in TABLE_LABELS:
         assert table in cols, f"面板表 {table} 缺日期列"
+
+
+def test_task_groups_cover_all_actionable_tasks():
+    """每个非 ON_DEMAND 任务必须归属且仅归属一个组（update_stock_list 的入口在工具组，豁免）。
+
+    防漂移：新增任务漏分组时 TUI 单任务下拉静默缺入口（2026-08-02 概念板块事故）。
+    """
+    grouped: dict[str, str] = {}
+    for group, tasks in TASK_GROUPS.items():
+        for task in tasks:
+            assert task not in grouped, f"{task} 同时属于 {grouped[task]} 和 {group}"
+            grouped[task] = group
+    for spec in TASK_REGISTRY:
+        if spec.cadence is Cadence.ON_DEMAND or spec.name == "update_stock_list":
+            continue
+        assert spec.name in grouped, f"{spec.name} 未归属任何组"

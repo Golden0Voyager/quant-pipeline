@@ -2137,3 +2137,31 @@ async def test_action_monthly_repair_routes_to_schedule():
     with patch.object(app, "_run_or_schedule") as mock_sched:
         await app.action_monthly_repair()
     mock_sched.assert_called_once_with("每月修复", *args_expected)
+
+
+# ===========================================================================
+# 单任务下拉成员与 TASK_GROUPS 一致性（防漂移）
+# ===========================================================================
+def test_single_task_dropdown_membership_matches_task_groups():
+    """下拉任务集合必须等于 registry TASK_GROUPS 成员集合（标签可不同，成员不可漂移）。"""
+    from core.task_registry import TASK_GROUPS
+    from tui import SingleTaskWidget
+    dropdown = {
+        task
+        for _, tasks in SingleTaskWidget._SINGLE_TASK_GROUPS
+        for _, task in tasks
+    }
+    members = {t for tasks in TASK_GROUPS.values() for t in tasks}
+    assert dropdown == members
+
+
+def test_single_task_dropdown_contains_concept_board():
+    """概念板块必须有单任务入口（2026-08-02 用户报告：无法强制更新）。"""
+    from tui import SingleTaskWidget
+    all_tasks = [
+        task
+        for _, tasks in SingleTaskWidget._SINGLE_TASK_GROUPS
+        for _, task in tasks
+    ]
+    assert "update_concept_board" in all_tasks
+    assert "update_concept_member" in all_tasks
