@@ -9,11 +9,16 @@ from interface import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
-# 全球核心资产预设列表 (含纳斯达克主要成分股、芯片半导体与加密货币)
+# 全球核心资产预设列表 (含科技巨头、半导体、医药与加密货币)
 GLOBAL_ASSETS = [
-    "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", 
-    "AMZN", "META", "NFLX", "AMD", "BTC-USD",
-    "INTC", "QCOM", "AVGO", "TSM", "ASML", "SPCX"
+    # 科技与创新
+    "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META", "NFLX", "AMD", "SPCX",
+    # 芯片半导体
+    "INTC", "QCOM", "AVGO", "TSM", "ASML",
+    # 医药与创新药
+    "LLY", "NVO", "JNJ", "MRK", "ABBV", "PFE", "AMGN", "VRTX", "REGN",
+    # 加密货币
+    "BTC-USD"
 ]
 
 def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
