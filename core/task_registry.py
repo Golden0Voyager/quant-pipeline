@@ -230,6 +230,7 @@ TABLE_LABELS: dict[str, str] = {
     "money_market": "Money Market",
     "macro_monthly": "Macro Monthly",
     "macro_quarterly": "Macro Quarterly",
+    "global_assets_bars": "Global Assets",
     # 总览
     "stock_list": "Stock List",
 }
@@ -293,6 +294,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "money_market": "货币市场",
     "macro_monthly": "宏观(月)",
     "macro_quarterly": "宏观(季)",
+    "global_assets_bars": "全球资产",
     # 总览
     "stock_list": "股票列表",
 }
@@ -301,6 +303,7 @@ TABLE_LABELS_CN: dict[str, str] = {
 TASK_GROUPS: dict[str, list[str]] = {
     "core": [
         "update_bars",
+        "update_global_assets",
         "update_indicators",
         "update_fundamentals",
         "update_chip_distribution",
