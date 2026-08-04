@@ -348,21 +348,23 @@ CopyPanelScreen {
 
 #copy-list ListView > ListItem {
     width: 100%;
-    height: auto;
-    min-height: 1;
+    height: 3;
     padding: 0 1;
-    margin: 0 0 1 0;
-    border: none;
+    margin: 0;
+    border: round transparent;
     background: transparent;
     color: $text;
     text-align: left;
 }
 
-#copy-list ListView > ListItem:hover {
+#copy-list ListView > ListItem:hover,
+#copy-list ListView > ListItem.--highlight {
+    border: round $blue-hover;
     background: $blue-hover 25%;
 }
 
 #copy-list ListView > ListItem:focus {
+    border: round $blue-focus;
     background: $blue-focus 35%;
     text-style: bold;
 }
