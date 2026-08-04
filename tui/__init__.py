@@ -1,10 +1,15 @@
-"""SmartMoney Pipeline Textual TUI package."""
+import datetime
+import subprocess
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
+from core.calendar import get_expected_latest_trading_day
 from core.freshness import (
     DELAYED_PUBLISH_TABLES,
     MONTHLY_TABLES,
     QUARTERLY_TABLES,
     WEEKLY_TABLES,
+    compute_catch_up_tasks,
     get_daily_bars_coverage,
     get_latest_dates,
     status_for_table,
@@ -85,6 +90,8 @@ from tui.widgets import (
     _build_single_task_groups,
 )
 
+seconds_until_safe = _seconds_until_safe
+
 __all__ = [
     "ConfirmRefreshTodayScreen",
     "ConfirmRunScreen",
@@ -104,6 +111,7 @@ __all__ = [
     "NO_DATE_TABLES",
     "PIPELINE_PID_PATH",
     "PROGRESS_JSON_PATH",
+    "Path",
     "PipelineApp",
     "ProgressWidget",
     "QUARTERLY_TABLES",
@@ -118,6 +126,7 @@ __all__ = [
     "WATCHLIST_DIR",
     "WEEKLY_TABLES",
     "WatchlistSyncResult",
+    "ZoneInfo",
     "_CATCH_UP_TASK_ORDER",
     "_HEALTHY_STATUSES",
     "_SHANGHAI_TZ",
@@ -131,6 +140,8 @@ __all__ = [
     "_seconds_until_safe",
     "_vis_width",
     "classify_refresh_task_state",
+    "compute_catch_up_tasks",
+    "datetime",
     "find_latest_log_file",
     "find_running_pipeline_processes",
     "format_chinese_magnitude",
@@ -141,6 +152,7 @@ __all__ = [
     "get_daily_bars_coverage",
     "get_daemon_status",
     "get_db_size",
+    "get_expected_latest_trading_day",
     "get_latest_dates",
     "get_latest_refresh_run_id",
     "get_latest_refresh_task_states",
@@ -153,7 +165,9 @@ __all__ = [
     "parse_progress",
     "refreshable_trading_tasks",
     "save_theme",
+    "seconds_until_safe",
     "status_for_table",
+    "subprocess",
     "sync_watchlists_from_files",
     "task_to_table",
 ]
