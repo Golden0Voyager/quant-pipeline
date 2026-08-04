@@ -62,14 +62,25 @@ def find_running_pipeline_processes(
     Args:
         skip_ppid_check: 为 True 时不过滤 TUI 子进程（用于 X 键停止场景）。
     """
+    import sys
+
+    tui_mod = sys.modules.get("tui")
+    path_cls = getattr(tui_mod, "Path", Path) if tui_mod else Path
+    subproc = getattr(tui_mod, "subprocess", subprocess) if tui_mod else subprocess
+    pid_path_val = (
+        getattr(tui_mod, "PIPELINE_PID_PATH", PIPELINE_PID_PATH)
+        if tui_mod
+        else PIPELINE_PID_PATH
+    )
+
     processes: list[dict[str, str | int]] = []
     # 1. 检查 pidfile
-    pidfile = Path(PIPELINE_PID_PATH)
+    pidfile = path_cls(pid_path_val)
     if pidfile.exists():
         try:
             pid = int(pidfile.read_text().strip())
             os.kill(pid, 0)
-            res = subprocess.run(
+            res = subproc.run(
                 ["ps", "-p", str(pid), "-o", "pid=,etime=,command="],
                 capture_output=True,
                 text=True,
@@ -87,7 +98,7 @@ def find_running_pipeline_processes(
 
     # 2. 扫描所有 daily_pipeline.py 进程（兜底，覆盖 pidfile 之前的旧进程）
     try:
-        res = subprocess.run(
+        res = subproc.run(
             ["pgrep", "-f", "daily_pipeline\\.py"],
             capture_output=True,
             text=True,
