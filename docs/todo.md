@@ -267,3 +267,34 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | ⚪ P3 | 乐咕 | 基金仓位 | 低更新频率 |
 | ⚪ P3 | 东财/同花顺 | 期权数据 | 市场较小 |
 ```
+
+---
+
+## 6. update_financial_history 报告期处理无重试（2026-08-04 观察）
+
+### 现象
+
+`update_financial_history`（按报告期更新财务历史）6 个报告期全部失败：
+
+| 报告期 | 失败原因 | 耗时 |
+|--------|----------|------|
+| 20260630 | akshare 瞬时异常（裸字符串 `'20260630'`） | 6s |
+| 20251231 | `Response ended prematurely`（HTTP 流截断） | 97s |
+| 20250930 | `Response ended prematurely` | 159s |
+| 20250630 | `Response ended prematurely` | 48s |
+| 20250331 | `Response ended prematurely` | 104s |
+| 20241231 | akshare 瞬时异常 | 153s |
+
+任务整体 `[failed]` 耗时 566.9s，下游 `update_quarterly_financials` 等季度/月度任务被跳过。
+
+### 根因
+
+- **非代码 bug**：手动复现 `ak.stock_yjbb_em(date=...)` 两个失败报告期均正常返回（249 / 11644 行）——上游东财接口瞬时限流/断流
+- **结构性弱点**：`tasks/financial_history.py:276-278` 每个报告期**单次尝试**，异常即 `continue` 放弃，无重试机制（对比 `update_bars` 有 3 次重试）
+- 单报告期连续拉 4 个全量接口（yjbb/lrb/zcfz/xjll + 披露日期表，各 1-2 分钟），上游任一断流即失败
+
+### 建议方案
+
+1. 报告期处理加 1-2 次指数退避重试（对齐 `update_bars` 的重试标准）
+2. 区分「接口失败」与「空数据」日志级别，空数据不应计入失败
+3. 失败报告期持久化到待重试列表，跨运行保留（类似 `failed_symbols` 队列），避免下次运行重新发现时重复拉全部
