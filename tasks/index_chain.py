@@ -290,6 +290,8 @@ def update_chip_distribution_em(
             "total": 0,
             "processed": 0,
             "aborted": False,
+            "status": "no_data",
+            "reason": "no eligible symbols",
         }
 
     success_count = 0
@@ -307,6 +309,7 @@ def update_chip_distribution_em(
             "processed": processed,
             "aborted": True,
             "abort_reason": "consecutive_failures",
+            "status": "aborted",
         }
 
     for i, symbol in enumerate(symbols, 1):
@@ -425,6 +428,15 @@ def update_chip_distribution_em(
         "total": total,
         "processed": total,
         "aborted": False,
+        # 结果契约：归一化器只认 status/saved/failed/skipped 键，
+        # 不认 success——显式声明，避免成功运行被误报为 failed
+        # （2026-08-03：5 只北交所全部成功却报 zero rows）
+        "saved": success_count,
+        "status": (
+            "success"
+            if success_count
+            else ("degraded" if failed_count else "no_data")
+        ),
     }
 
 
