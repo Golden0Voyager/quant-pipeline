@@ -9,9 +9,10 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal, NamedTuple, TextIO
+from typing import Literal, NamedTuple, TextIO, cast
 from zoneinfo import ZoneInfo
 
 from rich.markup import escape
@@ -549,23 +550,14 @@ class HelpScreen(ModalScreen[None]):
         with Vertical(id="help-dialog"):
             yield Label("[bold]快捷键帮助[/bold]")
             yield Label("")
-            yield Label("[bold]S[/bold] — 每日更新")
-            yield Label("[bold]R[/bold] — 断点续传")
-            yield Label("[bold]U[/bold] — 收盘刷新")
-            yield Label("[bold]X[/bold] — 停止任务")
-            yield Label("[bold]D[/bold] — 启动守护进程")
-            yield Label("[bold]H[/bold] — 健康检查")
+            # 从 PipelineApp.BINDINGS 动态生成，避免手动维护漂移
+            for binding in PipelineApp.BINDINGS:
+                if binding.key in ("ctrl+c", "q"):
+                    continue
+                show_marker = "" if binding.show else " [dim](隐藏)[/dim]"
+                yield Label(f"[bold]{binding.key.upper()}[/bold] — {binding.description}{show_marker}")
             yield Label("")
-            yield Label("[dim]更多快捷键[/dim]")
-            yield Label("[bold]Z[/bold] — 停止守护进程")
-            yield Label("[bold]F[/bold] — 数据修复")
-            yield Label("[bold]C[/bold] — 复制面板内容")
-            yield Label("[bold]L[/bold] — 清理日志")
-            yield Label("[bold]W[/bold] — 每周补全")
-            yield Label("[bold]M[/bold] — 每月修复")
-            yield Label("[bold]T[/bold] — 切换主题")
-            yield Label("[bold]F5[/bold] — 刷新数据")
-            yield Label("[bold]Ctrl+C / Q[/bold] — 退出")
+            yield Label("[bold]Ctrl+C / Q[/bold] — Quit")
             yield Label("")
             yield Label("[dim]按 Esc 或 Q 关闭[/dim]")
 
@@ -625,8 +617,8 @@ class LogCleanupScreen(ModalScreen[str]):
 
 
 def _seconds_until_safe() -> int:
-    """计算到下一个安全运行时间（16:00）的秒数。"""
-    now = datetime.now()
+    """计算到下一个安全运行时间（上海时间 16:00）的秒数。"""
+    now = datetime.now(_SHANGHAI_TZ)
     target = now.replace(hour=16, minute=0, second=0, microsecond=0)
     seconds = (target - now).total_seconds()
     if seconds <= 0:
@@ -848,24 +840,8 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
     try:
         conn = sqlite3.connect(db_path, timeout=5.0)
         cur = conn.cursor()
-        tables = [
-            "daily_bars", "indicators", "fundamentals",
-            "fund_flow", "margin_trading", "dragon_tiger",
-            "block_trade", "sector_fund_flow", "shareholder_count",
-            "quarterly_financials", "historical_valuation",
-            "sector_industry", "stock_list",
-            "institutional_holdings",
-            "north_hold", "index_daily", "limit_up_down", "dividend_summary",
-            "gold_price", "crude_oil", "fx_rate", "global_index", "us_treasury",
-            "chip_distribution", "chip_distribution_em",
-            "futures_daily",
-            "south_flow", "ah_premium", "etf_daily",
-            "cb_quotation", "cb_redeem", "cb_index",
-            "restricted_share", "earnings_forecast",
-            "stock_repurchase", "institution_survey", "stock_pledge", "option_sentiment",
-            "sector_daily", "sector_valuation", "index_futures_basis",
-            "macro_monthly", "macro_quarterly",
-        ]
+        # 表名列表由 TABLE_LABELS 单一来源派生，防止与面板显示漂移
+        tables = list(TABLE_LABELS.keys())
         result = {}
         if fast:
             # 快速估算：用 page_count * page_size 推算行数（SQLite 内部统计）
@@ -883,7 +859,8 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
         else:
             for tbl in tables:
                 try:
-                    cur.execute(f"SELECT COUNT(*) FROM {tbl}")
+                    # 方括号包裹防止保留字冲突（表名来自内部常量 TABLE_LABELS）
+                    cur.execute(f"SELECT COUNT(*) FROM [{tbl}]")
                     result[tbl] = cur.fetchone()[0]
                 except Exception:
                     result[tbl] = 0
@@ -923,8 +900,15 @@ def format_count(n: int) -> str:
 
 
 def _vis_width(text: str) -> int:
-    """计算字符串在终端中的可见宽度（CJK=2, ASCII=1）。"""
-    return sum(2 if "\u4e00" <= ch <= "\u9fff" else 1 for ch in text)
+    """计算字符串在终端中的可见宽度（全宽=2, 半宽=1）。
+
+    使用 unicodedata.east_asian_width() 覆盖全角标点、CJK 扩展区等字符，
+    而非仅硬编码 U+4E00-U+9FFF。
+    """
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
+        for ch in text
+    )
 
 
 def _ljust_vis(text: str, width: int) -> str:
@@ -1078,7 +1062,7 @@ class DashboardWidget(Static):
         self._last_stocks_update: float = 0.0
         self._stocks_cache_ttl: float = 60.0
         await self.update_status()
-        self.set_interval(2.0, self.update_status)
+        self.set_interval(10.0, self.update_status)
 
     async def update_status(self) -> None:
         db_size = get_db_size(str(DEFAULT_DB_PATH))
@@ -1265,18 +1249,14 @@ class SingleTaskWidget(Static):
         if value == "__refresh_today__":
             # 收盘刷新是独立 CLI 模式（--refresh-today 与 --task 互斥），
             # 走专属确认流程而非 _run_or_schedule 延迟调度
-            from typing import cast
             await cast(PipelineApp, self.app).action_refresh_today()
         elif value == "__weekly_backfill__":
             # 每周补全层哨兵项：路由到专属 action（不带 --force）
-            from typing import cast
             await cast(PipelineApp, self.app).action_weekly_backfill()
         elif value == "__monthly_repair__":
             # 每月修复层哨兵项：路由到专属 action（不带 --force）
-            from typing import cast
             await cast(PipelineApp, self.app).action_monthly_repair()
         elif isinstance(value, str) and value and not value.startswith("__sep__"):
-            from typing import cast
             await cast(PipelineApp, self.app).action_run_single_task(value)
         # 无论选中真实任务还是分组分隔符，都重置回提示状态
         # （会触发新的 Select.Changed 但被上面过滤掉）
@@ -1313,8 +1293,6 @@ class TaskGroupWidget(Static):
         if button_id is None:
             return
         group_key = button_id.replace("group-", "")
-        from typing import cast
-
         app = cast(PipelineApp, self.app)
         if group_key == "catchup":
             await app.action_run_catch_up()
@@ -1548,10 +1526,20 @@ class ProgressWidget(Static):
     def on_mount(self) -> None:
         self.border_title = "Progress"
         self.update_progress()
-        self.set_interval(2.0, self.update_progress)
+        self.set_interval(2.0, self._update_progress_async)
+
+    async def _update_progress_async(self) -> None:
+        """异步读取 progress.json 并更新显示，避免阻塞事件循环。"""
+        progress = await asyncio.to_thread(parse_progress, str(PROGRESS_JSON_PATH))
+        self._render_progress(progress)
 
     def update_progress(self) -> None:
+        """同步入口（供挂载时初次调用和测试使用）。"""
         progress = parse_progress(str(PROGRESS_JSON_PATH))
+        self._render_progress(progress)
+
+    def _render_progress(self, progress: dict | None) -> None:
+        """根据 progress 字典渲染进度面板。"""
         if not progress:
             self.update(" [dim]当前无运行中的任务[/dim]")
             self.remove_class("active-task")
@@ -1653,8 +1641,14 @@ class LogsWidget(RichLog):
                 return
 
             if latest != self.active_log:
+                # 先读完旧文件剩余内容，防止日志轮转时丢失最后一批输出
                 if self.file_handle:
-                    self.file_handle.close()
+                    try:
+                        remaining = self.file_handle.readlines()
+                        for line in remaining:
+                            self.write(self.colorize_line(line))
+                    finally:
+                        self.file_handle.close()
                 fh = open(latest, encoding="utf-8", errors="ignore")  # noqa: SIM115
                 # Seek to end on open
                 fh.seek(0, os.SEEK_END)
@@ -2248,16 +2242,14 @@ class PipelineApp(App):
         )
 
     async def action_run_reconcile(self) -> None:
-        """全量清洗：对比 AkShare 并修复差异。"""
-        if self._current_process is not None:
-            self.notify("已有任务在运行，请等待完成", severity="warning", timeout=3.0)
-            return
+        """全量清洗：对比 AkShare 并修复差异。
+
+        统一走 _run_or_schedule 执行槽保护，与其他 action 一致。
+        """
         reconcile_path = str(Path(__file__).parent / "scripts" / "reconcile_with_akshare.py")
-        self.notify("全量数据清洗启动（对比 AkShare 并修复差异）", timeout=5.0)
-        self._create_background_task(
-            self._run_in_background(
-                sys.executable, reconcile_path, "--workers", "3"
-            )
+        self._run_or_schedule(
+            "全量数据清洗",
+            sys.executable, reconcile_path, "--workers", "3",
         )
 
     async def action_run_single_task(self, task: str) -> None:
