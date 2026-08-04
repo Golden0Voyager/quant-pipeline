@@ -166,3 +166,46 @@ def test_get_latest_dates_covers_legacy_panel_tables(tmp_path):
     conn.close()
     result = get_latest_dates(str(db_file))
     assert result["institutional_holdings"] == "2026-06-30"
+
+
+def test_freshness_cache_and_invalidation(tmp_path):
+    import time
+
+    from core.freshness import (
+        clear_freshness_cache,
+        get_daily_bars_coverage,
+        get_latest_dates,
+    )
+
+    clear_freshness_cache()
+    db_file = tmp_path / "cache_test.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+    conn.execute("INSERT INTO daily_bars VALUES ('000001.SZ', '2026-07-09')")
+    conn.commit()
+    conn.close()
+
+    # First call - cache miss & population
+    res1 = get_latest_dates(str(db_file))
+    assert res1.get("daily_bars") == "2026-07-09"
+
+    cov1 = get_daily_bars_coverage(str(db_file), "2026-07-10")
+    assert cov1 == (1, 1)
+
+    # Cached hit check
+    assert get_latest_dates(str(db_file)).get("daily_bars") == "2026-07-09"
+
+    # Modify DB directly (changing mtime)
+    time.sleep(0.01)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("INSERT INTO daily_bars VALUES ('600000.SH', '2026-07-10')")
+    conn.commit()
+    conn.close()
+
+    # Second call - mtime changed -> auto cache invalidation & updated result
+    res2 = get_latest_dates(str(db_file))
+    assert res2.get("daily_bars") == "2026-07-10"
+
+    cov2 = get_daily_bars_coverage(str(db_file), "2026-07-10")
+    assert cov2 == (2, 2)
+
