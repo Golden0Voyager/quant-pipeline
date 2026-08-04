@@ -25,9 +25,15 @@ class ConfirmRefreshTodayScreen(ModalScreen[str | None]):
     def __init__(self) -> None:
         super().__init__()
         # 与 CLI 共用同一计算：上海时区 aware now + get_expected_latest_trading_day
-        self._target_date = get_expected_latest_trading_day(
-            now=datetime.now(_SHANGHAI_TZ)
+        import sys
+
+        tui_mod = sys.modules.get("tui")
+        exp_fn = (
+            getattr(tui_mod, "get_expected_latest_trading_day", get_expected_latest_trading_day)
+            if tui_mod
+            else get_expected_latest_trading_day
         )
+        self._target_date = exp_fn(now=datetime.now(_SHANGHAI_TZ))
         self._task_count = len(refreshable_trading_tasks())
 
     def compose(self) -> ComposeResult:
