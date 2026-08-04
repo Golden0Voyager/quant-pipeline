@@ -41,7 +41,15 @@ def _code_to_ts_code(code: str) -> str | None:
 
 def sync_watchlists_from_files(db_path: str) -> WatchlistSyncResult:
     """从文本文件同步自选股到数据库，支持新增/恢复/停用。"""
-    watch_dir = Path(WATCHLIST_DIR)
+    import sys
+
+    tui_mod = sys.modules.get("tui")
+    watch_dir_val = (
+        getattr(tui_mod, "WATCHLIST_DIR", WATCHLIST_DIR)
+        if tui_mod
+        else WATCHLIST_DIR
+    )
+    watch_dir = Path(watch_dir_val)
     if not watch_dir.is_dir():
         error = f"自选股目录不存在: {watch_dir}"
         logger.warning(error)
