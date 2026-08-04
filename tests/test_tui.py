@@ -24,6 +24,8 @@ from tui import (
     save_theme,
 )
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class TestActionRunCatchUp:
     def _sh(self, y, m, d, hh, mm=0):
@@ -494,8 +496,8 @@ async def test_run_in_background_exception():
 @pytest.mark.asyncio
 async def test_action_handlers_use_run_in_background():
     app = PipelineApp()
-    expected_pipeline_path = str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py")
-    expected_daemon_path = str(Path(sys.modules["tui"].__file__).parent / "scripts" / "daemon.py")
+    expected_pipeline_path = str(_PROJECT_ROOT / "daily_pipeline.py")
+    expected_daemon_path = str(_PROJECT_ROOT / "scripts" / "daemon.py")
 
     with patch.object(app, "_run_in_background", new_callable=MagicMock) as mock_run_bg, \
          patch.object(app, "_run_and_report", new_callable=MagicMock) as mock_run_report, \
@@ -1548,7 +1550,7 @@ async def test_action_refresh_today_accept_launches_exact_command():
 
     app = PipelineApp()
     expected_pipeline_path = str(
-        Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"
+        _PROJECT_ROOT / "daily_pipeline.py"
     )
     with patch.object(app, "_run_refresh_today") as mock_refresh, \
          patch("asyncio.create_task", side_effect=_close_coro) as mock_create_task, \
@@ -1570,7 +1572,7 @@ async def test_action_refresh_today_accept_with_symbols_scope():
     """输入股票范围时追加 --symbols，且仅追加这一个参数对。"""
     app = PipelineApp()
     expected_pipeline_path = str(
-        Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"
+        _PROJECT_ROOT / "daily_pipeline.py"
     )
     with patch.object(app, "_run_refresh_today") as mock_refresh, \
          patch("asyncio.create_task", side_effect=_close_coro), \
@@ -2122,7 +2124,7 @@ async def test_run_or_schedule_run_later_dedupes_same_action():
 async def test_action_weekly_backfill_routes_to_schedule():
     app = PipelineApp()
     args_expected = (sys.executable,
-                     str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"),
+                     str(_PROJECT_ROOT / "daily_pipeline.py"),
                      "--task", "weekly_backfill")
     with patch.object(app, "_run_or_schedule") as mock_sched:
         await app.action_weekly_backfill()
@@ -2133,7 +2135,7 @@ async def test_action_weekly_backfill_routes_to_schedule():
 async def test_action_monthly_repair_routes_to_schedule():
     app = PipelineApp()
     args_expected = (sys.executable,
-                     str(Path(sys.modules["tui"].__file__).parent / "daily_pipeline.py"),
+                     str(_PROJECT_ROOT / "daily_pipeline.py"),
                      "--task", "monthly_repair")
     with patch.object(app, "_run_or_schedule") as mock_sched:
         await app.action_monthly_repair()
