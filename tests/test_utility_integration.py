@@ -311,7 +311,7 @@ class TestRetryFailed:
         db = MagicMock()
         loader = MagicMock()
 
-        def fake_update(db_, loader_, symbol):
+        def fake_update(db_, loader_, symbol, suspended_symbols=None):
             return "success" if symbol in ("000001", "000003") else "error"
 
         with patch(
