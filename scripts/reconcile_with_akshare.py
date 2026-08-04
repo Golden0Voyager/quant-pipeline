@@ -37,9 +37,10 @@ import csv
 import json
 import logging
 import os
+import queue
 import random
-import socket
 import sqlite3
+import threading
 import sys
 import time
 from datetime import datetime
@@ -116,8 +117,31 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# AkShare 数据获取（带 socket 超时保护 + 新浪 fallback）
+# AkShare 数据获取（带 daemon 线程超时兜底 + 新浪 fallback）
 # ---------------------------------------------------------------------------
+def _call_with_timeout(timeout: float, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """在 daemon 线程中执行 fn；超时抛 TimeoutError，不等待挂起的请求线程。"""
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _runner() -> None:
+        try:
+            result_queue.put(("ok", fn(*args, **kwargs)))
+        except BaseException as exc:
+            result_queue.put(("err", exc))
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    try:
+        status, payload = result_queue.get(timeout=timeout)
+    except queue.Empty:
+        raise TimeoutError(
+            f"{getattr(fn, '__name__', str(fn))} 超时（>{timeout:.0f}s），疑似连接挂起"
+        ) from None
+    if status == "err":
+        raise payload
+    return payload
+
+
 def _sina_symbol(code: str) -> str:
     """将纯数字代码转换为新浪接口所需的 sh/sz/bj 前缀格式。"""
     if code.startswith(("6", "9")):
@@ -162,11 +186,11 @@ def _probe_data_source() -> bool:
         return False
 
     logger.info("🔍 探测 AkShare 数据源可用性...")
-    original_timeout = socket.getdefaulttimeout()
     try:
-        socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
         with no_proxy():
-            df = ak.stock_zh_a_hist(
+            df = _call_with_timeout(
+                AKSHARE_SOCKET_TIMEOUT,
+                ak.stock_zh_a_hist,
                 symbol="000001",
                 start_date="20250101",
                 end_date="20250110",
@@ -178,8 +202,6 @@ def _probe_data_source() -> bool:
             return True
     except Exception as e:
         logger.warning(f"⚠️ 东财探测失败: {e}")
-    finally:
-        socket.setdefaulttimeout(original_timeout)
 
     logger.info("🇨🇳 东财不可用，本次运行全程使用新浪备用接口")
     _eastmoney_available = False
@@ -224,7 +246,6 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
         return pd.DataFrame()
 
     code = symbol.split(".")[0]
-    original_timeout = socket.getdefaulttimeout()
     is_beijing = code.startswith(("4", "8", "920"))
 
     # --- 如果东财可用，尝试东财 (stock_zh_a_hist) ---
@@ -232,9 +253,10 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
         df = pd.DataFrame()
         for attempt in range(3):
             try:
-                socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
                 with no_proxy():
-                    df = ak.stock_zh_a_hist(
+                    df = _call_with_timeout(
+                        AKSHARE_SOCKET_TIMEOUT,
+                        ak.stock_zh_a_hist,
                         symbol=code,
                         period="daily",
                         start_date=start_date.replace("-", ""),
@@ -243,7 +265,6 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
                     )
                 break
             except Exception as e:
-                socket.setdefaulttimeout(original_timeout)
                 if attempt < 2:
                     delay = 3.0 * (2**attempt)
                     logger.warning(
@@ -253,8 +274,6 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
                 else:
                     logger.warning(f"  {symbol} 东财连续 3 次失败，切新浪并永久禁用东财")
                     _eastmoney_available = False
-            finally:
-                socket.setdefaulttimeout(original_timeout)
 
         if not df.empty:
             return _normalize_eastmoney_df(df)
@@ -262,9 +281,10 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     # --- 北交所：新浪不支持，东财被禁用时也单独尝试一次东财 ---
     if is_beijing:
         try:
-            socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
             with no_proxy():
-                df = ak.stock_zh_a_hist(
+                df = _call_with_timeout(
+                    AKSHARE_SOCKET_TIMEOUT,
+                    ak.stock_zh_a_hist,
                     symbol=code,
                     period="daily",
                     start_date=start_date.replace("-", ""),
@@ -274,8 +294,6 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
         except Exception as e:
             logger.warning(f"  {symbol} 北交所东财获取失败（新浪不支持北交所）: {e}")
             return pd.DataFrame()
-        finally:
-            socket.setdefaulttimeout(original_timeout)
         if df.empty:
             logger.warning(f"  {symbol} 北交所东财无数据")
             return pd.DataFrame()
@@ -284,10 +302,11 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     # --- 东财不可用或已失败：直走新浪 (stock_zh_a_daily) ---
     logger.info(f"  {symbol} 使用新浪接口...")
     try:
-        socket.setdefaulttimeout(AKSHARE_SOCKET_TIMEOUT)
         with no_proxy():
             sina_sym = _sina_symbol(code)
-            df = ak.stock_zh_a_daily(
+            df = _call_with_timeout(
+                AKSHARE_SOCKET_TIMEOUT,
+                ak.stock_zh_a_daily,
                 symbol=sina_sym,
                 start_date=start_date.replace("-", ""),
                 end_date=end_date.replace("-", ""),
@@ -296,8 +315,6 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     except Exception as e:
         logger.error(f"  {symbol} 新浪接口失败: {e}")
         return pd.DataFrame()
-    finally:
-        socket.setdefaulttimeout(original_timeout)
 
     if df.empty:
         logger.warning(f"  {symbol} 新浪接口无数据")
