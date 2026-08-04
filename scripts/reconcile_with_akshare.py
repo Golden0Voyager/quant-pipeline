@@ -40,8 +40,8 @@ import os
 import queue
 import random
 import sqlite3
-import threading
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
