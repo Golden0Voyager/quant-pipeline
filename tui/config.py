@@ -26,11 +26,21 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_THEME = "textual-dark"
 
 
+def _get_config_path() -> Path:
+    import sys
+
+    tui_mod = sys.modules.get("tui")
+    if tui_mod and hasattr(tui_mod, "TUI_CONFIG_PATH"):
+        return Path(tui_mod.TUI_CONFIG_PATH)
+    return TUI_CONFIG_PATH
+
+
 def load_theme() -> str:
     """从配置文件加载保存的主题，失败时回退到默认主题。"""
     try:
-        if TUI_CONFIG_PATH.exists():
-            data = json.loads(TUI_CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg_path = _get_config_path()
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
             theme = data.get("theme", DEFAULT_THEME)
             from textual.theme import BUILTIN_THEMES
 
@@ -44,14 +54,16 @@ def load_theme() -> str:
 def save_theme(theme_name: str) -> None:
     """持久化保存主题名称。"""
     try:
-        TUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path = _get_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, str] = {}
-        if TUI_CONFIG_PATH.exists():
+        if cfg_path.exists():
             try:
-                data = json.loads(TUI_CONFIG_PATH.read_text(encoding="utf-8"))
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
             except Exception:
                 data = {}
         data["theme"] = theme_name
-        TUI_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
+
