@@ -9,7 +9,7 @@ from interface import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
-# 全球核心资产预设列表 (含科技巨头、半导体、医药与加密货币)
+# 全球核心资产预设列表 (含科技巨头、半导体、医药、消费与加密货币)
 GLOBAL_ASSETS = [
     # 科技与创新
     "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META", "NFLX", "AMD", "SPCX",
@@ -17,6 +17,8 @@ GLOBAL_ASSETS = [
     "INTC", "QCOM", "AVGO", "TSM", "ASML",
     # 医药与创新药
     "LLY", "NVO", "JNJ", "MRK", "ABBV", "PFE", "AMGN", "VRTX", "REGN",
+    # 日常消费与零售
+    "WMT", "PG", "KO", "PEP", "COST", "MCD", "SBUX", "NKE", "HD",
     # 加密货币
     "BTC-USD"
 ]
