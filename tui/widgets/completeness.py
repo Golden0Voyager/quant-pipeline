@@ -179,7 +179,6 @@ class DataCompletenessWidget(VerticalScroll):
             self._content.update("\n".join(lines))
             return
 
-        daily_bars = counts.get("daily_bars", 0) or 1
         exp_fn = getattr(
             tui, "get_expected_latest_trading_day", get_expected_latest_trading_day
         )
@@ -240,16 +239,7 @@ class DataCompletenessWidget(VerticalScroll):
             label_cn = self.TABLE_LABELS_CN.get(tbl, label)
             padded_label = _ljust_vis(label_cn, max_label_w)
 
-            if tbl in ("daily_bars", "indicators"):
-                if tbl == "daily_bars":
-                    pct = (daily_up_to_date / daily_total * 100) if daily_total else 0
-                else:
-                    pct = n / daily_bars * 100 if daily_bars else 0
-                bar, pct_int = self._mini_bar(pct)
-                lines.append(
-                    f" [dim]{padded_label}[/dim]  {status_str} [cyan]{rjust_count}[/cyan]  {date_str}  {bar} [dim]{pct_int}%[/dim]"
-                )
-            elif tbl in NO_DATE_TABLES:
+            if tbl in NO_DATE_TABLES:
                 lines.append(
                     f" [dim]{padded_label}[/dim]  [cyan]{rjust_count}[/cyan]  [dim]无日期列[/dim]"
                 )
@@ -259,11 +249,3 @@ class DataCompletenessWidget(VerticalScroll):
                 )
 
         self._content.update("\n".join(lines))
-
-    @staticmethod
-    def _mini_bar(pct: float) -> tuple[str, int]:
-        length = 10
-        pct_int = max(0, min(100, int(round(pct))))
-        filled = max(0, min(length, round(length * pct_int / 100)))
-        bar = "█" * filled + "░" * (length - filled)
-        return f"[bold #22c55e]{bar}[/bold #22c55e]", pct_int
