@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from core.task_registry import (
@@ -26,6 +27,17 @@ _HEALTHY_STATUSES: tuple[str, ...] = (
     "按季更新",
 )
 
+_DB_QUERIES_CACHE_LOCK = threading.Lock()
+_COUNTS_CACHE: dict[str, tuple[float, int, bool, dict[str, int]]] = {}
+_ACTIVE_STOCK_CACHE: dict[str, tuple[float, int, int]] = {}
+
+
+def clear_db_queries_cache() -> None:
+    """清空数据库查询缓存。"""
+    with _DB_QUERIES_CACHE_LOCK:
+        _COUNTS_CACHE.clear()
+        _ACTIVE_STOCK_CACHE.clear()
+
 
 def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
     """Query row counts for all key tables.
@@ -36,9 +48,22 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
     p = Path(db_path)
     if not p.exists():
         return {}
+    try:
+        stat = p.stat()
+        mtime, size = stat.st_mtime, stat.st_size
+    except OSError:
+        return {}
+
+    abs_key = str(p.resolve())
+    with _DB_QUERIES_CACHE_LOCK:
+        cached = _COUNTS_CACHE.get(abs_key)
+        if cached and cached[0] == mtime and cached[1] == size and cached[2] == fast:
+            return dict(cached[3])
+
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = sqlite3.connect(f"file:{abs_key}?mode=ro", uri=True, timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
         cur = conn.cursor()
         # 表名列表由 TABLE_LABELS 单一来源派生，防止与面板显示漂移
         tables = list(TABLE_LABELS.keys())
@@ -64,6 +89,9 @@ def get_all_table_counts(db_path: str, fast: bool = False) -> dict[str, int]:
                     result[tbl] = cur.fetchone()[0]
                 except Exception:
                     result[tbl] = 0
+
+        with _DB_QUERIES_CACHE_LOCK:
+            _COUNTS_CACHE[abs_key] = (mtime, size, fast, dict(result))
         return result
     except Exception:
         return {}
@@ -77,12 +105,27 @@ def get_active_stock_count(db_path: str) -> int:
     p = Path(db_path)
     if not p.exists():
         return 0
+    try:
+        stat = p.stat()
+        mtime, size = stat.st_mtime, stat.st_size
+    except OSError:
+        return 0
+
+    abs_key = str(p.resolve())
+    with _DB_QUERIES_CACHE_LOCK:
+        cached = _ACTIVE_STOCK_CACHE.get(abs_key)
+        if cached and cached[0] == mtime and cached[1] == size:
+            return cached[2]
+
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = sqlite3.connect(f"file:{abs_key}?mode=ro", uri=True, timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM stock_list")
         count = cursor.fetchone()[0]
+        with _DB_QUERIES_CACHE_LOCK:
+            _ACTIVE_STOCK_CACHE[abs_key] = (mtime, size, count)
         return count
     except Exception:
         return 0
