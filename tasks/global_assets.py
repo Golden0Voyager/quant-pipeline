@@ -9,8 +9,11 @@ from interface import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
-# 全球核心资产预设列表
-GLOBAL_ASSETS = ["AAPL", "NVDA", "TSLA", "BTC-USD"]
+# 全球核心资产预设列表 (含纳斯达克主要成分股与加密货币)
+GLOBAL_ASSETS = [
+    "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", 
+    "AMZN", "META", "NFLX", "AMD", "BTC-USD"
+]
 
 def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
     """拉取预设的全球核心资产（如美股科技、BTC）历史/增量数据并存入 global_assets_bars 表。"""
