@@ -58,7 +58,11 @@ def get_db_size(db_path: str) -> str:
 
 def _seconds_until_safe() -> int:
     """计算到下一个安全运行时间（上海时间 16:00）的秒数。"""
-    now = datetime.now(_SHANGHAI_TZ)
+    import sys
+
+    tui_mod = sys.modules.get("tui")
+    dt_cls = getattr(tui_mod, "datetime", datetime) if tui_mod else datetime
+    now = dt_cls.now(_SHANGHAI_TZ)
     target = now.replace(hour=16, minute=0, second=0, microsecond=0)
     seconds = (target - now).total_seconds()
     if seconds <= 0:
@@ -66,3 +70,4 @@ def _seconds_until_safe() -> int:
         target += timedelta(days=1)
         seconds = (target - now).total_seconds()
     return int(seconds)
+
