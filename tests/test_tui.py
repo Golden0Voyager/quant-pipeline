@@ -666,7 +666,7 @@ def test_status_for_table_with_timestamp():
 
 
 def test_phase2_event_tables_are_registered_everywhere():
-    from tui import TABLE_DATE_COLUMNS, DataCompletenessWidget, get_all_table_counts
+    from tui import TABLE_DATE_COLUMNS, DataCompletenessWidget
 
     tables = {
         "stock_repurchase": "update_stock_repurchase",
@@ -674,9 +674,11 @@ def test_phase2_event_tables_are_registered_everywhere():
         "stock_pledge": "update_stock_pledge",
         "option_sentiment": "update_option_sentiment",
     }
-    count_constants = repr(get_all_table_counts.__code__.co_consts)
+    # get_all_table_counts 现在从 TABLE_LABELS.keys() 派生表名，
+    # 不再硬编码常量；改为运行时验证表名包含关系
+    from tui import TABLE_LABELS as _TABLE_LABELS
     for table, task in tables.items():
-        assert table in count_constants
+        assert table in _TABLE_LABELS, f"{table} not in TABLE_LABELS"
         assert TABLE_DATE_COLUMNS[table] == "trade_date"
         assert DataCompletenessWidget.TASK_TO_TABLE[task] == [table]
         assert table in DataCompletenessWidget.TABLE_LABELS
@@ -1066,11 +1068,10 @@ def test_get_all_table_counts_no_db():
 @pytest.mark.asyncio
 async def test_action_run_reconcile():
     app = PipelineApp()
-    with patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg, \
-         patch.object(app, "notify") as mock_notify:
+    # reconcile 现在统一走 _run_or_schedule 弹窗确认，验证 push_screen 被调用
+    with patch.object(app, "push_screen") as mock_push:
         await app.action_run_reconcile()
-        mock_bg.assert_called_once()
-        mock_notify.assert_called()
+        mock_push.assert_called_once()
 
 
 @pytest.mark.asyncio
