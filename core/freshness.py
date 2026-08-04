@@ -8,6 +8,7 @@ core.task_registry 派生视图。
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,17 @@ from core.task_registry import (
     table_date_columns,
     task_to_table,
 )
+
+_FRESHNESS_CACHE_LOCK = threading.Lock()
+_LATEST_DATES_CACHE: dict[str, tuple[float, int, dict[str, str | None]]] = {}
+_COVERAGE_CACHE: dict[str, tuple[float, int, str, tuple[int, int]]] = {}
+
+
+def clear_freshness_cache() -> None:
+    """清空新鲜度与覆盖率查询缓存。"""
+    with _FRESHNESS_CACHE_LOCK:
+        _LATEST_DATES_CACHE.clear()
+        _COVERAGE_CACHE.clear()
 
 # 按周度更新的表（数据源每周发布一次，不按交易日衡量新鲜度）
 WEEKLY_TABLES: set[str] = {
@@ -70,23 +82,42 @@ def normalize_date(value: object) -> str | None:
     return s
 
 
+
+
+
 def get_latest_dates(db_path: str) -> dict[str, str | None]:
     """查询每个表最新日期/报告期（已归一化为 YYYY-MM-DD）。"""
     p = Path(db_path)
     if not p.exists():
         return {}
+    try:
+        stat = p.stat()
+        mtime, size = stat.st_mtime, stat.st_size
+    except OSError:
+        return {}
+
+    abs_key = str(p.resolve())
+    with _FRESHNESS_CACHE_LOCK:
+        cached = _LATEST_DATES_CACHE.get(abs_key)
+        if cached and cached[0] == mtime and cached[1] == size:
+            return dict(cached[2])
+
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = sqlite3.connect(f"file:{abs_key}?mode=ro", uri=True, timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
         cur = conn.cursor()
         result: dict[str, str | None] = {}
         for tbl, col in panel_date_columns().items():
             try:
-                cur.execute(f"SELECT MAX({col}) FROM {tbl}")
+                cur.execute(f"SELECT MAX({col}) FROM [{tbl}]")
                 value = cur.fetchone()[0]
                 result[tbl] = normalize_date(value)
             except Exception:
                 result[tbl] = None
+
+        with _FRESHNESS_CACHE_LOCK:
+            _LATEST_DATES_CACHE[abs_key] = (mtime, size, dict(result))
         return result
     except Exception:
         return {}
@@ -104,9 +135,22 @@ def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]
     p = Path(db_path)
     if not p.exists():
         return 0, 0
+    try:
+        stat = p.stat()
+        mtime, size = stat.st_mtime, stat.st_size
+    except OSError:
+        return 0, 0
+
+    abs_key = str(p.resolve())
+    with _FRESHNESS_CACHE_LOCK:
+        cached = _COVERAGE_CACHE.get(abs_key)
+        if cached and cached[0] == mtime and cached[1] == size and cached[2] == expected_date:
+            return cached[3]
+
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = sqlite3.connect(f"file:{abs_key}?mode=ro", uri=True, timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
         cur = conn.cursor()
         # 容忍期望日前 2 个自然日（周末/节假日），视为已更新
         cur.execute(
@@ -119,7 +163,10 @@ def get_daily_bars_coverage(db_path: str, expected_date: str) -> tuple[int, int]
             (expected_date,),
         )
         total, up_to_date = cur.fetchone()
-        return int(up_to_date or 0), int(total or 0)
+        res = (int(up_to_date or 0), int(total or 0))
+        with _FRESHNESS_CACHE_LOCK:
+            _COVERAGE_CACHE[abs_key] = (mtime, size, expected_date, res)
+        return res
     except Exception:
         return 0, 0
     finally:
