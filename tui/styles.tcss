@@ -1,0 +1,430 @@
+/* 共享 CSS 变量：蓝/玫瑰主题色，供 PipelineApp 与各 ModalScreen 共用 */
+$blue-normal: #1d4ed8;
+$blue-hover: #3b82f6;
+$blue-focus: #60a5fa;
+
+$rose-normal: #be123c;
+$rose-hover: #e11d48;
+$rose-focus: #fb7185;
+
+/* PipelineApp 主界面布局与组件样式 */
+PipelineApp {
+    background: $background;
+}
+
+#main-grid {
+    layout: grid;
+    grid-size: 2 4;
+    grid-rows: auto auto 1fr 2fr;
+    grid-columns: 35fr 65fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#single-task {
+    border: round $blue-normal;
+    background: $surface;
+    padding: 0 2;
+    border-title-align: left;
+    border-title-color: #60a5fa;
+}
+
+#single-task:hover {
+    border: round $blue-hover;
+}
+
+#single-task Select {
+    width: 100%;
+}
+
+#single-task Select > SelectCurrent {
+    border: round #334155;
+    background: transparent;
+}
+
+#single-task Select:focus > SelectCurrent {
+    border: round #3b82f6;
+    background: transparent;
+}
+
+Select > .select-list {
+    background: $surface;
+    border: round $blue-normal;
+    max-height: 14;
+    overflow-y: auto;
+}
+
+Select > .select-list > .select-list-item:hover {
+    background: $blue-normal;
+}
+
+Select > .select-list > .select-list-item.button {
+    background: #2563eb;
+}
+
+#task-tabs {
+    border: round $blue-normal;
+    background: $surface;
+    padding: 0;
+}
+
+#task-tabs TabPane {
+    padding: 0;
+}
+
+#task-tabs:focus {
+    border: round $blue-focus;
+}
+
+#group-buttons {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1;
+    width: 100%;
+    height: auto;
+    padding: 0;
+}
+
+#group-buttons Button {
+    width: 100%;
+    height: 2;
+    min-height: 1;
+    padding: 0 1;
+    margin: 0;
+    border: none;
+    color: $text;
+    content-align: center middle;
+    text-style: none;
+}
+
+#group-buttons Button:hover {
+    background: $blue-hover;
+    text-style: bold;
+}
+
+#status-dashboard, #scraping-progress {
+    border: round $blue-normal;
+    background: $surface;
+    padding: 0 1;
+    border-title-align: left;
+    border-title-color: #60a5fa;
+    height: 1fr;
+}
+
+#data-completeness {
+    border: round $blue-normal;
+    background: $surface;
+    padding: 0 1;
+    border-title-align: left;
+    border-title-color: #60a5fa;
+    scrollbar-color: #475569 #1e293b;
+    height: 1fr;
+}
+
+#dc-content {
+    width: 100%;
+    height: auto;
+}
+
+#status-dashboard:hover, #scraping-progress:hover {
+    border: round $blue-hover;
+    border-title-color: #93c5fd;
+}
+
+#data-completeness:hover {
+    border: round $blue-hover;
+    border-title-color: #93c5fd;
+}
+
+#status-dashboard:focus, #scraping-progress:focus {
+    border: round $blue-focus;
+    border-title-color: #3b82f6;
+}
+
+#data-completeness:focus {
+    border: round $blue-focus;
+    border-title-color: #3b82f6;
+}
+
+#live-logs {
+    border: round $rose-normal;
+    background: $surface;
+    padding: 1 2;
+    border-title-align: left;
+    border-title-color: #fb7185;
+    row-span: 4;
+}
+
+#live-logs:hover {
+    border: round $rose-hover;
+    border-title-color: #fecdd3;
+}
+
+#live-logs:focus {
+    border: round $rose-focus;
+    border-title-color: #e11d48;
+}
+
+.active-task {
+    border-left: thick #f59e0b;
+    border-title-color: #fbbf24;
+}
+
+/* 弹窗按钮统一主题 */
+ModalScreen Button {
+    margin: 1 1;
+    min-width: 16;
+    border: none;
+}
+
+ModalScreen Button.-primary {
+    background: $blue-normal;
+    color: white;
+}
+
+ModalScreen Button.-primary:hover {
+    background: $blue-hover;
+}
+
+ModalScreen Button.-primary:focus {
+    background: $blue-focus;
+    text-style: bold;
+}
+
+ModalScreen Button.-error {
+    background: $rose-normal;
+    color: white;
+}
+
+ModalScreen Button.-error:hover {
+    background: $rose-hover;
+}
+
+ModalScreen Button.-error:focus {
+    background: $rose-focus;
+    text-style: bold;
+}
+
+ModalScreen Button.-default {
+    background: #334155;
+    color: white;
+}
+
+ModalScreen Button.-default:hover {
+    background: #475569;
+}
+
+ModalScreen Button.-default:focus {
+    background: #64748b;
+    text-style: bold;
+}
+
+Footer {
+    align: center middle;
+}
+
+/* ConfirmStopScreen */
+ConfirmStopScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+ConfirmStopScreen #confirm-dialog {
+    width: 70;
+    height: auto;
+    max-height: 20;
+    background: $surface;
+    border: round $error;
+    padding: 1 2;
+}
+
+ConfirmStopScreen #confirm-dialog Label {
+    width: 100%;
+}
+
+ConfirmStopScreen #confirm-buttons {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+    align: center middle;
+}
+
+/* ConfirmRunScreen */
+ConfirmRunScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+ConfirmRunScreen #confirm-dialog {
+    width: 66;
+    height: auto;
+    max-height: 14;
+    background: $surface;
+    border: round $primary;
+    padding: 1 2;
+}
+
+ConfirmRunScreen #confirm-dialog Label {
+    width: 100%;
+    text-align: center;
+}
+
+ConfirmRunScreen #confirm-buttons {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+    align: center middle;
+}
+
+/* ConfirmRefreshTodayScreen */
+ConfirmRefreshTodayScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+ConfirmRefreshTodayScreen #refresh-dialog {
+    width: 70;
+    height: auto;
+    max-height: 18;
+    background: $surface;
+    border: round $primary;
+    padding: 1 2;
+}
+
+ConfirmRefreshTodayScreen #refresh-dialog Label {
+    width: 100%;
+    text-align: center;
+}
+
+ConfirmRefreshTodayScreen #refresh-symbols {
+    width: 100%;
+    margin-top: 1;
+}
+
+ConfirmRefreshTodayScreen #refresh-buttons {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+    align: center middle;
+}
+
+/* CopyPanelScreen */
+CopyPanelScreen {
+    align: center middle;
+    background: $background 30%;
+}
+
+#copy-dialog {
+    width: 50;
+    height: auto;
+    background: $surface 95%;
+    border: round $primary;
+    padding: 1 2;
+}
+
+#copy-dialog > Label {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 0;
+    color: $text;
+    text-style: bold;
+}
+
+#copy-list {
+    width: 100%;
+    height: auto;
+    border: none;
+    background: transparent;
+    padding: 0;
+}
+
+#copy-list ListView {
+    width: 100%;
+    height: auto;
+    border: none;
+    background: transparent;
+    padding: 0;
+}
+
+#copy-list ListView > ListItem {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: none;
+    background: transparent;
+    color: $text;
+    text-align: left;
+}
+
+#copy-list ListView > ListItem:hover {
+    background: $blue-hover 25%;
+}
+
+#copy-list ListView > ListItem:focus {
+    background: $blue-focus 35%;
+    text-style: bold;
+}
+
+#copy-list ListView > ListItem > Label {
+    width: 100%;
+    text-align: left;
+}
+
+#copy-hint {
+    width: 100%;
+    text-align: center;
+    margin-top: 0;
+    color: $text;
+    text-style: dim;
+}
+
+/* HelpScreen */
+HelpScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#help-dialog {
+    width: 70;
+    height: auto;
+    max-height: 24;
+    background: $surface;
+    border: round $primary;
+    padding: 1 2;
+}
+
+#help-dialog Label {
+    width: 100%;
+}
+
+/* LogCleanupScreen */
+LogCleanupScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#logclean-dialog {
+    width: 56;
+    height: auto;
+    max-height: 16;
+    background: $surface;
+    border: round $warning;
+    padding: 1 2;
+}
+
+#logclean-dialog Label {
+    width: 100%;
+    text-align: center;
+}
+
+#logclean-buttons {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+    align: center middle;
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1;
+}
