@@ -25,16 +25,9 @@ from textual.widgets import (
 )
 
 import tui
-from core.calendar import (
-    is_trading_day as _calendar_is_trading_day,
-)
+from core import calendar as _calendar
+from core import market_time as _market_time
 from core.log_cleanup import cleanup_logs
-from core.market_time import (
-    PHASE_POST_CLOSE,
-    PHASE_PRE_OPEN,
-    market_phase,
-    shanghai_now,
-)
 from core.task_registry import TASK_GROUPS
 from tui.config import (
     DAEMON_PID_PATH,
@@ -305,15 +298,15 @@ class PipelineApp(App):
             return None
 
         async with self._task_slot:
-            return await self._spawn_and_wait(args, env, logger)
+            return await self._spawn_and_wait(args, env)
 
     async def _spawn_and_wait(
         self,
         args: tuple[str, ...],
         env: dict[str, str],
-        logger: logging.Logger,
     ) -> int | None:
         proc: asyncio.subprocess.Process | None = None
+        log = logging.getLogger(__name__)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -325,12 +318,12 @@ class PipelineApp(App):
             self._current_process = proc
             await proc.wait()
             if proc.returncode != 0:
-                logger.error(
+                log.error(
                     f"Subprocess {' '.join(args)} exited with code {proc.returncode}"
                 )
             return proc.returncode
         except Exception:
-            logger.exception(f"Exception running subprocess {' '.join(args)}")
+            log.exception(f"Exception running subprocess {' '.join(args)}")
             return None
         finally:
             self._current_process = None
@@ -484,16 +477,17 @@ class PipelineApp(App):
             self._create_background_task(self._stop_daemon_process())
             stopped_pids.append(daemon_pid)
 
+        log = logging.getLogger(__name__)
         if stopped_pids:
             self.notify(
                 f"已发送停止信号给 {len(set(stopped_pids))} 个进程",
                 severity="information",
                 timeout=3.0,
             )
-            logger.info("已停止进程: %s", stopped_pids)
+            log.info("已停止进程: %s", stopped_pids)
         else:
             self.notify("没有正在运行的任务可停止", severity="warning", timeout=3.0)
-            logger.info("没有正在运行的任务可停止")
+            log.info("没有正在运行的任务可停止")
 
     async def action_run_health(self) -> None:
         pipeline_path = str(_PROJECT_ROOT / "daily_pipeline.py")
@@ -575,10 +569,10 @@ class PipelineApp(App):
         否则 → 上一交易日）。分组队列以 --force 运行会绕过盘中门禁，
         因此交易日的盘中/结算窗口直接拒绝，避免把实时快照写成终值。
         """
-        sh_now = shanghai_now()
-        if _calendar_is_trading_day(sh_now.date()) and market_phase(sh_now) not in (
-            PHASE_PRE_OPEN,
-            PHASE_POST_CLOSE,
+        sh_now = _market_time.shanghai_now()
+        if _calendar.is_trading_day(sh_now.date()) and _market_time.market_phase(sh_now) not in (
+            _market_time.PHASE_PRE_OPEN,
+            _market_time.PHASE_POST_CLOSE,
         ):
             self.notify(
                 "盘中/结算窗口不可补数（上海 16:00 后数据定型再试）",
