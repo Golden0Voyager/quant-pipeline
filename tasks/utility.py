@@ -31,7 +31,7 @@ except ImportError:
 
 # 从 core/tasks 模块导入（避免与 daily_pipeline.py 的循环依赖）
 from core.progress import ProgressTracker
-from tasks.bars import _normalize_trade_date, _source_has_trading_day, _update_single_bar
+from tasks.bars import _detect_suspended_symbols, _normalize_trade_date, _source_has_trading_day, _update_single_bar
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +91,19 @@ def retry_failed(
     expected_latest = _normalize_trade_date(get_expected_latest_trading_day())
     source_has_day = bool(expected_latest) and _source_has_trading_day(loader, expected_latest)
 
+    # 停牌预检：与 update_bars 主流程同源的停牌判定（雪球 status + 东财停复牌名单）。
+    # 停牌股源端无新数据，直接跳过（_update_single_bar 返回 "skipped"，不计失败），
+    # 避免反复占用重试配额直到复牌（2026-08-04：7 只停牌股滞留重试队列）。
+    suspended_symbols = _detect_suspended_symbols(db, expected_latest)
+    if suspended_symbols:
+        logger.info(f"⏸️ 停牌预检：{len(suspended_symbols)} 只停牌股本次跳过重试: {sorted(suspended_symbols)}")
+
     success = 0
     still_failed: list[str] = []
     skipped_no_data: list[str] = []
 
     for symbol in symbols:
-        result = _update_single_bar(db, loader, symbol)
+        result = _update_single_bar(db, loader, symbol, suspended_symbols=suspended_symbols)
         if result == "success":
             success += 1
         elif result == "failed" and source_has_day:
