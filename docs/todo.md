@@ -298,3 +298,31 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 1. 报告期处理加 1-2 次指数退避重试（对齐 `update_bars` 的重试标准）
 2. 区分「接口失败」与「空数据」日志级别，空数据不应计入失败
 3. 失败报告期持久化到待重试列表，跨运行保留（类似 `failed_symbols` 队列），避免下次运行重新发现时重复拉全部
+
+---
+
+## 7. 单次尝试任务遇上游瞬断即失败（2026-08-04 观察）
+
+### 现象
+
+同日日志另有 2 个任务因上游瞬时断连单次失败（与第 6 节同类）：
+
+| 任务 | 失败原因 | 耗时 |
+|------|----------|------|
+| `update_concept_board` | `ConnectionError: curl (56) Connection closed abruptly` | 1.9s |
+| `update_stock_repurchase` | curl 类瞬时断连（Subprocess exit 1） | — |
+
+另：13:24 `update_bars --resume` 5 只停牌股失败、13:29 `retry` 被 SIGTERM（exit -15）——非本次记录范围。
+
+### 根因
+
+- 上游东财/同花顺接口限流或网络抖动时，curl 连接被服务端关闭
+- 这些任务与 `update_financial_history` 一样：**单次尝试，失败即放弃**，无重试/退避
+
+### 建议方案
+
+与第 6 节统一处理：
+
+1. 提炼统一的重试装饰器（如 `tasks/retry_utils.py` 的 `@retry(attempts=3, backoff=...)`），覆盖所有单次尝试的抓取任务
+2. 统一将「接口失败」标为可重试错误，空数据/校验失败不重试
+3. 任务级失败与 per-symbol 失败队列统一记录，便于跨运行恢复
