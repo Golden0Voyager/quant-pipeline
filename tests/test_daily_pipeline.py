@@ -430,14 +430,11 @@ class TestUpdateChipDistributionEm:
              patch("tasks.index_chain.logger"):
             r = daily_pipeline.update_chip_distribution_em(db)
 
-        assert r == {
-            "success": 0,
-            "failed": 0,
-            "skipped": 0,
-            "total": 0,
-            "processed": 0,
-            "aborted": False,
-        }
+        assert r["success"] == 0
+        assert r["aborted"] is False
+        assert r["total"] == 0
+        # 结果契约：空清单显式声明 no_data，归一化不得判为 failed
+        assert r["status"] == "no_data"
 
 
 # ===========================================================================

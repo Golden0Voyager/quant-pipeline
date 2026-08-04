@@ -751,6 +751,28 @@ def test_update_chip_distribution_em_success():
     assert result["total"] == 1
     assert result["aborted"] is False
     assert db.save_chip_distribution_em_batch.called
+    # 结果契约：成功运行不得被归一化误判为 failed（2026-08-03）
+    from core.task_result import normalize_task_result
+    normalised = normalize_task_result("update_chip_distribution_em", result)
+    assert normalised.exit_failure is False
+    assert normalised.status.value == "success"
+
+
+def test_update_chip_distribution_em_all_skipped_is_no_data():
+    """全跳过时归一化为 no_data 而非 failed。"""
+    from core.stock_cyq_em import InsufficientDataError
+    from core.task_result import TaskStatus, normalize_task_result
+
+    db = MagicMock()
+    with patch.object(
+        index_chain, "_fetch_cyq_em", side_effect=InsufficientDataError("x")
+    ), patch.object(index_chain.time, "sleep"):
+        result = index_chain.update_chip_distribution_em(
+            db, symbols_to_update=["920001.BJ"]
+        )
+    normalised = normalize_task_result("update_chip_distribution_em", result)
+    assert normalised.status is TaskStatus.NO_DATA
+    assert normalised.exit_failure is False
 
 
 def test_update_chip_distribution_em_circuit_breaker():
