@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 GLOBAL_ASSETS = [
     "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", 
     "AMZN", "META", "NFLX", "AMD", "BTC-USD",
-    "INTC", "QCOM", "AVGO", "TSM", "ASML"
+    "INTC", "QCOM", "AVGO", "TSM", "ASML", "SPCX"
 ]
 
 def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
