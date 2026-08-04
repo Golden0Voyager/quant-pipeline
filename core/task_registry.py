@@ -1153,6 +1153,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         primary_source="akshare",
         display_label="健康检查",
     ),
+    TaskSpec(
+        name="update_global_assets",
+        callable=None,
+        tables=("global_assets_bars",),
+        cadence=Cadence.TRADING_DAY,
+        date_columns={"global_assets_bars": "trade_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="yfinance",
+        display_label="全球资产日线",
+    ),
 )
 # fmt: on
 

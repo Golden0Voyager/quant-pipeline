@@ -1177,6 +1177,9 @@ class SmartMoneyDBProvider:
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
 
+    def save_global_assets_bars_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_global_assets_bars_batch(records)
+
     def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
 
@@ -2173,6 +2176,51 @@ class SmartMoneyLoaderProvider:
 
     def get_market_fund_flow(self) -> pd.DataFrame:
         return self._loader.get_market_fund_flow()
+
+    def fetch_global_assets_bars(self, symbol: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        
+        # yfinance doesn't take None for start/end in history the same way as strings, 
+        # but if we just want max:
+        if start_date is None:
+            df = ticker.history(period="max")
+        else:
+            # yfinance expects YYYY-MM-DD
+            if end_date is None:
+                df = ticker.history(start=start_date)
+            else:
+                df = ticker.history(start=start_date, end=end_date)
+                
+        if df.empty:
+            return df
+            
+        df = df.reset_index()
+        # Rename columns to match schema
+        # Date -> trade_date, Open -> open, High -> high, Low -> low, Close -> close, Volume -> volume
+        # Note: yfinance returns 'Date' or 'Datetime'
+        date_col = 'Date' if 'Date' in df.columns else 'Datetime'
+        if date_col not in df.columns:
+            return pd.DataFrame()
+            
+        df['trade_date'] = pd.to_datetime(df[date_col]).dt.strftime('%Y-%m-%d')
+        df = df.rename(columns={
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        })
+        
+        # yfinance history already returns adj_close as 'Close' if auto_adjust is True (default)
+        # But we can store it as adj_close just to be clear, and let close be close
+        df['adj_close'] = df['close']
+        
+        # Keep only needed columns
+        keep_cols = ['trade_date', 'open', 'high', 'low', 'close', 'adj_close', 'volume']
+        df = df[[c for c in keep_cols if c in df.columns]]
+        df['ts_code'] = symbol
+        return df
 
 
 # ===========================================================================

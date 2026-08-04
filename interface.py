@@ -233,6 +233,10 @@ class DatabaseInterface(Protocol):
         """批量保存期货日线数据，返回实际保存条数。"""
         ...
 
+    def save_global_assets_bars_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存全球核心资产日线数据，返回实际保存条数。"""
+        ...
+
     def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         """获取所有自选股列表。"""
         ...
@@ -480,6 +484,10 @@ class DataLoaderInterface(Protocol):
 
     def get_market_fund_flow(self) -> pd.DataFrame:
         """批量获取全市场资金流向数据。"""
+        ...
+
+    def fetch_global_assets_bars(self, symbol: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """获取全球核心资产行情（例如通过 yfinance）。"""
         ...
 
 
