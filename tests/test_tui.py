@@ -2168,3 +2168,36 @@ def test_single_task_dropdown_contains_concept_board():
     ]
     assert "update_concept_board" in all_tasks
     assert "update_concept_member" in all_tasks
+
+
+def test_db_queries_cache_and_invalidation(tmp_path):
+    import time
+
+    from tui.services.db_queries import (
+        clear_db_queries_cache,
+        get_active_stock_count,
+        get_all_table_counts,
+    )
+
+    clear_db_queries_cache()
+    db_file = tmp_path / "test_counts.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE stock_list (ts_code TEXT)")
+    conn.execute("INSERT INTO stock_list VALUES ('000001.SZ')")
+    conn.commit()
+    conn.close()
+
+    assert get_active_stock_count(str(db_file)) == 1
+    counts1 = get_all_table_counts(str(db_file), fast=False)
+    assert counts1.get("stock_list") == 1
+
+    time.sleep(0.01)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("INSERT INTO stock_list VALUES ('600000.SH')")
+    conn.commit()
+    conn.close()
+
+    assert get_active_stock_count(str(db_file)) == 2
+    counts2 = get_all_table_counts(str(db_file), fast=False)
+    assert counts2.get("stock_list") == 2
+
