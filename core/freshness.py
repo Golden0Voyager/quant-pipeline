@@ -44,10 +44,11 @@ MONTHLY_TABLES: set[str] = {
     "concept_member",  # 概念成分按月刷新（updated_at）
 }
 
-# 随季报更新的表（使用 report_date/report_period，不按交易日衡量新鲜度）
+# 随季报更新的表（使用 report_date/report_period/publish_date，不按交易日衡量新鲜度）
 QUARTERLY_TABLES: set[str] = {
     "shareholder_count",
     "quarterly_financials",
+    "quarterly_financials_history",
     "macro_quarterly",
     "north_hold",
     "earnings_forecast",

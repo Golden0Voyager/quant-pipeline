@@ -50,49 +50,67 @@ def _to_int(val: Any) -> int | None:
 
 
 def _fetch_em_spot() -> list[dict]:
-    """直接从东方财富 push2 接口获取概念板块实时行情（自动分页）。
+    """直接从东方财富 push2 接口获取概念板块实时行情（自动分页，支持备用域名）。
 
     Raises on HTTP/network errors so that ``SourceClient.call()`` can
     handle retry and circuit-breaker logic.
     """
-    base_url = (
-        "https://push2.eastmoney.com/api/qt/clist/get"
-        "?pn={page}&pz=100&po=1&np=1"
-        "&ut=bd1d9ddb04089700cf9c27f6f7426281"
-        "&fltt=2&invt=2&fid=f3"
-        "&fs=m:90+t:3"
-        "&fields=f3,f4,f12,f14,f104,f105"
-    )
+    hosts = ("push2.eastmoney.com", "push2delay.eastmoney.com")
     session = get_default_client().get_session("eastmoney")
     today = shanghai_today()
-    records = []
-    page = 1
-    while True:
-        resp = session.get(base_url.format(page=page), timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("data", {}).get("diff", [])
-        if not items:
-            break
-        for item in items:
-            code = str(item.get("f12", "")).strip()
-            name = str(item.get("f14", "")).strip()
-            if not code or not name:
-                continue
-            records.append({
-                "trade_date": today,
-                "concept_code": code,
-                "concept_name": name,
-                "pct_change": _to_float(item.get("f3")),
-                "turnover": _to_float(item.get("f4")),
-                "up_count": _to_int(item.get("f104")),
-                "down_count": _to_int(item.get("f105")),
-                "data_source": "em",
-            })
-        if len(items) < 100:
-            break
-        page += 1
-    return records
+    last_err: Exception | None = None
+
+    for host in hosts:
+        base_url = (
+            f"https://{host}/api/qt/clist/get"
+            "?pn={page}&pz=100&po=1&np=1"
+            "&ut=bd1d9ddb04089700cf9c27f6f7426281"
+            "&fltt=2&invt=2&fid=f3"
+            "&fs=m:90+t:3"
+            "&fields=f3,f4,f12,f14,f104,f105"
+        )
+        records = []
+        page = 1
+        success = True
+        while True:
+            try:
+                resp = session.get(base_url.format(page=page), timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.debug(f"概念板块行情主机 {host} 请求失败 (page {page}): {e}")
+                last_err = e
+                success = False
+                break
+
+            items = data.get("data", {}).get("diff", [])
+            if not items:
+                break
+            for item in items:
+                code = str(item.get("f12", "")).strip()
+                name = str(item.get("f14", "")).strip()
+                if not code or not name:
+                    continue
+                records.append({
+                    "trade_date": today,
+                    "concept_code": code,
+                    "concept_name": name,
+                    "pct_change": _to_float(item.get("f3")),
+                    "turnover": _to_float(item.get("f4")),
+                    "up_count": _to_int(item.get("f104")),
+                    "down_count": _to_int(item.get("f105")),
+                    "data_source": "em",
+                })
+            if len(items) < 100:
+                break
+            page += 1
+
+        if success and records:
+            return records
+
+    if last_err is not None:
+        raise last_err
+    return []
 
 
 # ===========================================================================
@@ -101,27 +119,40 @@ def _fetch_em_spot() -> list[dict]:
 
 
 def _fetch_concept_list_em() -> list[dict]:
-    """Fetch concept board name list from East Money push2 API."""
-    name_url = (
-        "https://push2.eastmoney.com/api/qt/clist/get"
-        "?pn=1&pz=500&po=1&np=1"
-        "&ut=bd1d9ddb04089700cf9c27f6f7426281"
-        "&fltt=2&invt=2&fid=f3"
-        "&fs=m:90+t:3"
-        "&fields=f12,f14"
-    )
+    """Fetch concept board name list from East Money push2 API (with host failover)."""
+    hosts = ("push2.eastmoney.com", "push2delay.eastmoney.com")
     session = get_default_client().get_session("eastmoney")
-    resp = session.get(name_url, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    items = data.get("data", {}).get("diff", [])
-    out = []
-    for item in items:
-        code = str(item.get("f12", "")).strip()
-        name = str(item.get("f14", "")).strip()
-        if code and name:
-            out.append({"concept_code": code, "concept_name": name})
-    return out
+    last_err: Exception | None = None
+
+    for host in hosts:
+        name_url = (
+            f"https://{host}/api/qt/clist/get"
+            "?pn=1&pz=500&po=1&np=1"
+            "&ut=bd1d9ddb04089700cf9c27f6f7426281"
+            "&fltt=2&invt=2&fid=f3"
+            "&fs=m:90+t:3"
+            "&fields=f12,f14"
+        )
+        try:
+            resp = session.get(name_url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("data", {}).get("diff", [])
+            out = []
+            for item in items:
+                code = str(item.get("f12", "")).strip()
+                name = str(item.get("f14", "")).strip()
+                if code and name:
+                    out.append({"concept_code": code, "concept_name": name})
+            if out:
+                return out
+        except Exception as e:
+            logger.debug(f"概念板块列表主机 {host} 请求失败: {e}")
+            last_err = e
+
+    if last_err is not None:
+        raise last_err
+    return []
 
 
 def _fetch_concept_members_em() -> list[dict]:
