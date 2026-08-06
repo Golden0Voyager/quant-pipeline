@@ -303,7 +303,6 @@ TABLE_LABELS_CN: dict[str, str] = {
 TASK_GROUPS: dict[str, list[str]] = {
     "core": [
         "update_bars",
-        "update_global_assets",
         "update_indicators",
         "update_fundamentals",
         "update_chip_distribution",
