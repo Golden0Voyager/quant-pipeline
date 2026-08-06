@@ -336,6 +336,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_us_treasury",
         "update_futures",
         "update_money_market",
+        "update_global_assets",
     ],
     "sector_index": [
         "update_sector_industry",
@@ -408,6 +409,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_china_macro",
     "update_money_market",
     "update_chip_distribution_em",
+    "update_global_assets",
 )
 
 

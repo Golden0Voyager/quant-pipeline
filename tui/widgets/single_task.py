@@ -50,6 +50,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_us_treasury": "美债收益率 (US Treasury)",
     "update_futures": "期货日线 (Futures)",
     "update_money_market": "货币市场 (Money Market)",
+    "update_global_assets": "全球资产日线 (Global Assets)",
     "update_sector_industry": "行业分类 (Sector Industry)",
     "update_industry": "行业更新 (Industry)",
     "update_sector_derivatives": "行业板块 (Sector Derivatives)",
