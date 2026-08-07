@@ -522,7 +522,7 @@ async def test_action_handlers_use_run_in_background():
         callback("run-now")
         mock_create_task.assert_called_once()
         mock_run_report.assert_called_once_with(
-            "断点续传", sys.executable, expected_pipeline_path, "--task", "update_bars", "--resume", "--force"
+            "断点续传", sys.executable, expected_pipeline_path, "--task", "all", "--resume", "--force"
         )
 
         mock_run_bg.reset_mock()
