@@ -370,7 +370,7 @@ class PipelineApp(App):
             sys.executable,
             pipeline_path,
             "--task",
-            "update_bars",
+            "all",
             "--resume",
             "--force",
         )
