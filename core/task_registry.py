@@ -230,6 +230,7 @@ TABLE_LABELS: dict[str, str] = {
     "money_market": "Money Market",
     "macro_monthly": "Macro Monthly",
     "macro_quarterly": "Macro Quarterly",
+    "global_assets_bars": "Global Assets",
     # 总览
     "stock_list": "Stock List",
 }
@@ -293,6 +294,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "money_market": "货币市场",
     "macro_monthly": "宏观(月)",
     "macro_quarterly": "宏观(季)",
+    "global_assets_bars": "全球资产",
     # 总览
     "stock_list": "股票列表",
 }
@@ -333,6 +335,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_us_treasury",
         "update_futures",
         "update_money_market",
+        "update_global_assets",
     ],
     "sector_index": [
         "update_sector_industry",
@@ -405,6 +408,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_china_macro",
     "update_money_market",
     "update_chip_distribution_em",
+    "update_global_assets",
 )
 
 
@@ -1152,6 +1156,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="健康检查",
+    ),
+    TaskSpec(
+        name="update_global_assets",
+        callable=None,
+        tables=("global_assets_bars",),
+        cadence=Cadence.DAILY,
+        date_columns={"global_assets_bars": "trade_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="yfinance",
+        display_label="全球资产日线",
     ),
 )
 # fmt: on

@@ -131,6 +131,7 @@ from tasks.financials import (
     update_shareholder_count,
 )
 from tasks.futures import update_futures
+from tasks.global_assets import update_global_assets
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
@@ -228,6 +229,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_global_index": update_global_index,
     "update_us_treasury": update_us_treasury,
     "update_futures": update_futures,
+    "update_global_assets": update_global_assets,
     "update_concept_board": update_concept_board,
     "update_concept_member": update_concept_member,
     "update_market_valuation": update_market_valuation,
