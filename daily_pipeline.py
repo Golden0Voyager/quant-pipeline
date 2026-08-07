@@ -28,6 +28,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta  # noqa: F401 — timedelta exposed for test patches
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,7 @@ from core.config import (
     MAX_RETRY_VAL as MAX_RETRY,  # noqa: F401
 )
 from core.config import (
-    PARALLEL_WORKERS_VAL as PARALLEL_WORKERS,
+    PARALLEL_WORKERS_VAL as PARALLEL_WORKERS,  # noqa: F401
 )
 from core.config import (
     RETRY_DELAY_VAL as RETRY_DELAY,  # noqa: F401
@@ -67,6 +68,7 @@ from core.freshness import compute_catch_up_tasks, get_latest_dates
 from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.notifications import notify_all
+from core.parallel_runner import ParallelTask, run_parallel_tasks
 from core.progress import ProgressTracker  # noqa: F401
 from core.refresh import (
     CrossSourceCheckConfig,
@@ -284,7 +286,7 @@ def _run_registry_task(
         ).to_dict()
 
     if task_name == "update_indicators":
-        if force or symbols:
+        if (force or symbols) and engine is not None:
             return _dispatch_indicators_force(fn, db, engine, symbols)
         return _safe_task(task_name, fn, db, engine)
 
@@ -380,6 +382,8 @@ def update_daily_core(
     engine: IndicatorEngineInterface,
     resume: bool = False,
     force: bool = False,
+    sequential: bool = False,
+    parallel_workers: int | None = None,
 ) -> dict:
     """Run all TRADING_DAY and DAILY cadence tasks (the daily core)."""
     logger.info("\n🚀 启动每日核心任务 (TRADING_DAY + DAILY)")
@@ -390,6 +394,8 @@ def update_daily_core(
         resume=resume,
         force=force,
         target_cadences={Cadence.TRADING_DAY, Cadence.DAILY},
+        sequential=sequential,
+        parallel_workers=parallel_workers,
     )
 
 
@@ -403,10 +409,24 @@ def run_all(
     resume: bool = False,
     force: bool = False,
     target_cadences: set[Cadence] | None = None,
+    sequential: bool = False,
+    parallel_workers: int | None = None,
 ) -> dict:
-    """运行完整数据管道。"""
+    """运行完整数据管道（支持 DAG 5 阶段分叉与汇聚并发执行）。"""
     start_time = time.time()
     _lower_process_priority()
+
+    workers = (
+        parallel_workers
+        if parallel_workers is not None
+        else int(os.getenv("PARALLEL_WORKERS", "4"))
+    )
+    if sequential or os.getenv("PARALLEL_PIPELINE", "1").lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        workers = 1
 
     def _run_task(name: str, fn, *args, **kwargs):
         if target_cadences is not None:
@@ -421,98 +441,206 @@ def run_all(
                 return {"status": "skipped", "reason": f"cadence not in {target_cadences}"}
         return _safe_task(name, fn, *args, **kwargs)
 
+    def _create_task(name: str, fn, *args, **kwargs) -> tuple[ParallelTask | None, dict | None]:
+        if target_cadences is not None:
+            spec = lookup_task(name)
+            if spec is None:
+                logger.error("❌ 任务未注册于 TASK_REGISTRY，无法按 cadence 过滤: %s", name)
+                return None, {"status": "failed", "reason": f"task not in registry: {name}"}
+            if spec.cadence is not Cadence.ON_DEMAND and spec.cadence not in target_cadences:
+                logger.info("⏭️ 跳过任务: %s (cadence=%s)", name, spec.cadence)
+                return None, {"status": "skipped", "reason": f"cadence not in {target_cadences}"}
+        return ParallelTask(name=name, fn=fn, args=args, kwargs=kwargs), None
+
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
-    logger.info(f"⚙️  并行线程: {PARALLEL_WORKERS} (默认 1=串行)")
+    logger.info(f"⚙️  并行线程: {workers} ({'串行模式' if workers <= 1 else '并发重叠调度'})")
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
         db.close()
         return {"status": "skipped", "reason": "非交易日"}
 
-    # 执行顺序原则：
-    #   1. 依赖先行：bars → retry(补失败) → indicators/chip（本地计算基于补齐后的 bars）；
-    #      fundamentals → market_snapshot(补股息率) → historical_valuation(快照沉淀)；
-    #      sector_fund_flow → sector_industry(用资金流排名)。
-    #   2. 核心交易数据最早完整：行情/指标/估值链放最前，中途崩溃损失最小。
-    #   3. 长尾逐股任务垫底：chip_distribution_em（逐股限流，耗时最长）放在
-    #      health_check 之前，中断不拖累其它任务。
-    results = {}
+    results: dict[str, Any] = {}
 
-    # ── 第一梯队：核心行情链（bars 收盘后走快照播种，分钟级）──
+    # ── 第一阶段：核心行情链（bars 收盘后走快照播种，必须最先完成）──
     results["stock_list"] = _run_task("update_stock_list", update_stock_list, db)
     results["bars"] = _run_task("update_bars", update_bars, db, loader, resume=resume, force=force)
-    # retry 紧跟 bars：先补齐失败股票，下游指标/筹码当天就能覆盖它们
     results["retry"] = _run_task("retry", retry_failed, db, loader)
-    # 总是调用 update_indicators。由于优化了智能探测，即使 bars 更新了0只，
-    # 也会在 <0.1 秒内判断出无须计算并跳过，同时能保证修复任何因中断而缺失指标的股票。
-    results["indicators"] = _run_task("update_indicators", update_indicators, db, engine)
-    results["chip_distribution"] = _run_task(
-        "update_chip_distribution", update_chip_distribution, db
-    )
 
-    # ── 第二梯队：估值链（有内部先后依赖）──
-    results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
-    results["market_snapshot"] = _run_task("update_market_snapshot", update_market_snapshot, db)
-    results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
-    results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
-    results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
+    if workers <= 1:
+        # 串行模式（完全按原有顺序执行）
+        results["indicators"] = _run_task("update_indicators", update_indicators, db, engine)
+        results["chip_distribution"] = _run_task("update_chip_distribution", update_chip_distribution, db)
+        results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
+        results["market_snapshot"] = _run_task("update_market_snapshot", update_market_snapshot, db)
+        results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
+        results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
+        results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
+        results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
+        results["margin_trading"] = _run_task("update_margin_trading", update_margin_trading, db)
+        results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
+        results["block_trade"] = _run_task("update_block_trade", update_block_trade, db)
+        results["limit_up_down"] = _run_task("update_limit_up_down", update_limit_up_down, db)
+        results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
+        results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
+        results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
+        results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
+        results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
+        results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
+        results["cb_quotation"] = _run_task("update_cb_quotation", update_cb_quotation, db)
+        results["cb_redeem"] = _run_task("update_cb_redeem", update_cb_redeem, db)
+        results["cb_index"] = _run_task("update_cb_index", update_cb_index, db)
+        results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
+        results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
+        results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
+        results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
+        results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
+        results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
+        results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
+        results["dividend_summary"] = _run_task("update_dividend_summary", update_dividend_summary, db)
+        results["gold_price"] = _run_task("update_gold_price", update_gold_price, db)
+        results["crude_oil"] = _run_task("update_crude_oil", update_crude_oil, db)
+        results["fx_rate"] = _run_task("update_usd", update_usd, db)
+        results["global_index"] = _run_task("update_global_index", update_global_index, db)
+        results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
+        results["futures"] = _run_task("update_futures", update_futures, db)
+        results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
+        results["money_market"] = _run_task("update_money_market", update_money_market, db)
+        results["global_assets"] = _run_task("update_global_assets", update_global_assets, db)
+        results["financial_history"] = _run_task("update_financial_history", update_financial_history, db)
+        results["shareholder_count"] = _run_task("update_shareholder_count", update_shareholder_count, db)
+        results["quarterly_financials"] = _run_task("update_quarterly_financials", update_quarterly_financials, db, loader)
+        results["industry"] = _run_task("update_industry", update_industry, db)
+        results["north_hold"] = _run_task("update_north_hold", update_north_hold, db)
+        results["index_membership"] = _run_task("update_index_membership", update_index_membership, db)
+        results["concept_member"] = _run_task("update_concept_member", update_concept_member, db)
+        results["chip_distribution_em"] = _run_task("update_chip_distribution_em", update_chip_distribution_em, db)
+        results["health"] = _run_task("health_check", health_check, db, fast=True)
+    else:
+        # ── 第二阶段：并发分叉（本地计算 vs 全球宏观 vs 衍生快任务 重叠执行）──
+        stage2_results: dict[str, Any] = {}
 
-    # ── 第三梯队：其余交易日快任务（单请求/少请求，顺序无依赖）──
-    results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
-    results["margin_trading"] = _run_task("update_margin_trading", update_margin_trading, db)
-    results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
-    results["block_trade"] = _run_task("update_block_trade", update_block_trade, db)
-    results["limit_up_down"] = _run_task("update_limit_up_down", update_limit_up_down, db)
-    results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
-    results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
-    results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
-    results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
-    results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
-    results["etf_daily"] = _run_task("update_etf_daily", update_etf_daily, db)
-    results["cb_quotation"] = _run_task("update_cb_quotation", update_cb_quotation, db)
-    results["cb_redeem"] = _run_task("update_cb_redeem", update_cb_redeem, db)
-    results["cb_index"] = _run_task("update_cb_index", update_cb_index, db)
-    results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
+        stage2_raw_tasks: list[tuple[str, Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = [
+            ("update_indicators", update_indicators, (db, engine), {}),
+            ("update_chip_distribution", update_chip_distribution, (db,), {}),
+            ("update_global_assets", update_global_assets, (db,), {}),
+            ("update_gold_price", update_gold_price, (db,), {}),
+            ("update_crude_oil", update_crude_oil, (db,), {}),
+            ("update_usd", update_usd, (db,), {}),
+            ("update_global_index", update_global_index, (db,), {}),
+            ("update_us_treasury", update_us_treasury, (db,), {}),
+            ("update_futures", update_futures, (db,), {}),
+            ("update_china_macro", update_china_macro, (db,), {}),
+            ("update_money_market", update_money_market, (db,), {}),
+            ("update_margin_trading", update_margin_trading, (db,), {}),
+            ("update_dragon_tiger", update_dragon_tiger, (db,), {}),
+            ("update_block_trade", update_block_trade, (db,), {}),
+            ("update_limit_up_down", update_limit_up_down, (db,), {}),
+            ("update_index_daily", update_index_daily, (db,), {}),
+            ("update_market_valuation", update_market_valuation, (db,), {}),
+            ("update_south_flow", update_south_flow, (db,), {}),
+            ("update_ah_premium", update_ah_premium, (db,), {}),
+            ("update_etf_daily", update_etf_daily, (db,), {}),
+            ("update_cb_quotation", update_cb_quotation, (db,), {}),
+            ("update_cb_redeem", update_cb_redeem, (db,), {}),
+            ("update_cb_index", update_cb_index, (db,), {}),
+            ("update_option_sentiment", update_option_sentiment, (db,), {}),
+            ("update_stock_repurchase", update_stock_repurchase, (db,), {}),
+            ("update_institution_survey", update_institution_survey, (db,), {}),
+            ("update_stock_pledge", update_stock_pledge, (db,), {}),
+        ]
 
-    # ── 第四梯队：事件信号与非交易日频任务 ──
-    results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
-    results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
-    results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
-    results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
-    results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
-    results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
-    results["dividend_summary"] = _run_task("update_dividend_summary", update_dividend_summary, db)
-    results["gold_price"] = _run_task("update_gold_price", update_gold_price, db)
-    results["crude_oil"] = _run_task("update_crude_oil", update_crude_oil, db)
-    results["fx_rate"] = _run_task("update_usd", update_usd, db)
-    results["global_index"] = _run_task("update_global_index", update_global_index, db)
-    results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
-    results["futures"] = _run_task("update_futures", update_futures, db)
-    results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
-    results["money_market"] = _run_task("update_money_market", update_money_market, db)
+        stage2_ptasks: list[ParallelTask] = []
+        for name, fn, args, kwargs in stage2_raw_tasks:
+            ptask, skip_dict = _create_task(name, fn, *args, **kwargs)
+            if skip_dict is not None:
+                stage2_results[name] = skip_dict
+            elif ptask is not None:
+                stage2_ptasks.append(ptask)
 
-    # ── 第五梯队：财务/成分（批量接口或低频）──
-    results["financial_history"] = _run_task(
-        "update_financial_history", update_financial_history, db
-    )
-    results["shareholder_count"] = _run_task("update_shareholder_count", update_shareholder_count, db)
-    results["quarterly_financials"] = _run_task("update_quarterly_financials", update_quarterly_financials, db, loader)
-    results["industry"] = _run_task("update_industry", update_industry, db)
-    results["north_hold"] = _run_task("update_north_hold", update_north_hold, db)
-    results["index_membership"] = _run_task(
-        "update_index_membership", update_index_membership, db
-    )
-    results["concept_member"] = _run_task(
-        "update_concept_member", update_concept_member, db
-    )
+        stage2_ran = run_parallel_tasks(stage2_ptasks, max_workers=workers, runner_fn=_safe_task)
+        stage2_results.update(stage2_ran)
 
-    # ── 长尾垫底：逐股限流任务，中断不拖累其它任务 ──
-    results["chip_distribution_em"] = _run_task(
-        "update_chip_distribution_em", update_chip_distribution_em, db
-    )
+        results["indicators"] = stage2_results.get("update_indicators", {})
+        results["chip_distribution"] = stage2_results.get("update_chip_distribution", {})
+        results["global_assets"] = stage2_results.get("update_global_assets", {})
+        results["gold_price"] = stage2_results.get("update_gold_price", {})
+        results["crude_oil"] = stage2_results.get("update_crude_oil", {})
+        results["fx_rate"] = stage2_results.get("update_usd", {})
+        results["global_index"] = stage2_results.get("update_global_index", {})
+        results["us_treasury"] = stage2_results.get("update_us_treasury", {})
+        results["futures"] = stage2_results.get("update_futures", {})
+        results["china_macro"] = stage2_results.get("update_china_macro", {})
+        results["money_market"] = stage2_results.get("update_money_market", {})
+        results["margin_trading"] = stage2_results.get("update_margin_trading", {})
+        results["dragon_tiger"] = stage2_results.get("update_dragon_tiger", {})
+        results["block_trade"] = stage2_results.get("update_block_trade", {})
+        results["limit_up_down"] = stage2_results.get("update_limit_up_down", {})
+        results["index_daily"] = stage2_results.get("update_index_daily", {})
+        results["market_valuation"] = stage2_results.get("update_market_valuation", {})
+        results["south_flow"] = stage2_results.get("update_south_flow", {})
+        results["ah_premium"] = stage2_results.get("update_ah_premium", {})
+        results["etf_daily"] = stage2_results.get("update_etf_daily", {})
+        results["cb_quotation"] = stage2_results.get("update_cb_quotation", {})
+        results["cb_redeem"] = stage2_results.get("update_cb_redeem", {})
+        results["cb_index"] = stage2_results.get("update_cb_index", {})
+        results["option_sentiment"] = stage2_results.get("update_option_sentiment", {})
+        results["stock_repurchase"] = stage2_results.get("update_stock_repurchase", {})
+        results["institution_survey"] = stage2_results.get("update_institution_survey", {})
+        results["stock_pledge"] = stage2_results.get("update_stock_pledge", {})
 
-    results["health"] = _run_task("health_check", health_check, db, fast=True)
+        # ── 第三阶段：估值链与行业板块（具有严格先后依赖，串行执行）──
+        results["fundamentals"] = _run_task("update_fundamentals", update_fundamentals, db, loader)
+        results["market_snapshot"] = _run_task("update_market_snapshot", update_market_snapshot, db)
+        results["historical_valuation"] = _run_task("update_historical_valuation", update_historical_valuation, db)
+        results["fund_flow"] = _run_task("update_fund_flow", update_fund_flow, db, loader)
+        results["sector_fund_flow"] = _run_task("update_sector_fund_flow", update_sector_fund_flow, db)
+        results["sector_industry"] = _run_task("update_sector_industry", update_sector_industry, db)
+        results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
+        results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
+
+        # ── 第四阶段：低频财务、事件与成分股（无依赖，并发执行）──
+        stage4_results: dict[str, Any] = {}
+        stage4_raw_tasks: list[tuple[str, Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = [
+            ("update_restricted_share", update_restricted_share, (db,), {}),
+            ("update_earnings_forecast", update_earnings_forecast, (db,), {}),
+            ("update_dividend_summary", update_dividend_summary, (db,), {}),
+            ("update_financial_history", update_financial_history, (db,), {}),
+            ("update_shareholder_count", update_shareholder_count, (db,), {}),
+            ("update_quarterly_financials", update_quarterly_financials, (db, loader), {}),
+            ("update_industry", update_industry, (db,), {}),
+            ("update_north_hold", update_north_hold, (db,), {}),
+            ("update_index_membership", update_index_membership, (db,), {}),
+            ("update_concept_member", update_concept_member, (db,), {}),
+        ]
+        stage4_ptasks: list[ParallelTask] = []
+        for name, fn, args, kwargs in stage4_raw_tasks:
+            ptask, skip_dict = _create_task(name, fn, *args, **kwargs)
+            if skip_dict is not None:
+                stage4_results[name] = skip_dict
+            elif ptask is not None:
+                stage4_ptasks.append(ptask)
+
+        stage4_ran = run_parallel_tasks(stage4_ptasks, max_workers=workers, runner_fn=_safe_task)
+        stage4_results.update(stage4_ran)
+
+        results["restricted_share"] = stage4_results.get("update_restricted_share", {})
+        results["earnings_forecast"] = stage4_results.get("update_earnings_forecast", {})
+        results["dividend_summary"] = stage4_results.get("update_dividend_summary", {})
+        results["financial_history"] = stage4_results.get("update_financial_history", {})
+        results["shareholder_count"] = stage4_results.get("update_shareholder_count", {})
+        results["quarterly_financials"] = stage4_results.get("update_quarterly_financials", {})
+        results["industry"] = stage4_results.get("update_industry", {})
+        results["north_hold"] = stage4_results.get("update_north_hold", {})
+        results["index_membership"] = stage4_results.get("update_index_membership", {})
+        results["concept_member"] = stage4_results.get("update_concept_member", {})
+
+        # ── 第五阶段：长尾垫底与健康检查（串行执行）──
+        results["chip_distribution_em"] = _run_task(
+            "update_chip_distribution_em", update_chip_distribution_em, db
+        )
+        results["health"] = _run_task("health_check", health_check, db, fast=True)
 
     db.close()
     elapsed = time.time() - start_time
@@ -782,6 +910,17 @@ def main():
         help="数据库路径（默认从环境变量 QUANT_DB_PATH 读取）",
     )
     parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="强制串行执行所有任务，禁用并发调度",
+    )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=None,
+        help="并发执行线程数 (默认: 4)",
+    )
+    parser.add_argument(
         "--symbols",
         type=str,
         default=None,
@@ -858,7 +997,17 @@ def main():
                 return True
 
         if task in ("all", "daily", "update_daily_core"):
-            results = update_daily_core(db, loader, engine, resume=args.resume, force=args.force)
+            kwargs: dict[str, Any] = {"resume": args.resume, "force": args.force}
+            if args.sequential:
+                kwargs["sequential"] = True
+            if args.parallel_workers is not None:
+                kwargs["parallel_workers"] = args.parallel_workers
+            results = update_daily_core(
+                db,
+                loader,
+                engine,
+                **kwargs,
+            )
             if results.get("crashed"):
                 sys.exit(1)
         elif task == "weekly_backfill":
