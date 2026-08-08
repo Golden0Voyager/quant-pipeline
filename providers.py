@@ -1511,16 +1511,22 @@ class SmartMoneyDBProvider:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 try:
-                    # close previous active records
+                    # close previous active records, but NOT same-day snapshots
+                    # (they get upserted below; closing them would corrupt the interval)
                     conn.execute(
-                        "UPDATE concept_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                        (valid_to,),
+                        "UPDATE concept_member_history SET valid_to = ? "
+                        "WHERE valid_to IS NULL AND valid_from < ?",
+                        (valid_to, valid_from),
                     )
-                    # insert new snapshot
+                    # insert new snapshot (upsert on PK, idempotent for same-day reruns)
                     conn.executemany(
                         """INSERT INTO concept_member_history
                            (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
-                           VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                           VALUES (?, ?, ?, ?, NULL, ?, ?)
+                           ON CONFLICT(concept_code, ts_code, valid_from) DO UPDATE SET
+                               concept_name = excluded.concept_name,
+                               source = excluded.source,
+                               snapshot_run_id = excluded.snapshot_run_id""",
                         [
                             (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"),
                              valid_from, r.get("source", "akshare"), run_id)
@@ -1551,16 +1557,23 @@ class SmartMoneyDBProvider:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
                 try:
-                    # close previous active records
+                    # close previous active records, excluding same-day snapshots
+                    # (they are upserted below; closing them would corrupt the interval)
                     conn.execute(
-                        "UPDATE index_member_history SET valid_to = ? WHERE valid_to IS NULL",
-                        (valid_to,),
+                        "UPDATE index_member_history SET valid_to = ? "
+                        "WHERE valid_to IS NULL AND valid_from < ?",
+                        (valid_to, valid_from),
                     )
-                    # insert new snapshot
+                    # insert new snapshot (upsert on PK, idempotent for same-day reruns)
                     conn.executemany(
                         """INSERT INTO index_member_history
                            (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
-                           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                           ON CONFLICT(index_code, ts_code, valid_from) DO UPDATE SET
+                               index_name = excluded.index_name,
+                               weight = excluded.weight,
+                               source = excluded.source,
+                               snapshot_run_id = excluded.snapshot_run_id""",
                         [
                             (r.get("index_code"), r.get("index_name"), r.get("ts_code"),
                              r.get("weight"), valid_from, r.get("source", "akshare"), run_id)

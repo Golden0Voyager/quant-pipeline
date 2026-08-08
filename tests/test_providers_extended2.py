@@ -185,6 +185,58 @@ def test_index_history_failed_write_rolls_back_active_interval(provider):
         ).fetchall() == [("2026-07-24",)]
 
 
+def test_index_history_same_day_rerun_is_idempotent(provider):
+    """同日重复运行不得触发 UNIQUE 冲突，也不得误关当天快照。"""
+    payload = {
+        "index_code": "000300",
+        "index_name": "沪深300",
+        "ts_code": "000001.SZ",
+        "weight": 1.0,
+        "source": "akshare",
+    }
+    provider.record_ingestion_run(_audit_payload("index-run-1", "success", 1))
+    assert provider.save_index_member_history_batch([payload], run_id="index-run-1", valid_from="2026-07-25") == 1
+
+    provider.record_ingestion_run(_audit_payload("index-run-2", "success", 1))
+    result = provider.save_index_member_history_batch([payload], run_id="index-run-2", valid_from="2026-07-25")
+    assert result >= 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        rows = conn.execute(
+            "SELECT valid_to, snapshot_run_id FROM index_member_history "
+            "WHERE index_code = '000300' AND valid_from = '2026-07-25'"
+        ).fetchall()
+    # 同日快照保持活跃（未被误关），run_id 被最新一次覆盖
+    assert rows == [(None, "index-run-2")]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM index_member_history "
+        "WHERE valid_from = '2026-07-25' AND valid_to IS NULL"
+    ).fetchone()[0] == 1
+
+
+def test_concept_history_same_day_rerun_is_idempotent(provider):
+    """概念板块同日重复运行同样必须幂等。"""
+    payload = {
+        "concept_code": "BK0001",
+        "concept_name": "测试概念",
+        "ts_code": "000001.SZ",
+        "source": "akshare",
+    }
+    provider.record_ingestion_run(_audit_payload("concept-run-1", "success", 1))
+    assert provider.save_concept_member_history_batch([payload], run_id="concept-run-1", valid_from="2026-07-25") == 1
+
+    provider.record_ingestion_run(_audit_payload("concept-run-2", "success", 1))
+    result = provider.save_concept_member_history_batch([payload], run_id="concept-run-2", valid_from="2026-07-25")
+    assert result >= 0
+
+    with sqlite3.connect(provider.db_path) as conn:
+        rows = conn.execute(
+            "SELECT valid_to, snapshot_run_id FROM concept_member_history "
+            "WHERE concept_code = 'BK0001' AND valid_from = '2026-07-25'"
+        ).fetchall()
+    assert rows == [(None, "concept-run-2")]
+
+
 def test_concept_history_failed_write_rolls_back_active_interval(provider):
     provider.record_ingestion_run(_audit_payload("concept-old", "success", 1))
     assert provider.save_concept_member_history_batch(
