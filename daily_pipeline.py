@@ -559,7 +559,9 @@ def run_all(
             elif ptask is not None:
                 stage2_ptasks.append(ptask)
 
-        stage2_ran = run_parallel_tasks(stage2_ptasks, max_workers=workers, runner_fn=_safe_task)
+        # 每个任务同时抓取并写入，且共享同一个 db provider；在任务拆成
+        # “并行抓取 + 单写入器”前，不能把该实例交给多个 SQLite 线程。
+        stage2_ran = run_parallel_tasks(stage2_ptasks, max_workers=1, runner_fn=_safe_task)
         stage2_results.update(stage2_ran)
 
         results["indicators"] = stage2_results.get("update_indicators", {})
@@ -622,7 +624,7 @@ def run_all(
             elif ptask is not None:
                 stage4_ptasks.append(ptask)
 
-        stage4_ran = run_parallel_tasks(stage4_ptasks, max_workers=workers, runner_fn=_safe_task)
+        stage4_ran = run_parallel_tasks(stage4_ptasks, max_workers=1, runner_fn=_safe_task)
         stage4_results.update(stage4_ran)
 
         results["restricted_share"] = stage4_results.get("update_restricted_share", {})
