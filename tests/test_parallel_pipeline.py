@@ -136,6 +136,20 @@ def test_run_all_parallel_execution(tmp_path):
     assert safe_task.call_count > 25
 
 
+def test_run_all_serializes_shared_db_parallel_stages(tmp_path):
+    """共享数据库实例不得被并发阶段的多个线程复用。"""
+    db = MagicMock()
+    db.db_path = str(tmp_path / "quant_core.db")
+
+    with patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline._safe_task", return_value={"status": "ok"}), \
+         patch("daily_pipeline.run_parallel_tasks", return_value={}) as runner, \
+         patch("daily_pipeline.logger"):
+        daily_pipeline.run_all(db, MagicMock(), MagicMock(), parallel_workers=3)
+
+    assert [call.kwargs["max_workers"] for call in runner.call_args_list] == [1, 1]
+
+
 def test_run_all_sequential_flag(tmp_path):
     """测试 daily_pipeline.run_all 在 sequential=True 模式下顺序调度所有任务。"""
     db = MagicMock()
@@ -166,4 +180,3 @@ def test_main_cli_parallel_flags():
         f.get_indicator_engine.return_value = engine = MagicMock()
         daily_pipeline.main()
         fn.assert_called_once_with(db, loader, engine, resume=False, force=False, sequential=True, parallel_workers=2)
-
