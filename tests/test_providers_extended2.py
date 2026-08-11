@@ -15,6 +15,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -67,6 +68,31 @@ def test_record_ingestion_run_upserts_same_parent(provider):
         ).fetchall()
 
     assert rows == [("run-1", "success", 3)]
+
+
+def test_record_ingestion_run_retries_transient_database_lock(provider):
+    """短暂写锁应重试并最终提交同一条审计记录。"""
+    conn = MagicMock()
+    conn.execute.side_effect = [sqlite3.OperationalError("database is locked"), None]
+    audit_context = MagicMock()
+    audit_context.__enter__.return_value = conn
+
+    with patch.object(provider, "_connect_for_audit", return_value=audit_context):
+        provider.record_ingestion_run(_audit_payload("lock-run", "success", 1))
+
+    assert conn.execute.call_count == 2
+
+
+def test_record_ingestion_run_does_not_retry_non_lock_error(provider):
+    """表结构等非锁错误必须立即暴露，不能伪装为瞬时竞争。"""
+    conn = MagicMock()
+    conn.execute.side_effect = sqlite3.OperationalError("no such table: ingestion_runs")
+    audit_context = MagicMock()
+    audit_context.__enter__.return_value = conn
+
+    with patch.object(provider, "_connect_for_audit", return_value=audit_context), \
+         pytest.raises(sqlite3.OperationalError, match="no such table"):
+        provider.record_ingestion_run(_audit_payload("schema-run", "success", 1))
 
 
 def test_shared_write_connection_enables_foreign_keys(provider):
