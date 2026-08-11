@@ -113,13 +113,17 @@ class PipelineApp(App):
 
     async def _run_and_report(self, action_name: str, *args: str) -> int | None:
         """运行子进程并报告结果：完成/失败既弹通知也写日志面板，失败列出任务名。"""
+        started_at = datetime.now().isoformat(timespec="seconds")
         rc = await self._run_in_background(*args)
         if rc == 0:
             self._notify_and_log(f"✅ 「{action_name}」运行完成", severity="information")
         else:
             db_path = str(getattr(tui, "DEFAULT_DB_PATH", DEFAULT_DB_PATH))
             failed_getter = getattr(tui, "get_recent_failed_tasks", None)
-            failed = failed_getter(db_path, limit=5) if failed_getter else []
+            failed = (
+                failed_getter(db_path, limit=5, finished_after=started_at)
+                if failed_getter else []
+            )
             detail = ""
             if failed:
                 names = "、".join(f["task_name"] for f in failed)
