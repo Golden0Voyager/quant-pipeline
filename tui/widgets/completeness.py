@@ -93,6 +93,10 @@ class DataCompletenessWidget(VerticalScroll):
         counts_fn = getattr(tui, "get_all_table_counts", get_all_table_counts)
         self._counts = await asyncio.to_thread(counts_fn, db_path, fast=True)
         self._rebuild_content()
+        self._start_exact_refresh()
+
+    def _start_exact_refresh(self) -> None:
+        """Schedule the expensive completeness scan after the initial render."""
         task = asyncio.create_task(self._refresh_exact())
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)

@@ -134,7 +134,12 @@ def get_active_stock_count(db_path: str) -> int:
             conn.close()
 
 
-def get_recent_failed_tasks(db_path: str, limit: int = 10) -> list[dict[str, str]]:
+def get_recent_failed_tasks(
+    db_path: str,
+    limit: int = 10,
+    *,
+    finished_after: str | None = None,
+) -> list[dict[str, str]]:
     """查询最近失败/降级/中止的任务审计记录（ingestion_runs，按完成时间倒序）。
 
     用于运行结束后的失败明细报告；表不存在或不可读时返回空列表。
@@ -145,15 +150,21 @@ def get_recent_failed_tasks(db_path: str, limit: int = 10) -> list[dict[str, str
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
         try:
+            where = "WHERE status IN ('failed', 'degraded', 'aborted')"
+            params: list[object] = []
+            if finished_after is not None:
+                where += " AND finished_at >= ?"
+                params.append(finished_after)
+            params.append(limit)
             rows = conn.execute(
-                """
+                f"""
                 SELECT task_name, status, finished_at, error_kind, error_message
                 FROM ingestion_runs
-                WHERE status IN ('failed', 'degraded', 'aborted')
+                {where}
                 ORDER BY finished_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         finally:
             conn.close()

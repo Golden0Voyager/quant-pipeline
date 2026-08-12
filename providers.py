@@ -12,6 +12,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -99,7 +100,8 @@ class SmartMoneyDBProvider:
 
     def _connect_for_audit(self) -> sqlite3.Connection:
         """Create an audit connection with SQLite foreign keys enabled."""
-        conn = sqlite3.connect(str(self._db.db_path), timeout=10.0)
+        conn = sqlite3.connect(str(self._db.db_path), timeout=30.0)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -680,9 +682,7 @@ class SmartMoneyDBProvider:
         )
         started_at = result.get("started_at") or meta.get("started_at") or finished_at
 
-        with self._connect_for_audit() as conn:
-            conn.execute(
-                """
+        statement = """
                 INSERT INTO ingestion_runs (
                     run_id, task_name, source, status, started_at, finished_at,
                     requested_date, data_date, attempts, fetched_rows, accepted_rows,
@@ -706,8 +706,8 @@ class SmartMoneyDBProvider:
                     error_kind = excluded.error_kind,
                     error_message = excluded.error_message,
                     metadata_json = excluded.metadata_json
-                """,
-                (
+                """
+        values = (
                     run_id,
                     result.get("task_name", ""),
                     result.get("source"),
@@ -725,9 +725,23 @@ class SmartMoneyDBProvider:
                     result.get("error_kind"),
                     result.get("error"),
                     metadata_json,
-                ),
-            )
-            conn.commit()
+        )
+        for attempt in range(3):
+            try:
+                with self._connect_for_audit() as conn:
+                    conn.execute(statement, values)
+                    conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                delay = 0.25 * (2 ** attempt)
+                logger.warning(
+                    "⚠️ ingestion_runs 写入遇到数据库锁，%.2fs 后重试 (%d/3)",
+                    delay,
+                    attempt + 1,
+                )
+                time.sleep(delay)
 
     def record_ingestion_rejection(
         self,

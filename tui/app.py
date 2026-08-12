@@ -113,13 +113,17 @@ class PipelineApp(App):
 
     async def _run_and_report(self, action_name: str, *args: str) -> int | None:
         """运行子进程并报告结果：完成/失败既弹通知也写日志面板，失败列出任务名。"""
+        started_at = datetime.now().isoformat(timespec="seconds")
         rc = await self._run_in_background(*args)
         if rc == 0:
             self._notify_and_log(f"✅ 「{action_name}」运行完成", severity="information")
         else:
             db_path = str(getattr(tui, "DEFAULT_DB_PATH", DEFAULT_DB_PATH))
             failed_getter = getattr(tui, "get_recent_failed_tasks", None)
-            failed = failed_getter(db_path, limit=5) if failed_getter else []
+            failed = (
+                failed_getter(db_path, limit=5, finished_after=started_at)
+                if failed_getter else []
+            )
             detail = ""
             if failed:
                 names = "、".join(f["task_name"] for f in failed)
@@ -133,7 +137,7 @@ class PipelineApp(App):
     async def on_mount(self) -> None:
         """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
         self.theme = self._theme_name
-        self._create_background_task(self._sync_watchlists())
+        self._start_watchlist_sync()
 
         proc_finder = getattr(tui, "find_running_pipeline_processes", None)
         processes = proc_finder() if proc_finder else []
@@ -144,6 +148,10 @@ class PipelineApp(App):
                     should_stop, processes
                 ),
             )
+
+    def _start_watchlist_sync(self) -> None:
+        """Schedule startup watchlist sync outside the Textual event handler."""
+        self._create_background_task(self._sync_watchlists())
 
     def _on_stop_confirm(self, should_stop: bool, processes: list[dict]) -> None:
         if should_stop:

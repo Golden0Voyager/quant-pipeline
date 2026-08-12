@@ -95,6 +95,32 @@ async def test_app_title(mock_find):
     async with app.run_test():
         assert app.title == "SmartMoney Pipeline Manager"
 
+
+@pytest.mark.asyncio
+async def test_run_test_mount_does_not_start_watchlist_sync():
+    """TUI rendering tests must not sync the operator's watchlist or database."""
+    app = PipelineApp()
+    with patch.object(app, "_sync_watchlists", new_callable=AsyncMock) as sync:
+        async with app.run_test():
+            pass
+
+    sync.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_test_mount_does_not_start_exact_completeness_refresh():
+    """TUI rendering tests must not count every table in the operator database."""
+    app = PipelineApp()
+    with patch(
+        "tui.widgets.completeness.DataCompletenessWidget._refresh_exact",
+        new_callable=AsyncMock,
+    ) as refresh:
+        async with app.run_test():
+            pass
+
+    refresh.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_widgets_present():
     from textual.widgets import Footer
@@ -1080,10 +1106,32 @@ async def test_action_run_reconcile():
 async def test_on_mount_no_processes():
     app = PipelineApp()
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
-         patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg:
+         patch.object(app, "_start_watchlist_sync") as mock_sync:
         await app.on_mount()
         # 没有后台进程时仍应调度自选股同步
-        mock_bg.assert_called_once()
+        mock_sync.assert_called_once()
+
+
+@pytest.mark.allow_startup_watchlist_sync
+def test_start_watchlist_sync_schedules_background_work():
+    app = PipelineApp()
+    with patch.object(app, "_create_background_task", side_effect=_close_coro) as background:
+        app._start_watchlist_sync()
+
+    background.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_startup_watchlist_sync
+async def test_start_exact_completeness_refresh_schedules_background_work():
+    from tui.widgets.completeness import DataCompletenessWidget
+
+    widget = DataCompletenessWidget()
+    widget._bg_tasks = set()
+    with patch("asyncio.create_task", side_effect=_close_coro) as create_task:
+        widget._start_exact_refresh()
+
+    create_task.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1979,6 +2027,33 @@ def test_get_recent_failed_tasks_filters_and_orders(tmp_path):
     assert result[0]["error_message"] == "partial"
 
 
+def test_get_recent_failed_tasks_excludes_failures_before_command_start(tmp_path):
+    """单任务失败详情不得混入本次命令之前的旧审计记录。"""
+    from tui import get_recent_failed_tasks
+
+    db_file = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE ingestion_runs (run_id TEXT PRIMARY KEY, task_name TEXT,"
+        " status TEXT, finished_at TEXT, error_kind TEXT, error_message TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO ingestion_runs VALUES (?,?,?,?,?,?)",
+        [
+            ("old", "update_fundamentals", "failed", "2026-08-11T21:13:17", "", "old"),
+            ("new", "update_chip_distribution_em", "failed", "2026-08-11T22:29:57", "", "new"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    result = get_recent_failed_tasks(
+        str(db_file), finished_after="2026-08-11T22:00:00"
+    )
+
+    assert [row["task_name"] for row in result] == ["update_chip_distribution_em"]
+
+
 def test_get_recent_failed_tasks_missing_table(tmp_path):
     from tui import get_recent_failed_tasks
     db_file = tmp_path / "t.db"
@@ -2034,6 +2109,19 @@ async def test_run_and_report_failure_lists_failed_tasks():
         msg = mock_nal.call_args.args[0]
         assert "update_bars" in msg
         assert mock_nal.call_args.kwargs.get("severity") == "error"
+
+
+@pytest.mark.asyncio
+async def test_run_and_report_scopes_failed_tasks_to_command_start():
+    """TUI 查询失败审计时必须传入本次命令的开始时间。"""
+    app = PipelineApp()
+    async with app.run_test():
+        with patch.object(app, "_run_in_background", new=AsyncMock(return_value=1)), \
+             patch("tui.get_recent_failed_tasks", return_value=[]) as failed_getter, \
+             patch.object(app, "_notify_and_log"):
+            await app._run_and_report("单任务: update_chip_distribution_em", "cmd")
+
+    assert failed_getter.call_args.kwargs["finished_after"]
 
 
 @pytest.mark.asyncio
@@ -2200,4 +2288,3 @@ def test_db_queries_cache_and_invalidation(tmp_path):
     assert get_active_stock_count(str(db_file)) == 2
     counts2 = get_all_table_counts(str(db_file), fast=False)
     assert counts2.get("stock_list") == 2
-
