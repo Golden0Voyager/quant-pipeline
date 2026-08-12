@@ -95,6 +95,32 @@ async def test_app_title(mock_find):
     async with app.run_test():
         assert app.title == "SmartMoney Pipeline Manager"
 
+
+@pytest.mark.asyncio
+async def test_run_test_mount_does_not_start_watchlist_sync():
+    """TUI rendering tests must not sync the operator's watchlist or database."""
+    app = PipelineApp()
+    with patch.object(app, "_sync_watchlists", new_callable=AsyncMock) as sync:
+        async with app.run_test():
+            pass
+
+    sync.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_test_mount_does_not_start_exact_completeness_refresh():
+    """TUI rendering tests must not count every table in the operator database."""
+    app = PipelineApp()
+    with patch(
+        "tui.widgets.completeness.DataCompletenessWidget._refresh_exact",
+        new_callable=AsyncMock,
+    ) as refresh:
+        async with app.run_test():
+            pass
+
+    refresh.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_widgets_present():
     from textual.widgets import Footer
@@ -1080,10 +1106,32 @@ async def test_action_run_reconcile():
 async def test_on_mount_no_processes():
     app = PipelineApp()
     with patch("tui.find_running_pipeline_processes", return_value=[]), \
-         patch.object(app, "_create_background_task", side_effect=_close_coro) as mock_bg:
+         patch.object(app, "_start_watchlist_sync") as mock_sync:
         await app.on_mount()
         # 没有后台进程时仍应调度自选股同步
-        mock_bg.assert_called_once()
+        mock_sync.assert_called_once()
+
+
+@pytest.mark.allow_startup_watchlist_sync
+def test_start_watchlist_sync_schedules_background_work():
+    app = PipelineApp()
+    with patch.object(app, "_create_background_task", side_effect=_close_coro) as background:
+        app._start_watchlist_sync()
+
+    background.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_startup_watchlist_sync
+async def test_start_exact_completeness_refresh_schedules_background_work():
+    from tui.widgets.completeness import DataCompletenessWidget
+
+    widget = DataCompletenessWidget()
+    widget._bg_tasks = set()
+    with patch("asyncio.create_task", side_effect=_close_coro) as create_task:
+        widget._start_exact_refresh()
+
+    create_task.assert_called_once()
 
 
 @pytest.mark.asyncio

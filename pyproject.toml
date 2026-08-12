@@ -49,6 +49,9 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "allow_startup_watchlist_sync: exercise the production TUI startup sync scheduler",
+]
 
 [tool.coverage.report]
 # 覆盖率门槛 85%。需为低覆盖模块（网络抓取 / 期货 / 指标计算等）

@@ -137,7 +137,7 @@ class PipelineApp(App):
     async def on_mount(self) -> None:
         """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
         self.theme = self._theme_name
-        self._create_background_task(self._sync_watchlists())
+        self._start_watchlist_sync()
 
         proc_finder = getattr(tui, "find_running_pipeline_processes", None)
         processes = proc_finder() if proc_finder else []
@@ -148,6 +148,10 @@ class PipelineApp(App):
                     should_stop, processes
                 ),
             )
+
+    def _start_watchlist_sync(self) -> None:
+        """Schedule startup watchlist sync outside the Textual event handler."""
+        self._create_background_task(self._sync_watchlists())
 
     def _on_stop_confirm(self, should_stop: bool, processes: list[dict]) -> None:
         if should_stop:

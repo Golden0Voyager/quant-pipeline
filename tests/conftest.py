@@ -66,3 +66,18 @@ def _fast_default_source_client(monkeypatch):
     source_client.reset_default_client()
     yield
     source_client.reset_default_client()
+
+
+@pytest.fixture(autouse=True)
+def _skip_watchlist_sync_on_tui_test_mount(monkeypatch, request):
+    """Keep Textual mount tests from touching the operator's watchlist database."""
+    if request.node.get_closest_marker("allow_startup_watchlist_sync"):
+        yield
+        return
+
+    from tui.app import PipelineApp
+    from tui.widgets.completeness import DataCompletenessWidget
+
+    monkeypatch.setattr(PipelineApp, "_start_watchlist_sync", lambda self: None)
+    monkeypatch.setattr(DataCompletenessWidget, "_start_exact_refresh", lambda self: None)
+    yield
