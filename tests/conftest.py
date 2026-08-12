@@ -6,8 +6,11 @@ import os
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="quant_pipeline_tests_"))
 _TEST_DB_PATH = _TEST_ROOT / "quant_core.db"
@@ -43,3 +46,23 @@ _mocks = {
 _patcher = patch.dict("sys.modules", _mocks)
 _patcher.start()
 atexit.register(_patcher.stop)
+
+
+@pytest.fixture(autouse=True)
+def _fast_default_source_client(monkeypatch):
+    """Keep mock-only tests isolated from production source throttling."""
+    import core.source_client as source_client
+
+    policies = {
+        name: replace(
+            policy,
+            min_interval_seconds=0,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+        )
+        for name, policy in source_client.POLICIES.items()
+    }
+    monkeypatch.setattr(source_client, "POLICIES", policies)
+    source_client.reset_default_client()
+    yield
+    source_client.reset_default_client()
