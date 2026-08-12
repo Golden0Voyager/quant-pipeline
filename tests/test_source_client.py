@@ -17,6 +17,7 @@ from core.source_client import (
     SourceClient,
     SourcePolicy,
     SourceResponse,
+    get_default_client,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -73,6 +74,10 @@ class TestSourcePolicy:
                          circuit_failures=2, circuit_cooldown_seconds=60.0)
         assert p.circuit_failures == 2
         assert p.circuit_cooldown_seconds == 60.0
+
+    def test_test_default_client_has_no_network_wait(self) -> None:
+        """Mock-only tests must not inherit production source throttling."""
+        assert get_default_client()._policies["eastmoney"].min_interval_seconds == 0
 
 
 # ── FetchMetadata ────────────────────────────────────────────────────────
