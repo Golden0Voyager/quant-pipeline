@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from tasks.financial_history import (
     _closed_report_periods,
+    _cninfo_period,
     _minimum_market_coverage,
     _normalize_code,
     discover_missing_financial_periods,
@@ -32,6 +33,29 @@ class TestNormalizeCode:
 
     def test_short_code(self) -> None:
         assert _normalize_code("1") == "000001"
+
+
+class TestCninfoPeriod:
+    """`_cninfo_period` 把数字期次转成巨潮资讯接口需要的中文标签。
+
+    回归保护：早期直接把 ``"20260630"`` 传给 ``stock_report_disclosure``
+    会触发 ``KeyError('20260630')``，导致整个财务历史更新失败。
+    """
+
+    def test_q1(self) -> None:
+        assert _cninfo_period("20260331") == "2026一季"
+
+    def test_interim(self) -> None:
+        assert _cninfo_period("20260630") == "2026半年报"
+
+    def test_q3(self) -> None:
+        assert _cninfo_period("20260930") == "2026三季"
+
+    def test_annual(self) -> None:
+        assert _cninfo_period("20251231") == "2025年报"
+
+    def test_unknown_mmdd_falls_back_to_annual(self) -> None:
+        assert _cninfo_period("20269999") == "2026年报"
 
 
 class TestClosedReportPeriods:

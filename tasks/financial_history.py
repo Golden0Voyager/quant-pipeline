@@ -125,9 +125,28 @@ def _fetch_xjll(period: str) -> pd.DataFrame:
     return df if df is not None and not df.empty else pd.DataFrame()
 
 
+def _cninfo_period(period: str) -> str:
+    """将数字期次 ``"20260630"`` 转为巨潮资讯披露接口需要的中文标签。
+
+    akshare ``stock_report_disclosure`` 内部按 ``{year}一季/半年报/三季/年报``
+    查表，传入数字期次会触发 ``KeyError``。
+    """
+    year, mmdd = period[:4], period[4:]
+    return {
+        "0331": f"{year}一季",
+        "0630": f"{year}半年报",
+        "0930": f"{year}三季",
+        "1231": f"{year}年报",
+    }.get(mmdd, f"{year}年报")
+
+
 def _fetch_disclosure_dates(period: str) -> pd.DataFrame:
-    """获取披露日期表（stock_report_disclosure）。"""
-    df = ak.stock_report_disclosure(market="沪深京", period=period)
+    """获取披露日期表（stock_report_disclosure）。
+
+    akshare 的 ``stock_report_disclosure`` 需要中文期次标签（如 ``"2026半年报"``）
+    而非数字格式 ``"20260630"``，故先经 :func:`_cninfo_period` 转换。
+    """
+    df = ak.stock_report_disclosure(market="沪深京", period=_cninfo_period(period))
     return df if df is not None and not df.empty else pd.DataFrame()
 
 
@@ -154,13 +173,18 @@ def _merge_financial_period(period: str) -> list[dict]:
     lrb = _fetch_lrb(period)
     zcfz = _fetch_zcfz(period)
     xjll = _fetch_xjll(period)
-    disc = _fetch_disclosure_dates(period)
+    # 披露日接口可能临时失败或期次过老无数据，失败不影响主流程（用业绩报表兜底）
+    try:
+        disc = _fetch_disclosure_dates(period)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"⚠️ {period} 披露日期获取失败，改用业绩报表公告日: {exc}")
+        disc = pd.DataFrame()
 
     if yjbb.empty:
         logger.warning(f"⚠️ {period} 业绩报表为空，跳过")
         return []
 
-    # 归一化股票代码并建立披露日期字典
+    # 披露日期字典：优先巨潮资讯「实际披露日」，缺省回退业绩报表「最新公告日期」
     disc_map: dict[str, str] = {}
     if not disc.empty:
         for _, row in disc.iterrows():
@@ -168,6 +192,15 @@ def _merge_financial_period(period: str) -> list[dict]:
             pub_date = str(row.get("公告日期", "") or "").strip()[:10]
             if code and pub_date:
                 disc_map[code] = pub_date
+
+    # 业绩报表自带「最新公告日期」，作为披露日缺失时的兜底（覆盖非最近四期）
+    yjbb_pub_map: dict[str, str] = {}
+    if not yjbb.empty:
+        for _, row in yjbb.iterrows():
+            code = _normalize_code(row.get("股票代码", ""))
+            pub_date = str(row.get("最新公告日期", "") or "").strip()[:10]
+            if code and pub_date:
+                yjbb_pub_map.setdefault(code, pub_date)
 
     # 从 yjbb 开始，依次 merge
     merged = yjbb.copy()
@@ -183,7 +216,7 @@ def _merge_financial_period(period: str) -> list[dict]:
         code = _normalize_code(row.get("股票代码", ""))
         if not code:
             continue
-        pub_date = disc_map.get(code, "")
+        pub_date = disc_map.get(code) or yjbb_pub_map.get(code, "")
         if not pub_date:
             continue
 
