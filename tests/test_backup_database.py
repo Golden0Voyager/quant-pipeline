@@ -109,3 +109,25 @@ def test_main_prints_machine_readable_report(
     assert payload["source_rows"] == payload["backup_rows"] == 1
     assert payload["quick_check"] == "ok"
     assert payload["sha256"]
+
+
+def test_main_without_args_uses_env_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """monthly_repair 以「无参数」方式调用时，脚本不应因 argparse 必填项报错。
+
+    用环境变量把默认值指向临时库/目录，避免触碰生产库（~/Code/quant_data/quant_core.db）。
+    """
+    source = tmp_path / "quant_core.db"
+    _create_database(source)
+    destination_dir = tmp_path / "backups"
+    monkeypatch.setenv("QUANT_DB_PATH", str(source))
+    monkeypatch.setenv("QUANT_BACKUP_DIR", str(destination_dir))
+
+    exit_code = backup_module.main([])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["source_rows"] == payload["backup_rows"] == 1
+    assert payload["quick_check"] == "ok"
+    assert payload["sha256"]

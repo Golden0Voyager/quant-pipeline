@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -120,13 +121,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WAL-safe SQLite backup gate")
     parser.add_argument(
         "--db",
-        required=True,
-        help="Path to source SQLite database",
+        default=os.getenv(
+            "QUANT_DB_PATH",
+            str(Path.home() / "Code" / "quant_data" / "quant_core.db"),
+        ),
+        help="Path to source SQLite database "
+        "(default: $QUANT_DB_PATH or ~/Code/quant_data/quant_core.db)",
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
-        help="Directory to write the backup to",
+        default=os.getenv(
+            "QUANT_BACKUP_DIR",
+            str(Path.home() / "Code" / "quant_data" / "backups"),
+        ),
+        help="Directory to write the backup to "
+        "(default: $QUANT_BACKUP_DIR or ~/Code/quant_data/backups)",
     )
     args = parser.parse_args(argv)
 
