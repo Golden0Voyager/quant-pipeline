@@ -229,7 +229,10 @@ def update_industry(db: DatabaseInterface) -> dict:
 
     if not rows:
         logger.info("✅ 所有股票已有行业分类")
-        return {"saved": 0, "total": 0}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为
+        # "zero rows without explanation" 失败（2026-08-24 月度修复实录）
+        return {"skipped": True, "reason": "all stocks already classified",
+                "saved": 0, "total": 0}
 
     total = len(rows)
     logger.info(f"📊 共 {total} 只股票需要更新行业")
