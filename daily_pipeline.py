@@ -732,18 +732,26 @@ _REPAIR_CHAIN: tuple[str, ...] = (
 
 
 def _run_repair_script(script: str) -> dict:
-    """以子进程运行 scripts/ 下的修复脚本，返回 safe_task 兼容结果。"""
+    """以子进程运行 scripts/ 下的修复脚本，返回 safe_task 兼容结果。
+
+    父管道已持有全局 ProcessLock，通过环境变量告知子脚本跳过重复加锁，
+    否则 reconcile_with_akshare.py 等自带单实例保护的脚本必然加锁失败退出。
+    """
     path = Path(__file__).parent / "scripts" / script
+    env = {**os.environ, "QUANT_PIPELINE_LOCK_HELD": "1"}
     try:
         proc = subprocess.run(
             [sys.executable, str(path)],
-            capture_output=True, text=True, timeout=3600,
+            capture_output=True, text=True, timeout=3600, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
+        logger.error(f"❌ 修复脚本 {script} 启动失败: {e}")
         return {"status": "failed", "error": f"{script}: {e}"}
     if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "(无输出)")[-500:]
+        logger.error(f"❌ 修复脚本失败: {script} exited {proc.returncode}: {detail}")
         return {"status": "failed",
-                "error": f"{script} exited {proc.returncode}: {proc.stderr[-500:]}"}
+                "error": f"{script} exited {proc.returncode}: {detail}"}
     return {"status": "ok", "output_tail": proc.stdout[-500:]}
 
 
