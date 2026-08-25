@@ -3251,6 +3251,22 @@ class TestUpdateIndustry:
         with patch("daily_pipeline.logger"):
             r = daily_pipeline.update_industry(db)
         assert r["total"] == 0
+        # 零行属正常结果：显式 skipped 标记，避免被契约误判为 failed
+        assert r["skipped"] is True
+
+    def test_all_have_industry_normalizes_to_no_data(self, tmp_path: Path):
+        """2026-08-24 月度修复实录：无待更新股票曾被误判为 zero-rows failed。"""
+        db = MagicMock()
+        db.db_path = str(tmp_path / "test.db")
+        conn = sqlite3.connect(db.db_path)
+        conn.execute("CREATE TABLE stock_list (code TEXT, market TEXT, industry TEXT)")
+        conn.execute("INSERT INTO stock_list VALUES ('000001', 'sz', '银行')")
+        conn.commit()
+        conn.close()
+        with patch("daily_pipeline.logger"):
+            r = daily_pipeline.update_industry(db)
+        result = normalize_task_result("update_industry", r)
+        assert result.status.value == "no_data"
 
     def test_f10_returns_industry(self, tmp_path: Path):
         db = MagicMock()
