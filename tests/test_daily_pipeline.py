@@ -4050,3 +4050,33 @@ class TestMonthlyRepair:
         assert scripts == ["backup_database.py", "reconcile_with_akshare.py",
                            "validate_and_vacuum.py"]
         assert results["crashed"] is True
+
+
+class TestRunRepairScript:
+    """_run_repair_script：环境变量传递与失败详情落盘。"""
+
+    def test_passes_lock_held_env_to_subprocess(self):
+        captured: dict = {}
+        proc = MagicMock(returncode=0, stdout="done", stderr="")
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return proc
+
+        with patch("daily_pipeline.subprocess.run", side_effect=fake_run):
+            result = daily_pipeline._run_repair_script("reconcile_with_akshare.py")
+
+        assert result == {"status": "ok", "output_tail": "done"}
+        # 父管道已持锁，子脚本据此跳过重复加锁
+        assert captured["env"]["QUANT_PIPELINE_LOCK_HELD"] == "1"
+
+    def test_failure_logs_error_detail(self):
+        proc = MagicMock(returncode=1, stdout="", stderr="boom traceback")
+        with patch("daily_pipeline.subprocess.run", return_value=proc), \
+             patch("daily_pipeline.logger") as mock_logger:
+            result = daily_pipeline._run_repair_script("reconcile_with_akshare.py")
+
+        assert result["status"] == "failed"
+        assert "boom traceback" in result["error"]
+        mock_logger.error.assert_called_once()
+        assert "boom traceback" in mock_logger.error.call_args.args[0]
