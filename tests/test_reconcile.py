@@ -401,6 +401,21 @@ class TestMain:
              patch("scripts.reconcile_with_akshare.logger"):
             rwa.main()
 
+    def test_skip_process_lock_when_pipeline_holds_it(self, tmp_path: Path):
+        """monthly_repair 拉起时父进程已持有全局锁，子进程必须跳过加锁。"""
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
+        conn.commit()
+        conn.close()
+        with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
+             patch.dict(os.environ, {"QUANT_PIPELINE_LOCK_HELD": "1"}), \
+             patch("scripts.reconcile_with_akshare.ProcessLock.acquire") as mock_acquire, \
+             patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
+             patch("scripts.reconcile_with_akshare.logger"):
+            rwa.main()
+        mock_acquire.assert_not_called()
+
     def test_retry_failed_with_symbols(self, tmp_path: Path):
         db_path = tmp_path / "test.db"
         conn = sqlite3.connect(str(db_path))

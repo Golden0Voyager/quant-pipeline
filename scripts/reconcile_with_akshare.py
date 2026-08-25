@@ -933,13 +933,16 @@ def main():
         parser.error("--workers 必须 >= 1")
     os.nice(10)
 
-    # 单实例保护（atexit 保证 exit/return/异常时也释放）
-    try:
-        ProcessLock.acquire()
-    except RuntimeError as e:
-        logger.error("❌ 另一个 reconcile 实例正在运行: %s", e)
-        sys.exit(1)
-    atexit.register(ProcessLock.release)
+    # 单实例保护（atexit 保证 exit/return/异常时也释放）。
+    # 由 daily_pipeline monthly_repair 拉起时父进程已持有全局锁，
+    # 此时跳过加锁，否则子进程必然加锁失败而退出。
+    if os.getenv("QUANT_PIPELINE_LOCK_HELD") != "1":
+        try:
+            ProcessLock.acquire()
+        except RuntimeError as e:
+            logger.error("❌ 另一个 reconcile 实例正在运行: %s", e)
+            sys.exit(1)
+        atexit.register(ProcessLock.release)
 
     conn = sqlite3.connect(args.db_path, timeout=60.0)
     conn.execute("PRAGMA journal_mode=WAL")
