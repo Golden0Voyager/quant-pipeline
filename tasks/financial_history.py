@@ -288,7 +288,11 @@ def update_financial_history(
 
     if not periods:
         logger.info("✅ 所有报告期数据已覆盖，无需更新")
-        return {"saved": 0}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为
+        # "zero rows without explanation" 失败（2026-08-25 全量运行实录，
+        # 与 update_industry 同类问题）
+        return {"skipped": True, "reason": "all financial periods covered",
+                "saved": 0}
 
     logger.info(f"📋 待更新报告期: {periods}")
     total_saved = 0
