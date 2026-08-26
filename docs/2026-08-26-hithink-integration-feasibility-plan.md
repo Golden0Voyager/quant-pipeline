@@ -12,21 +12,31 @@
 
 ## 二、现状架构与插入点
 
+> ⚠️ 实施修正（2026-08-26）：原稿假设日线降级链由 `call_with_fallback` 组装，
+> 实测不符——A 股日线多源链（东财→新浪→腾讯→雪球）是 quant_hunter
+> `DataLoader.get_daily_bars` 内的手写 try/except，`call_with_fallback` 仅被
+> `source_client.py` 自身与测试使用。实际插入点为 **providers.py 门面层**：
+> `SmartMoneyLoaderProvider.get_daily_bars` / `incremental_update` 在 DataLoader
+> 全链失败（空结果/无新行）后追加 hithink 兜底，熔断/限流/退避复用
+> `core/source_client.py` 的 `SourceClient`（POLICIES 新增 `hithink` 条目）。
+> 同理，`_canary_probe` 只是可用性探针、不含对账容差，复权口径对账改由
+> 实施前 spike + 入库前 sanity check 承担（见文末实施记录）。
+
 ```
 core/source_client.py   ← SourceClient：熔断器(CircuitBreaker) + 限流器(_RateLimiter)
                           + call_with_fallback(primary, fallback_sources=[...])
+providers.py            ← SmartMoneyLoaderProvider 门面层（hithink 兜底实际插入点）
 tasks/bars.py           ← 日线任务编排：停牌预检 / canary 探测(_canary_probe) / checkpoint / retry 队列
-providers.py            ← DataLoader 门面层
 tasks/refresh_adapters  ← 各任务刷新适配器
 ```
 
 改造后日线降级链：
 
 ```
-东财 → 新浪 → 腾讯 → 🆕 同花顺官方API(hithink) → 雪球(最后兜底)
+DataLoader 内部链：东财 → 新浪 → 腾讯 → 雪球
+        ↓ 全链失败（空结果 / 增量无新行）
+providers.py 门面层：🆕 hithink 官方API 兜底（写库 data_source='hithink'）
 ```
-
-只需在 loader 组装 `call_with_fallback` 的 `fallback_sources` 列表时插入 `(source_name="hithink", operation=fetch_fn)` 一项；熔断、限流、指数退避全部复用现有机制。
 
 ## 三、新模块设计：`core/source_hithink.py`
 
@@ -95,3 +105,49 @@ class HithinkClient:
 1. **轮换 API Key**（旧 Key 已暴露），新 Key 写入 `.env`：`HITHINK_FINANCE_API_KEY=<new>`
 2. 确认公测期账号的数据权限覆盖 `prices/historical` 的 qfq 输出
 3. 建议在管线稳定窗口（非交易日）合入，避开每日 17:30 定时运行
+
+---
+
+## 附：实施记录（2026-08-26，P0 + P1 已落地）
+
+### 落地内容
+
+- **P0**：`core/source_hithink.py`（HithinkClient + `fetch_daily_bars`，约 200 行）；
+  `core/source_client.py` POLICIES 注册 `hithink`（min_interval 0.5s ≈ QPS 2，3 次尝试）；
+  `providers.py` `SmartMoneyLoaderProvider` 门面层兜底（`get_daily_bars` 空结果触发，
+  `incremental_update` 无新行时按缺口区间补数，合并前归一化 `trade_date`/`turnover_rate`
+  列，避免 2026-07 双列写 NULL 事故复发）；`tests/test_source_hithink.py` 23 用例。
+- **P1**：`scripts/backfill_from_hithink_dump.py`（下载 10 年日 K + 复权因子 Parquet，
+  本地算前复权，回补历史不足 6 年的股票，`--dry-run`/`--symbols`）+ `pyarrow` 依赖
+  + `tests/test_backfill_hithink_dump.py` 11 用例。定位为手动回补工具，
+  **未串入** `_REPAIR_CHAIN` 月度修复链（避免无人值守的全量锚点漂移覆写，观察后再定）。
+
+### Spike 实测结论
+
+- **复权口径**：hithink `adjust=forward` 与库内 akshare qfq 最新段完全一致
+  （10 票 × 10 日 close/volume/amount 全对）；**除权事件窗口内历史段有偏差**
+  （601899 紫金矿业 2026-08-13~20 差 ~1.3%，最新日一致）。根因：hithink 官方
+  前复权为**等差（减法）**口径，akshare 为**等比（乘法）**口径。P0 兜底只写增量
+  当日数据，风险可控；P1 回补脚本采用等比公式与库内数据同族。
+- **北交所**：仅 920 前缀受支持（920001.BJ ✅ code=0）；430047.BJ / 830799.BJ
+  均报 `code=1002 Unknown thscode` → 43/83/87 老 BJ 代码在 `to_thscode` 中显式跳过。
+- **market-dumps**：三个 download-url 端点（`daily-k` 10 年全量 161MB / `daily-k-10d`
+  / `adjustment-factors` 288KB）均可用，预签名 URL 300 秒有效。
+- **P1 qfq 验证**：脚本等比复权 vs hithink 官方 forward（等差）近 1 年逐日比对，
+  601899/600519/000333 最大偏差 1.17%/0.55%/0.58%（结构性口径差，预期内）；
+  最近 2 个月及最新交易日偏差 0.000%。
+
+### DoD 核对
+
+- [x] mock 全链失败时 hithink 兜底返回标准化 DataFrame（test_source_hithink.py）
+- [x] 写库 `data_source='hithink'` 可溯源（df 列携带，database.py 自动取列值）
+- [x] 4001 → 转 `RuntimeError("HTTP 429")` 走 SourceClient 退避；2003 → 进程内停用
+- [x] 现有测试套件全绿（1828 + 新增 34 全过）
+- [ ] 真实环境运行一晚验证（合入后观察；hithink 仅在主链故障时触发，正常夜晚可能 0 次，属预期）
+- [x] 北交所结论已写入本文件（仅 920）
+
+### 遗留事项
+
+- API Key 轮换后需同步更新 `quant_pipeline/.env`（当前复用 quant_agents 的 Key 已可工作）
+- P2（龙虎榜/涨停池/估值交叉校验）未实施；quant_agents 实测龙虎榜日期参数有坑
+  （非交易日报 1002、`trade_date` 被静默忽略须用 `date_ms`），替换类工作建议另行立项
