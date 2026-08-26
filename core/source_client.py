@@ -472,4 +472,11 @@ POLICIES: dict[str, SourcePolicy] = {
         base_delay_seconds=1, max_delay_seconds=10,
         min_interval_seconds=0.5,
     ),
+    # 同花顺官方 Financial-API（公测期）：QPS 限 2，4001 走指数退避
+    "hithink": SourcePolicy(
+        source="hithink", host="fuyao.aicubes.cn",
+        timeout_seconds=15, max_attempts=3,
+        base_delay_seconds=1, max_delay_seconds=30,
+        min_interval_seconds=0.5,
+    ),
 }
