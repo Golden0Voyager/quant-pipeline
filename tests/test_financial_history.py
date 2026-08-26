@@ -129,3 +129,18 @@ class TestUpdateFinancialHistory:
             result = update_financial_history(db, periods=[])
         assert result["saved"] == 0
         assert result.get("error") is None
+
+    def test_no_periods_skipped_not_failed(self) -> None:
+        """合法零行必须带 skipped 标记，避免被契约误判为 failed。
+
+        回归保护：2026-08-25 全量运行中"所有报告期数据已覆盖，无需更新"
+        被结果契约误报为 zero rows without explanation。
+        """
+        from core.task_result import normalize_task_result
+
+        db = MagicMock()
+        with patch("tasks.financial_history.ak", object()):
+            result = update_financial_history(db, periods=[])
+        assert result["skipped"] is True
+        normalized = normalize_task_result("update_financial_history", result)
+        assert normalized.status.value == "no_data"
