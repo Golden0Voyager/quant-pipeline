@@ -2178,10 +2178,39 @@ class SmartMoneyDBProvider:
 # ===========================================================================
 
 class SmartMoneyLoaderProvider:
-    """基于 DataLoader 的数据加载 provider。"""
+    """基于 DataLoader 的数据加载 provider。
+
+    日线兜底链：DataLoader 内部链（东财 → 新浪 → 腾讯 → 雪球）失败后，
+    由本层追加 hithink（同花顺官方 API，core/source_hithink.py）兜底。
+    hithink 未配置 Key 或熔断时静默跳过，行为等同接入前。
+    """
 
     def __init__(self, use_cache: bool = True):
         self._loader = DataLoader(use_cache=use_cache)
+
+    def _hithink_fallback(
+        self,
+        symbol: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """东财/新浪/腾讯/雪球全链失败后的 hithink 兜底取数。"""
+        from core import source_hithink
+        from core.source_client import get_default_client
+
+        client = source_hithink.get_hithink_client()
+        if not client.available:
+            return pd.DataFrame()
+        resp = get_default_client().call(
+            "hithink", client.fetch_daily_bars, symbol,
+            start_date=start_date, end_date=end_date,
+        )
+        if resp.success and resp.data is not None and not resp.data.empty:
+            logger.info(f"✅ {symbol} hithink 兜底成功 ({len(resp.data)} 条)")
+            return resp.data
+        if not resp.success:
+            logger.warning(f"⚠️ {symbol} hithink 兜底失败: {resp.metadata.error}")
+        return pd.DataFrame()
 
     def get_daily_bars(
         self,
@@ -2189,14 +2218,51 @@ class SmartMoneyLoaderProvider:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame:
-        return self._loader.get_daily_bars(symbol, start_date, end_date)
+        df = self._loader.get_daily_bars(symbol, start_date, end_date)
+        if df is None or df.empty:
+            hithink_df = self._hithink_fallback(symbol, start_date, end_date)
+            if not hithink_df.empty:
+                return hithink_df
+        return df
 
     def incremental_update(
         self,
         symbol: str,
         existing_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        return self._loader.incremental_update(symbol, existing_df)
+        df = self._loader.incremental_update(symbol, existing_df)
+        if existing_df is None or existing_df.empty:
+            return df
+        if df is not None and len(df) > len(existing_df):
+            return df
+        # 全链未取到新数据：用 hithink 补齐缺口（最后一日的次日起至今天）
+        date_col = "trade_date" if "trade_date" in existing_df.columns else "date"
+        if date_col not in existing_df.columns:
+            return df
+        last_date = pd.to_datetime(existing_df[date_col]).max()
+        today = pd.Timestamp.now().normalize()
+        if pd.isna(last_date) or last_date >= today:
+            return df
+        hithink_df = self._hithink_fallback(
+            symbol,
+            start_date=(last_date + pd.Timedelta(days=1)).strftime("%Y%m%d"),
+            end_date=today.strftime("%Y%m%d"),
+        )
+        if hithink_df.empty:
+            return df
+        # 归一化既有数据到 loader 列规范（trade_date→date、turnover_rate→turnover）
+        # 再合并去重，与 DataLoader.incremental_update 的合并语义保持一致
+        base = existing_df.copy()
+        if "trade_date" in base.columns and "date" not in base.columns:
+            base = base.rename(columns={"trade_date": "date"})
+        if "turnover_rate" in base.columns and "turnover" not in base.columns:
+            base = base.rename(columns={"turnover_rate": "turnover"})
+        base["date"] = pd.to_datetime(base["date"])
+        merged = pd.concat([base, hithink_df], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["date"], keep="last")
+        merged = merged.sort_values("date").reset_index(drop=True)
+        logger.info(f"✅ {symbol} hithink 增量兜底成功 (新增 {len(hithink_df)} 条)")
+        return merged
 
     def get_market_valuation(self) -> pd.DataFrame:
         return self._loader.get_market_valuation()
