@@ -110,6 +110,7 @@ AkShare (Sina) ──► daily_pipeline.py ──► quant_core.db
 - **Package manager**: `uv` only (no pip)
 - **Run scripts**: `uv run python <script>.py`
 - **Data source priority**: AkShare > silence (no yfinance fallback for writes)
+- **HiThink fallback**: 同花顺官方 API（`core/source_hithink.py`，env `HITHINK_FINANCE_API_KEY`）作为日线最后兜底源，由 `providers.SmartMoneyLoaderProvider` 在 DataLoader 全链失败后触发，写库 `data_source='hithink'`；北交所仅支持 920 前缀。历史回补可用 `scripts/backfill_from_hithink_dump.py`（market-dumps Parquet 批量灌库）
 - **Market prefixes**: `6`/`9`→sh, `0`/`2`/`3`→sz, `4`/`8`/`920`→bj
 - **Beijing stocks**: Skipped by default (`INCLUDE_BJ=1` to include)
 - **Disciplined codebase**: ruff + mypy + pytest CI gate
