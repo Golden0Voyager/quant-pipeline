@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from typing import Any
 
 import pandas as pd
 import requests
@@ -92,7 +93,7 @@ class HithinkClient:
         """Key 已配置且未因权限错误停用。"""
         return bool(self._api_key) and not self._disabled
 
-    def _get(self, path: str, **params: object) -> dict:
+    def _get(self, path: str, **params: Any) -> dict:
         if not self._api_key:
             raise HithinkError(f"{ENV_API_KEY} 未配置，hithink 源不可用")
         if self._disabled:
