@@ -987,8 +987,10 @@ class TestSuspendedPrecheck:
         db.db_path = db_path
         return db
 
+    PRECHECK_DAYS = ["2026-07-24", "2026-07-23"]  # expected_latest + 前一交易日
+
     def test_detects_suspended_via_xueqiu_status(self, tmp_path: Path):
-        """落后股中雪球 status==2 的被识别为停牌。"""
+        """断更 ≥2 交易日、雪球 status==2 的被识别为停牌。"""
         import sys
 
         from tasks.bars import _detect_suspended_symbols
@@ -1001,11 +1003,12 @@ class TestSuspendedPrecheck:
         ak = MagicMock()
         ak.stock_tfp_em.return_value = pd.DataFrame()  # 东财无数据
         with patch("tasks.bars.ak", ak), \
+             patch("tasks.bars.get_recent_trading_days", return_value=self.PRECHECK_DAYS), \
              patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             result = _detect_suspended_symbols(db, "2026-07-24")
 
         assert result == {"002036"}
-        # 只查了落后股（000001 已最新，不在查询列表）
+        # 只查了候选股（000001 已最新，不在查询列表）
         mock_xq.get_batch_quotes.assert_called_once_with(["002036"])
 
     def test_tfp_covers_beijing_and_merges(self, tmp_path: Path):
@@ -1021,6 +1024,7 @@ class TestSuspendedPrecheck:
         # 带市场前缀的变体也应被归一为 6 位码（防御 [-6:] 截取）
         mock_xq.get_batch_quotes.return_value = [{"code": "SZ300242", "status": 2}]
         with patch("tasks.bars.ak", ak), \
+             patch("tasks.bars.get_recent_trading_days", return_value=self.PRECHECK_DAYS), \
              patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             result = _detect_suspended_symbols(db, "2026-07-24")
 
@@ -1028,17 +1032,49 @@ class TestSuspendedPrecheck:
         # 北交所股不会送入雪球查询
         mock_xq.get_batch_quotes.assert_called_once_with(["300242"])
 
-    def test_skips_when_too_many_lagging(self, tmp_path: Path):
-        """落后股超过阈值（正常交易日全市场落后）→ 不发起任何网络请求。"""
+    def test_skips_when_only_market_wide_one_day_lag(self, tmp_path: Path):
+        """全市场仅缺最新交易日 1 根 K 线（收盘后常态）→ 无候选，不发网络请求。
+
+        回归：旧逻辑把“全部落后股”当候选，收盘后 5500 只全入选超过阈值，
+        预检整体失效、停牌股漏网；新逻辑只以断更 ≥2 交易日为候选。
+        """
         from tasks.bars import _detect_suspended_symbols
 
-        db = self._make_db(tmp_path, {f"{i:06d}": "2026-07-22" for i in range(60)})
+        # 60 只全部仅落后 1 个交易日（MAX == 前一交易日）
+        db = self._make_db(tmp_path, {f"{i:06d}": "2026-07-23" for i in range(60)})
         ak = MagicMock()
-        with patch("tasks.bars.ak", ak):
+        with patch("tasks.bars.ak", ak), \
+             patch("tasks.bars.get_recent_trading_days", return_value=self.PRECHECK_DAYS):
             result = _detect_suspended_symbols(db, "2026-07-24")
 
         assert result == set()
         ak.stock_tfp_em.assert_not_called()
+
+    def test_detects_suspended_among_many_up_to_date(self, tmp_path: Path):
+        """大量正常股（收盘后仅缺今天）+ 少数断更多日停牌股 → 停牌仍被识别。
+
+        回归：旧逻辑下全部股票都进落后候选（>50）导致预检跳过，
+        停牌股漏网并产生假失败；新逻辑只查断更多日的少数股票。
+        """
+        import sys
+
+        from tasks.bars import _detect_suspended_symbols
+
+        dates = {f"{i:06d}": "2026-07-23" for i in range(90)}  # 90 只正常（仅缺今天）
+        dates["600519"] = "2026-07-16"  # 1 只断更多日（停牌）
+        db = self._make_db(tmp_path, dates)
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.return_value = [{"code": "600519", "status": 2}]
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame()  # 东财无数据
+        with patch("tasks.bars.ak", ak), \
+             patch("tasks.bars.get_recent_trading_days", return_value=self.PRECHECK_DAYS), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            result = _detect_suspended_symbols(db, "2026-07-24")
+
+        assert result == {"600519"}
+        # 只查询候选中的非北交所股（90 只正常股不入候选）
+        mock_xq.get_batch_quotes.assert_called_once_with(["600519"])
 
     def test_guards_no_real_db_and_source_errors(self, tmp_path: Path):
         """非真实 db / 两源均异常 → 静默降级不抛错。"""
@@ -1056,6 +1092,7 @@ class TestSuspendedPrecheck:
         mock_xq = MagicMock()
         mock_xq.get_batch_quotes.side_effect = RuntimeError("net")
         with patch("tasks.bars.ak", ak), \
+             patch("tasks.bars.get_recent_trading_days", return_value=self.PRECHECK_DAYS), \
              patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             assert _detect_suspended_symbols(db, "2026-07-24") == set()
 
