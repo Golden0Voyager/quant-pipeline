@@ -88,7 +88,8 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
 
     if not hasattr(ak, "stock_gpzy_pledge_ratio_em"):
         logger.warning("⚠️ akshare 不存在 stock_gpzy_pledge_ratio_em 接口，跳过股权质押更新")
-        return {"saved": 0}
+        # 显式 skipped：零行属预期（接口缺失），避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "akshare interface stock_gpzy_pledge_ratio_em unavailable"}
 
     target_date = get_expected_latest_trading_day()
     target_dates = get_recent_trading_days(target_date, 30)
@@ -98,16 +99,25 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
 
     client = get_default_client()
     df = None
+    fetch_error: str | None = None
     for date in target_dates:
         resp = client.call("eastmoney", lambda d=date: ak.stock_gpzy_pledge_ratio_em(date=d.replace("-", "")))
-        df = resp.data if resp.success else None
+        if not resp.success:
+            fetch_error = resp.metadata.error or "fetch failed"
+            continue
+        df = resp.data
         if df is not None and hasattr(df, "empty") and not df.empty:
             logger.info(f"  股权质押使用日期 {date}")
             break
 
+    if fetch_error and df is None:
+        logger.error(f"❌ 股权质押数据获取失败: {fetch_error}")
+        return {"saved": 0, "error": fetch_error}
+
     if df is None or df.empty:
         logger.warning("⚠️ 股权质押数据为空")
-        return {"saved": 0}
+        # 显式 skipped：近 30 个交易日窗口内无质押数据属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no stock pledge data in recent trading days"}
 
     raw_count = len(df)
     df = df.rename(columns=_COLUMN_MAP)
@@ -135,7 +145,8 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
 
     if not records:
         logger.warning("⚠️ 股权质押记录为空")
-        return {"saved": 0, "total": raw_count}
+        # 显式 skipped：零行属正常结果（字段过滤后无有效记录），避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no valid stock pledge records", "total": raw_count}
 
     validated_records, violations = validate_records(records, STOCK_PLEDGE_CONTRACT, logger)
     if violations and not validated_records:
