@@ -75,10 +75,14 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
     latest_date = get_expected_latest_trading_day()
     start_date = (datetime.strptime(latest_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y%m%d")
     resp = get_default_client().call("eastmoney", lambda: ak.stock_jgdy_tj_em(date=start_date))
-    df = resp.data if resp.success else None
+    if not resp.success:
+        logger.error(f"❌ 机构调研数据获取失败: {resp.metadata.error}")
+        return {"saved": 0, "error": resp.metadata.error or "fetch failed"}
+    df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         logger.warning("⚠️ 机构调研数据为空")
-        return {"saved": 0}
+        # 显式 skipped：零行属正常结果（如无新调研记录），避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no institution survey data from upstream"}
 
     raw_count = len(df)
     df = df.rename(columns=_COLUMN_MAP)
@@ -108,7 +112,8 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
 
     if not records:
         logger.warning("⚠️ 机构调研记录为空")
-        return {"saved": 0, "total": raw_count}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no valid institution survey records", "total": raw_count}
 
     validated_records, violations = validate_records(records, INSTITUTION_SURVEY_CONTRACT, logger)
     if violations and not validated_records:
