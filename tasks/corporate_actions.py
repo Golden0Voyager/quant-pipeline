@@ -101,7 +101,8 @@ def update_restricted_share(db: DatabaseInterface) -> dict:
         records = _fetch_restricted_share()
         if not records:
             logger.warning("⚠️ 限售解禁无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：窗口内无解禁公告属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no restricted share unlock data in window", "total": 0}
         warn_if_all_empty(records, ["ts_code", "total_shares"], "restricted_share")
         saved = db.save_restricted_share_batch(records)
         logger.info(f"✅ 限售解禁保存完成: {saved} 条")
@@ -183,6 +184,7 @@ def update_earnings_forecast(db: DatabaseInterface) -> dict:
         records = _fetch_earnings_forecast()
         if not records:
             logger.warning("⚠️ 业绩预告无数据")
+            # _fetch_earnings_forecast 吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         warn_if_all_empty(records, ["forecast_type", "net_profit_change"], "earnings_forecast")
         saved = db.save_earnings_forecast_batch(records)

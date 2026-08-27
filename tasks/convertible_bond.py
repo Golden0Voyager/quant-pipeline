@@ -84,7 +84,8 @@ def update_cb_quotation(db: DatabaseInterface) -> dict:
         warn_if_all_empty(records, key_cols=["ts_code", "price"], task_name="convertible_bond_quotation")
         if not records:
             logger.warning("⚠️ 可转债行情无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no convertible bond quotation data", "total": 0}
         saved = db.save_cb_quotation_batch(records)
         logger.info(f"✅ 可转债行情保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}
@@ -139,7 +140,8 @@ def update_cb_redeem(db: DatabaseInterface) -> dict:
         warn_if_all_empty(records, key_cols=["ts_code", "redeem_flag"], task_name="convertible_bond_redeem")
         if not records:
             logger.warning("⚠️ 可转债强赎无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：无强赎公告属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no convertible bond redeem data", "total": 0}
         saved = db.save_cb_redeem_batch(records)
         logger.info(f"✅ 可转债强赎保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}
@@ -202,7 +204,8 @@ def update_cb_index(db: DatabaseInterface) -> dict:
         warn_if_all_empty(records, key_cols=["trade_date", "close"], task_name="convertible_bond_index")
         if not records:
             logger.warning("⚠️ 可转债指数无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no convertible bond index data", "total": 0}
         saved = db.save_cb_index_batch(records)
         logger.info(f"✅ 可转债指数保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}

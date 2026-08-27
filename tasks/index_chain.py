@@ -27,6 +27,7 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
     if ak is None:
         return []
     records = []
+    last_error: str | None = None
     indices = {
         "sh000001": "上证指数",
         "sz399001": "深证成指",
@@ -52,7 +53,10 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
                     }
                 )
         except Exception as e:
+            last_error = f"{index_name}({index_code}): {e}"
             logger.warning(f"⚠️ 指数 {index_name}({index_code}) 获取失败: {e}")
+    if not records and last_error:
+        raise RuntimeError(f"all index fetches failed: {last_error}")
     return records
 
 
@@ -70,7 +74,8 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         records = _fetch_index_daily(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 指数日线无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：上游正常返回但无数据（非交易日等），避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no index daily data from upstream", "total": 0}
         saved = db.save_index_daily_batch(records)
         logger.info(f"✅ 指数日线保存完成: {saved} 条")
         return {"saved": saved, "total": len(records)}

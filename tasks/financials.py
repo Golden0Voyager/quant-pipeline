@@ -55,7 +55,8 @@ def update_shareholder_count(db: DatabaseInterface, symbols: list[str] | None = 
         df = ak.stock_hold_num_cninfo(date=period)
         if df is None or df.empty:
             logger.warning(f"⚠️  股东户数无数据 ({period})")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：该报告期无股东户数属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": f"no shareholder count data for {period}", "total": 0}
 
         batch_records = []
         for _, row in df.iterrows():
@@ -118,7 +119,7 @@ def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterfa
         stocks = db.get_stock_list()
         if stocks.empty:
             logger.error("❌ 股票列表为空")
-            return {"saved": 0, "failed": 0, "total": 0}
+            return {"saved": 0, "failed": 0, "total": 0, "error": "stock list empty"}
 
         stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
     total = len(stock_codes)

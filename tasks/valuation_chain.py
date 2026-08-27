@@ -190,6 +190,7 @@ def _fundamentals_xueqiu_fallback(db: DatabaseInterface, symbols: list[str] | No
             stocks = db.get_stock_list()
             if not isinstance(stocks, pd.DataFrame) or stocks.empty:
                 logger.warning("⚠️  雪球兜底跳过：股票列表为空")
+                # 兜底发生在东财失败后，无产出即真失败，保持旧行为（契约判 failed）
                 return {"saved": 0, "total": 0}
             universe = [str(c).strip() for c in stocks["code"].tolist() if str(c).strip()]
         if not universe:
@@ -198,6 +199,7 @@ def _fundamentals_xueqiu_fallback(db: DatabaseInterface, symbols: list[str] | No
         quotes = fetch_market_snapshot_quotes(universe)
     except Exception as e:
         logger.warning(f"⚠️  雪球兜底失败: {e}")
+        # 兜底发生在东财失败后，无产出即真失败，保持旧行为（契约判 failed）
         return {"saved": 0, "total": 0}
 
     date_used = get_expected_latest_trading_day()
@@ -227,6 +229,7 @@ def _fundamentals_xueqiu_fallback(db: DatabaseInterface, symbols: list[str] | No
 
     if not batch_records:
         logger.warning("⚠️  雪球兜底未获取到行情")
+        # 兜底发生在东财失败后，无产出即真失败，保持旧行为（契约判 failed）
         return {"saved": 0, "total": 0}
 
     try:
@@ -430,7 +433,8 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     if not rows:
         logger.warning("⚠️  股票列表为空")
-        return {"saved": 0, "total": 0}
+        # 显式 skipped：无输入属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "stock list empty", "total": 0}
 
     rows = [(c, m) for c, m in rows if not should_skip_beijing(c)]
 
@@ -516,7 +520,8 @@ def update_historical_valuation(db: DatabaseInterface, symbols: list[str] | None
         df = db.get_fundamentals_batch()
         if df.empty:
             logger.warning("⚠️  fundamentals 为空，跳过历史估值快照")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：无基本面数据时跳过快照属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "fundamentals empty, snapshot skipped", "total": 0}
 
         if symbols:
             symbol_set = set(symbols)
@@ -593,7 +598,8 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
         fundamentals = db.get_fundamentals_batch()
         if stocks.empty or fundamentals.empty:
             logger.warning("⚠️  股票列表或基本面为空，跳过行业对比")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：无输入时跳过对比属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "stock list or fundamentals empty, comparison skipped", "total": 0}
 
         df = fundamentals.merge(stocks[["code", "industry"]], left_on="ts_code", right_on="code", how="left")
         df["industry"] = df["industry"].fillna("未知行业")

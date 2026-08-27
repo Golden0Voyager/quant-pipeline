@@ -753,12 +753,13 @@ class TestUpdateFundFlow:
         assert r["saved"] == 1
 
     def test_empty(self):
+        """上游资金流向为空 → skipped（合法零行）。"""
         db = MagicMock()
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = pd.DataFrame()
         with patch("daily_pipeline.logger"):
             r = daily_pipeline.update_fund_flow(db, loader)
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
 
     def test_loader_error(self):
         db = MagicMock()
@@ -1715,12 +1716,13 @@ class TestDirectAkShareTasks:
         assert r["saved"] == 1
 
     def test_dragon_tiger_empty(self):
+        """当日无龙虎榜 → skipped（合法零行）。"""
         db = MagicMock()
         with patch("tasks.market_flow.ak") as mock_ak:
             mock_ak.stock_lhb_detail_em.return_value = pd.DataFrame()
             with patch("daily_pipeline.logger"):
                 r = daily_pipeline.update_dragon_tiger(db)
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
 
     def test_block_trade_normal(self):
         db = MagicMock()
@@ -1733,12 +1735,13 @@ class TestDirectAkShareTasks:
         assert r["saved"] == 1
 
     def test_block_trade_empty(self):
+        """当日无大宗交易 → skipped（合法零行）。"""
         db = MagicMock()
         with patch("tasks.market_flow.ak") as mock_ak:
             mock_ak.stock_dzjy_mrmx.return_value = pd.DataFrame()
             with patch("daily_pipeline.logger"):
                 r = daily_pipeline.update_block_trade(db)
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
 
     def test_sector_fund_flow_normal(self):
         db = MagicMock()
@@ -1997,12 +2000,12 @@ def test_update_sector_fund_flow_success(mock_ak: MagicMock):
 
 @patch("tasks.market_flow.ak")
 def test_update_sector_fund_flow_empty_df(mock_ak: MagicMock):
-    """When the single source returns empty, should return zero saved."""
+    """When the single source returns empty, should mark skipped."""
     db = MagicMock()
     mock_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_fund_flow(db)
-    assert r["saved"] == 0
+    assert r.get("skipped") is True
     assert r["total"] == 0
 
 
@@ -2022,11 +2025,12 @@ def test_update_sector_fund_flow_akshare_error(mock_ak: MagicMock):
 # ===========================================================================
 
 def test_update_historical_valuation_empty():
+    """无基本面数据时历史估值快照跳过（派生任务，合法零行）。"""
     db = MagicMock()
     db.get_fundamentals_batch.return_value = pd.DataFrame()
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_historical_valuation(db)
-    assert r["saved"] == 0
+    assert r.get("skipped") is True
     assert r["total"] == 0
 
 
@@ -2080,12 +2084,14 @@ def test_update_historical_valuation_uses_batch_save_when_available():
 # ===========================================================================
 
 def test_update_sector_industry_no_fundamentals():
+    """无基本面数据时行业对比跳过（派生任务，合法零行）。"""
     db = MagicMock()
     db.get_stock_list.return_value = pd.DataFrame({"code": [], "industry": []})
     db.get_fundamentals_batch.return_value = pd.DataFrame()
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_sector_industry(db)
-    assert r["saved"] == 0 or r["total"] == 0
+    assert r.get("skipped") is True
+    assert r["total"] == 0
 
 
 # ===========================================================================
@@ -2620,11 +2626,12 @@ def test_update_index_daily_success(mock_ak: MagicMock):
 
 @patch("tasks.index_chain.ak")
 def test_update_index_daily_empty(mock_ak: MagicMock):
+    """上游正常返回空 → skipped（合法零行）；全失败则报错。"""
     db = MagicMock()
     mock_ak.stock_zh_index_daily_tx.return_value = pd.DataFrame()
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_index_daily(db)
-    assert r["saved"] == 0
+    assert r.get("skipped") is True
     db.save_index_daily_batch.assert_not_called()
 
 

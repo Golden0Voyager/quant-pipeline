@@ -111,22 +111,25 @@ class TestStockPledge:
         assert result["saved"] == 0
         assert "error" in result
 
-    def test_empty_df(self):
+    def test_empty_df_skipped(self):
+        """上游返回空 df（无质押数据窗口）应标记 skipped 而非 failed。"""
         db = MagicMock()
         with patch.object(stock_pledge, "ak", _ak_with(pd.DataFrame())):
             result = stock_pledge.update_stock_pledge(db)
-        assert result["saved"] == 0
+        assert result.get("skipped") is True
+        assert "reason" in result
 
     def test_exception(self):
+        """近 30 日窗口全部抓取失败应上报 error（而非 skipped）。"""
         ak = MagicMock()
-        # Set __name__ so _try_get_ak_df can log func.__name__
-        ak.stock_zyg_em = MagicMock(
-            side_effect=RuntimeError("network err"), __name__="stock_zyg_em"
+        ak.stock_gpzy_pledge_ratio_em = MagicMock(
+            side_effect=RuntimeError("network err"), __name__="stock_gpzy_pledge_ratio_em"
         )
         db = MagicMock()
         with patch.object(stock_pledge, "ak", ak):
             result = stock_pledge.update_stock_pledge(db)
         assert result["saved"] == 0
+        assert "error" in result
 
     def test_to_float_edge_cases(self):
         assert stock_pledge._to_float(None) is None

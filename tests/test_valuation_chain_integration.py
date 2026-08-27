@@ -622,14 +622,14 @@ class TestUpdateHistoricalValuation:
         assert db.save_historical_valuation.call_count == 2
 
     def test_empty_fundamentals(self):
-        """fundamentals 为空 → 提前返回。"""
+        """fundamentals 为空 → 提前返回（合法零行，skipped）。"""
         db = MagicMock()
         db.get_fundamentals_batch.return_value = pd.DataFrame()
 
         with patch("tasks.valuation_chain.logger"):
             r = update_historical_valuation(db)
 
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
         assert r["total"] == 0
 
     def test_uses_batch_save_when_available(self):
@@ -678,7 +678,7 @@ class TestUpdateSectorIndustry:
     """update_sector_industry 中层覆盖。"""
 
     def test_no_fundamentals_returns_early(self):
-        """fundamentals 为空 → 提前返回。"""
+        """fundamentals 为空 → 提前返回（合法零行，skipped）。"""
         db = MagicMock()
         db.get_stock_list.return_value = pd.DataFrame({
             "code": ["000001"],
@@ -689,17 +689,17 @@ class TestUpdateSectorIndustry:
         with patch("tasks.valuation_chain.logger"):
             r = update_sector_industry(db)
 
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
 
     def test_no_stock_list_returns_early(self):
-        """stock_list 为空 → 提前返回。"""
+        """stock_list 为空 → 提前返回（合法零行，skipped）。"""
         db = MagicMock()
         db.get_stock_list.return_value = pd.DataFrame()
 
         with patch("tasks.valuation_chain.logger"):
             r = update_sector_industry(db)
 
-        assert r["saved"] == 0
+        assert r.get("skipped") is True
 
     def test_with_sector_fund_flow_mapping(self, tmp_path: Path):
         """sector_fund_flow 精确匹配 + 排行映射。"""
