@@ -133,6 +133,7 @@ def update_north_hold(db: DatabaseInterface) -> dict:
         records = _fetch_north_hold()
         if not records:
             logger.warning("⚠️ 北向持仓无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_north_hold_batch(records)
         latest = max((r["trade_date"] for r in records if r.get("trade_date")), default="")
@@ -196,6 +197,7 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         records = _fetch_index_daily(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 指数日线无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_index_daily_batch(records)
         logger.info(f"✅ 指数日线保存完成: {saved} 条")
@@ -289,6 +291,7 @@ def update_limit_up_down(db: DatabaseInterface) -> dict:
         all_records = limit_up + limit_down
         if not all_records:
             logger.warning("⚠️ 涨停跌停无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_limit_up_down_batch(all_records)
         logger.info(f"✅ 涨停跌停保存完成: {saved} 条 (涨停 {len(limit_up)}, 跌停 {len(limit_down)})")
@@ -346,6 +349,7 @@ def update_dividend_summary(db: DatabaseInterface) -> dict:
         records = _fetch_dividend_summary()
         if not records:
             logger.warning("⚠️ 分红送转无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_dividend_summary_batch(records)
         logger.info(f"✅ 分红送转保存完成: {saved} 条")
@@ -399,6 +403,7 @@ def update_gold_price(db: DatabaseInterface) -> dict:
         records = _fetch_gold_price(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 国际金价无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_gold_price_batch(records)
         logger.info(f"✅ 国际金价保存完成: {saved} 条")
@@ -460,6 +465,7 @@ def update_crude_oil(db: DatabaseInterface) -> dict:
         records = _fetch_crude_oil(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 国际原油无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_crude_oil_batch(records)
         logger.info(f"✅ 国际原油保存完成: {saved} 条")
@@ -523,6 +529,7 @@ def update_usd(db: DatabaseInterface) -> dict:
         records = _fetch_usd(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 外汇汇率无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_usd_batch(records)
         logger.info(f"✅ 外汇汇率保存完成: {saved} 条")
@@ -669,6 +676,7 @@ def update_global_index(db: DatabaseInterface) -> dict:
             records = _fetch_global_index_sina(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 全球指数无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_global_index_batch(records)
         logger.info(f"✅ 全球指数保存完成: {saved} 条")
@@ -734,6 +742,7 @@ def update_us_treasury(db: DatabaseInterface) -> dict:
         records = _fetch_us_treasury(get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 中美国债收益率无数据")
+            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
             return {"saved": 0, "total": 0}
         saved = db.save_us_treasury_batch(records)
         logger.info(f"✅ 中美国债收益率保存完成: {saved} 条")
