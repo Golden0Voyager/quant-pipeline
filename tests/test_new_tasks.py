@@ -1370,12 +1370,13 @@ def test_financials_shareholder_count_ak_none():
 
 
 def test_financials_shareholder_count_empty():
+    """报告期无股东户数数据 → skipped（合法零行）。"""
     ak = MagicMock()
     ak.stock_hold_num_cninfo.return_value = pd.DataFrame()
     db = MagicMock()
     with patch.object(financials, "ak", ak):
         result = financials.update_shareholder_count(db)
-    assert result["saved"] == 0
+    assert result.get("skipped") is True
 
 
 def test_financials_shareholder_count_exception():
