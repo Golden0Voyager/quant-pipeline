@@ -41,7 +41,8 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
         df = loader.get_market_fund_flow()
         if df.empty:
             logger.warning("⚠️  未获取到资金流向数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no market fund flow data", "total": 0}
 
         batch_records = []
         for _, row in df.iterrows():
@@ -237,7 +238,8 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
         df = ak.stock_lhb_detail_em(start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
         if df is None or df.empty:
             logger.warning("⚠️  龙虎榜无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：当日无龙虎榜个股属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no dragon-tiger list for the day", "total": 0}
 
         batch_records = []
         for _, row in df.iterrows():
@@ -300,7 +302,8 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
         df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
         if df is None or df.empty:
             logger.warning("⚠️  大宗交易无数据")
-            return {"saved": 0, "total": 0}
+            # 显式 skipped：当日无大宗交易属正常结果，避免被结果契约误判为 failed
+            return {"skipped": True, "reason": "no block trade for the day", "total": 0}
 
         batch_records = []
         for _, row in df.iterrows():
@@ -392,7 +395,8 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         return {"saved": 0, "total": 0, "error": str(e)}
     if df is None or df.empty:
         logger.warning("⚠️  板块资金流向无数据")
-        return {"saved": 0, "total": 0}
+        # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no sector fund flow data", "total": 0}
 
     batch_records = []
     for _, row in df.iterrows():
