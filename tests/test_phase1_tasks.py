@@ -257,12 +257,13 @@ class TestStockRepurchase:
         assert len(records) == 2
         assert {record["repurchase_amount"] for record in records} == {5e8, 6e8}
 
-    def test_invalid_key_fields_are_not_saved(self):
+    def test_invalid_key_fields_all_filtered_skipped(self):
+        """记录全被过滤（零行）应标记 skipped 而非 failed。"""
         db = MagicMock()
         frame = _repurchase_df().assign(最新公告日期=None)
         with patch.object(stock_repurchase, "ak", _ak_with(frame)):
             result = stock_repurchase.update_stock_repurchase(db)
-        assert result["saved"] == 0
+        assert result.get("skipped") is True
         db.save_stock_repurchase_batch.assert_not_called()
 
     def test_ak_none(self):
@@ -272,11 +273,13 @@ class TestStockRepurchase:
         assert result["saved"] == 0
         assert "error" in result
 
-    def test_empty_df(self):
+    def test_empty_df_skipped(self):
+        """上游无数据（零行）应标记 skipped 而非 failed。"""
         db = MagicMock()
         with patch.object(stock_repurchase, "ak", _ak_with(pd.DataFrame())):
             result = stock_repurchase.update_stock_repurchase(db)
-        assert result["saved"] == 0
+        assert result.get("skipped") is True
+        assert "reason" in result
 
     def test_exception(self):
         ak = MagicMock()
@@ -352,7 +355,8 @@ class TestInstitutionSurvey:
         assert len(records) == 2
         assert {record["survey_count"] for record in records} == {5, 6}
 
-    def test_invalid_key_fields_are_not_saved(self):
+    def test_invalid_key_fields_all_filtered_skipped(self):
+        """记录全被过滤（零行）应标记 skipped 而非 failed。"""
         db = MagicMock()
         frame = _survey_df().assign(代码="")
         with (
@@ -360,7 +364,7 @@ class TestInstitutionSurvey:
             patch.object(institution_survey, "get_expected_latest_trading_day", return_value="2024-01-31", create=True),
         ):
             result = institution_survey.update_institution_survey(db)
-        assert result["saved"] == 0
+        assert result.get("skipped") is True
         db.save_institution_survey_batch.assert_not_called()
 
     def test_ak_none(self):
@@ -370,11 +374,13 @@ class TestInstitutionSurvey:
         assert result["saved"] == 0
         assert "error" in result
 
-    def test_empty_df(self):
+    def test_empty_df_skipped(self):
+        """上游无数据（零行）应标记 skipped 而非 failed。"""
         db = MagicMock()
         with patch.object(institution_survey, "ak", _ak_with(pd.DataFrame())):
             result = institution_survey.update_institution_survey(db)
-        assert result["saved"] == 0
+        assert result.get("skipped") is True
+        assert "reason" in result
 
     def test_exception(self):
         ak = MagicMock()

@@ -86,10 +86,14 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     resp = get_default_client().call("eastmoney", lambda: ak.stock_repurchase_em())
-    df = resp.data if resp.success else None
+    if not resp.success:
+        logger.error(f"❌ 股票回购数据获取失败: {resp.metadata.error}")
+        return {"saved": 0, "error": resp.metadata.error or "fetch failed"}
+    df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         logger.warning("⚠️ 股票回购数据为空")
-        return {"saved": 0, "total": 0}
+        # 显式 skipped：零行属正常结果（如上流无新公告），避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no stock repurchase data from upstream", "total": 0}
 
     raw_count = len(df)
     df = df.rename(columns=_COLUMN_MAP)
@@ -131,7 +135,8 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
 
     if not records:
         logger.warning("⚠️ 股票回购记录为空")
-        return {"saved": 0, "total": raw_count}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no valid stock repurchase records", "total": raw_count}
 
     validated_records, violations = validate_records(records, STOCK_REPURCHASE_CONTRACT, logger)
     if violations and not validated_records:
