@@ -64,12 +64,13 @@ def test_update_fund_flow_happy_path():
 
 
 def test_update_fund_flow_empty():
+    """上游返回空 → 不写库、标记 skipped（合法零行）。"""
     db = MagicMock()
     loader = MagicMock()
     loader.get_market_fund_flow.return_value = pd.DataFrame()
     with patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"):
         res = mf.update_fund_flow(db, loader)
-    assert res == {"saved": 0, "total": 0}
+    assert res.get("skipped") is True
     db.save_fund_flow_batch.assert_not_called()
 
 
@@ -306,7 +307,7 @@ def test_update_margin_trading_monday_falls_back_to_friday():
 
 
 def test_update_dragon_tiger_empty():
-    """龙虎榜空数据时返回 saved=0。"""
+    """龙虎榜空数据时标记 skipped（当日无上榜属合法零行）。"""
     db = MagicMock()
     fake_ak = MagicMock()
     fake_ak.stock_lhb_detail_em.return_value = pd.DataFrame()
@@ -314,7 +315,7 @@ def test_update_dragon_tiger_empty():
         mf, "get_expected_latest_trading_day", return_value="2026-07-20"
     ):
         res = mf.update_dragon_tiger(db)
-    assert res["saved"] == 0
+    assert res.get("skipped") is True
     db.save_dragon_tiger_batch.assert_not_called()
 
 
@@ -332,7 +333,7 @@ def test_update_dragon_tiger_exception():
 
 
 def test_update_block_trade_empty():
-    """大宗交易空数据时返回 saved=0。"""
+    """大宗交易空数据时标记 skipped（当日无大宗属合法零行）。"""
     db = MagicMock()
     fake_ak = MagicMock()
     fake_ak.stock_dzjy_mrmx.return_value = pd.DataFrame()
@@ -340,7 +341,7 @@ def test_update_block_trade_empty():
         mf, "get_expected_latest_trading_day", return_value="2026-07-20"
     ):
         res = mf.update_block_trade(db)
-    assert res["saved"] == 0
+    assert res.get("skipped") is True
     db.save_block_trade_batch.assert_not_called()
 
 
@@ -358,7 +359,7 @@ def test_update_block_trade_exception():
 
 
 def test_update_sector_fund_flow_empty():
-    """板块资金流向空数据时返回 saved=0。"""
+    """板块资金流向空数据时标记 skipped（合法零行）。"""
     db = MagicMock()
     fake_ak = MagicMock()
     fake_ak.stock_fund_flow_industry.return_value = pd.DataFrame()
@@ -366,7 +367,7 @@ def test_update_sector_fund_flow_empty():
         mf, "get_expected_latest_trading_day", return_value="2026-07-20"
     ):
         res = mf.update_sector_fund_flow(db)
-    assert res["saved"] == 0
+    assert res.get("skipped") is True
     db.save_sector_fund_flow_batch.assert_not_called()
 
 
