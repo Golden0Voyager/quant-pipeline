@@ -141,12 +141,14 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
 
     if stock_list is None or stock_list.empty:
         logger.warning("⚠️ 股票列表为空，跳过北向个股持仓更新")
-        return {"saved": 0}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "stock list empty"}
 
     symbols = [str(c).strip() for c in stock_list["code"] if c]
     if not symbols:
         logger.warning("⚠️ 股票列表无有效代码")
-        return {"saved": 0}
+        # 显式 skipped：零行属正常结果，避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "no valid stock codes"}
 
     name_map: dict[str, str] = {}
     if "name" in stock_list.columns:
@@ -185,7 +187,8 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
             "⚠️ 北向个股持仓记录为空。自 2024-08-19 起交易所不再披露每日个股北向数据，"
             "当前 akshare 接口也已变更，需指定 symbol 获取单只股票历史。"
         )
-        return {"saved": 0, "total": total, "failed": len(failed)}
+        # 显式 skipped：零行属预期（交易所已停止披露个股北向数据），避免被结果契约误判为 failed
+        return {"skipped": True, "reason": "exchange stopped publishing per-stock northbound holdings", "total": total, "failed": len(failed)}
 
     saved = db.save_north_hold_batch(records)
     logger.info(f"✅ 北向个股持仓数据保存完成: {saved}/{total} 条，失败 {len(failed)}")
