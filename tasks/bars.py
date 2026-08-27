@@ -87,13 +87,22 @@ _SUSPEND_PRECHECK_MAX = 50
 def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None) -> set[str]:
     """运行前停牌预检：返回停牌股票的 6 位代码集合。
 
-    只检查「日线落后于最新交易日」的少量股票：
+    候选为「断更 ≥2 个交易日」的少量股票：
+    - 收盘后首次抓取全市场都缺当天 1 根 K 线（正常股仅落后 1 个交易日），
+      若把全部落后股当作候选，数量远超阈值、预检整体失效（停牌股因此漏网，
+      逐股 4 源重试白烧并产生假失败计数）；停牌股则断更多日，必在候选内。
     - 主源：雪球 batch/quote 的 status 字段（status==2 停牌；东财被封时仍可用）
     - 辅源：东财停复牌名单 stock_tfp_em（覆盖雪球不支持的北交所）
     任一源失败均静默降级，返回部分或空集合，不影响主流程。
     """
     if not _has_real_db_path(db) or not expected_latest:
         return set()
+
+    # 前一交易日：断更 ≥2 个交易日才进候选（正常股收盘后 MAX == 前一交易日）
+    prev_days = get_recent_trading_days(expected_latest, 2)
+    if len(prev_days) < 2:
+        return set()
+    threshold = prev_days[1]
 
     # 1. 落后股集合（一次聚合查询，本地 SQL 无网络开销）
     import sqlite3
@@ -108,7 +117,7 @@ def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None
     lagging = {
         str(c)[:6]
         for c, d in rows
-        if not d or (_normalize_trade_date(d) or "") < expected_latest
+        if not d or (_normalize_trade_date(d) or "") < threshold
     }
     if not lagging or len(lagging) > _SUSPEND_PRECHECK_MAX:
         return set()
