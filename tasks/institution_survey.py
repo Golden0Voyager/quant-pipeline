@@ -123,6 +123,11 @@ def update_institution_survey(db: DatabaseInterface) -> dict:
         logger.warning(f"⚠️ 机构调研合约校验过滤 {len(records) - len(validated_records)} 条")
     saved = db.save_institution_survey_batch(validated_records)
     logger.info(f"✅ 机构调研数据保存完成: {saved}/{raw_count} 条")
+    if saved == 0:
+        # 显式 skipped：全部记录已存在（幂等重跑），零新增属正常结果，
+        # 避免被结果契约误判为 "zero rows without explanation" 失败
+        return {"skipped": True, "reason": "all institution survey records already up to date",
+                "saved": 0, "total": raw_count}
     return {"saved": saved, "total": raw_count}
 
 
