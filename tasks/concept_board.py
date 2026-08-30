@@ -2,7 +2,7 @@
 概念板块数据更新任务
 ────────────────────
 东方财富概念板块日频行情 + 成分股映射。
-数据源：东方财富 (push2.eastmoney.com)。
+数据源：东方财富 (push2.eastmoney.com / push2delay.eastmoney.com)。
 """
 from __future__ import annotations
 
@@ -16,11 +16,6 @@ from core.data_contract import CONCEPT_BOARD_CONTRACT, validate_records
 from core.market_time import shanghai_today
 from core.source_client import get_default_client
 from interface import DatabaseInterface
-
-try:
-    import akshare as ak
-except ImportError:
-    ak = None
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +72,15 @@ def _fetch_em_spot() -> list[dict]:
                 resp = session.get(base_url.format(page=page), timeout=15)
                 resp.raise_for_status()
                 data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"{host} 返回畸形响应: {type(data).__name__}")
             except Exception as e:
                 logger.debug(f"概念板块行情主机 {host} 请求失败 (page {page}): {e}")
                 last_err = e
                 success = False
                 break
 
-            items = data.get("data", {}).get("diff", [])
+            items = ((data.get("data") or {}).get("diff")) or []
             if not items:
                 break
             for item in items:
@@ -119,36 +116,112 @@ def _fetch_em_spot() -> list[dict]:
 
 
 def _fetch_concept_list_em() -> list[dict]:
-    """Fetch concept board name list from East Money push2 API (with host failover)."""
+    """Fetch concept board name list from East Money push2 API (host failover).
+
+    The clist API truncates each page to 100 rows regardless of ``pz``, so
+    paginate until a short page is returned.
+    """
     hosts = ("push2.eastmoney.com", "push2delay.eastmoney.com")
     session = get_default_client().get_session("eastmoney")
     last_err: Exception | None = None
 
     for host in hosts:
-        name_url = (
-            f"https://{host}/api/qt/clist/get"
-            "?pn=1&pz=500&po=1&np=1"
-            "&ut=bd1d9ddb04089700cf9c27f6f7426281"
-            "&fltt=2&invt=2&fid=f3"
-            "&fs=m:90+t:3"
-            "&fields=f12,f14"
-        )
-        try:
-            resp = session.get(name_url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("data", {}).get("diff", [])
-            out = []
+        out: list[dict] = []
+        page = 1
+        success = True
+        while True:
+            try:
+                resp = session.get(
+                    f"https://{host}/api/qt/clist/get",
+                    params={
+                        "pn": page, "pz": 100, "po": 1, "np": 1,
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                        "fltt": 2, "invt": 2, "fid": "f3",
+                        "fs": "m:90+t:3",
+                        "fields": "f12,f14",
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"{host} 返回畸形响应: {type(data).__name__}")
+            except Exception as e:
+                logger.debug(f"概念板块列表主机 {host} 请求失败 (page {page}): {e}")
+                last_err = e
+                success = False
+                break
+
+            items = ((data.get("data") or {}).get("diff")) or []
+            if not items:
+                break
             for item in items:
                 code = str(item.get("f12", "")).strip()
                 name = str(item.get("f14", "")).strip()
                 if code and name:
                     out.append({"concept_code": code, "concept_name": name})
-            if out:
-                return out
-        except Exception as e:
-            logger.debug(f"概念板块列表主机 {host} 请求失败: {e}")
-            last_err = e
+            if len(items) < 100:
+                break
+            page += 1
+
+        if success and out:
+            return out
+
+    if last_err is not None:
+        raise last_err
+    return []
+
+
+def _fetch_concept_members_one(code: str) -> list[str]:
+    """抓取单个概念板块的成分股代码（push2 / push2delay 双域名 failover）。
+
+    Raises on HTTP/network errors so that ``SourceClient.call()`` can
+    handle retry and circuit-breaker logic.
+    """
+    hosts = ("push2.eastmoney.com", "push2delay.eastmoney.com")
+    session = get_default_client().get_session("eastmoney")
+    last_err: Exception | None = None
+
+    for host in hosts:
+        ts_codes: list[str] = []
+        page = 1
+        success = True
+        while True:
+            try:
+                resp = session.get(
+                    f"https://{host}/api/qt/clist/get",
+                    params={
+                        "pn": page, "pz": 100, "po": 1, "np": 1,
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                        "fltt": 2, "invt": 2, "fid": "f12",
+                        "fs": f"b:{code} f:!50",
+                        "fields": "f12",
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"{host} 返回畸形响应: {type(data).__name__}")
+            except Exception as e:
+                logger.debug(f"概念成分请求主机 {host} 失败 (page {page}): {e}")
+                last_err = e
+                success = False
+                break
+
+            items = ((data.get("data") or {}).get("diff")) or []
+            if not items:
+                break
+            for item in items:
+                ts_code = str(item.get("f12", "")).strip()
+                if ts_code:
+                    ts_codes.append(ts_code)
+            if len(items) < 100:
+                break
+            page += 1
+
+        if success and ts_codes:
+            return ts_codes
 
     if last_err is not None:
         raise last_err
@@ -158,13 +231,13 @@ def _fetch_concept_list_em() -> list[dict]:
 def _fetch_concept_members_em() -> list[dict]:
     """从东方财富获取所有概念板块的成分股映射。
 
-    每板块通过 stock_board_concept_cons_em 获取（绕过 AkShare session 直调）。
+    通过 ``SourceClient`` + curl_cffi 浏览器掩护直调 push2 / push2delay
+    双域名，规避 akshare 内部硬编码 ``29.push2.eastmoney.com`` 编号子域名
+    被东方财富 WAF 封锁（RemoteDisconnected）的问题。
     """
-    if ak is None:
-        return []
-
+    client = get_default_client()
     try:
-        resp = get_default_client().call("eastmoney", _fetch_concept_list_em)
+        resp = client.call("eastmoney", _fetch_concept_list_em)
         if not resp.success:
             logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {resp.metadata.error}")
             return []
@@ -173,23 +246,18 @@ def _fetch_concept_members_em() -> list[dict]:
         logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {e}")
         items = []
 
-    members = []
+    members: list[dict] = []
     for item in items:
         code = item.get("concept_code", "")
         name = item.get("concept_name", "")
         if not code or not name:
             continue
         try:
-            # Use akshare but wrapped in try/except — this API might work
-            # since it goes to a different eastmoney endpoint
-            df = ak.stock_board_concept_cons_em(code)
-            if df is None or df.empty:
+            resp = client.call("eastmoney", _fetch_concept_members_one, code)
+            if not resp.success:
+                logger.warning(f"⚠️ 概念 {name}({code}) 成分股获取失败: {resp.metadata.error}")
                 continue
-            ts_col = "代码" if "代码" in df.columns else (df.columns[0] if len(df.columns) > 0 else None)
-            if ts_col is None:
-                continue
-            for _, row in df.iterrows():
-                ts_code = str(row.get(ts_col, "")).strip()
+            for ts_code in resp.data:
                 if ts_code:
                     members.append({
                         "concept_code": code,
@@ -283,10 +351,6 @@ def update_concept_member(
     logger.info("\n" + "=" * 60)
     logger.info("🏷️ 任务: 更新概念板块成分股映射 (含 PIT)")
     logger.info("=" * 60)
-
-    if ak is None:
-        logger.error("❌ akshare 未安装")
-        return {"saved": 0, "error": "akshare not installed"}
 
     results: dict[str, Any] = {}
     run_id = _task_run_id or str(uuid.uuid4())
