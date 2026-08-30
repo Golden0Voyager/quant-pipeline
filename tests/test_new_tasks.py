@@ -1112,14 +1112,14 @@ def test_update_concept_board_empty():
 
 
 def _mock_concept_member_push2_response() -> MagicMock:
-    """模拟东方财富 push2 概念板块列表 JSON 响应。"""
+    """模拟东方财富 push2 概念板块成分股 JSON 响应（f12=成员股票代码）。"""
     m = MagicMock()
     m.json.return_value = {
         "data": {
             "total": 2,
             "diff": [
-                {"f12": "BK1001", "f14": "AI概念"},
-                {"f12": "BK1002", "f14": "芯片概念"},
+                {"f12": "000001", "f14": "平安银行"},
+                {"f12": "000002", "f14": "万科A"},
             ],
         }
     }
@@ -1129,57 +1129,51 @@ def _mock_concept_member_push2_response() -> MagicMock:
 
 def test_update_concept_member_runs():
     """验证 update_concept_member 获取成分股映射并保存快照 + PIT。"""
-    ak = MagicMock()
-    ak.stock_board_concept_cons_em.return_value = pd.DataFrame(
-        {
-            "代码": ["000001", "000002"],
-        }
-    )
     db = MagicMock()
     db.save_concept_member_batch.return_value = 4
     db.save_concept_member_history_batch.return_value = 4
 
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_client.return_value.call.return_value = SourceResponse(
-            success=True,
-            data=[
-                {"concept_code": "BK1001", "concept_name": "AI概念"},
-                {"concept_code": "BK1002", "concept_name": "芯片概念"},
-            ],
-            metadata=FetchMetadata(source_name="eastmoney"),
-        )
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = [
+            # 第一次调用：概念板块列表
+            SourceResponse(
+                success=True,
+                data=[
+                    {"concept_code": "BK1001", "concept_name": "AI概念"},
+                    {"concept_code": "BK1002", "concept_name": "芯片概念"},
+                ],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            # 后续调用：每个概念抓取成分股（一次成功，一次返回空列表）
+            SourceResponse(
+                success=True, data=["000001", "000002"],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            SourceResponse(
+                success=True, data=[],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+        ]
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 4
     assert result["pit_saved"] == 4
     assert db.save_concept_member_batch.called
     assert db.save_concept_member_history_batch.called
-    assert ak.stock_board_concept_cons_em.call_count == 2
 
 
 def test_update_concept_member_empty_push2():
     """验证 push2 概念列表为空时优雅降级。"""
-    ak = MagicMock()
     db = MagicMock()
 
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_session = MagicMock()
-        mock_session.get.return_value.json.return_value = {"data": {"total": 0, "diff": []}}
-        mock_session.get.return_value.raise_for_status = lambda: None
-        mock_client.return_value.get_session.return_value = mock_session
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True, data=[], metadata=FetchMetadata(source_name="eastmoney"),
+        )
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 0
     assert not db.save_concept_member_batch.called
-
-
-def test_update_concept_member_ak_none():
-    """验证 akshare 未安装时优雅降级。"""
-    db = MagicMock()
-    with patch.object(concept_board, "ak", None):
-        result = concept_board.update_concept_member(db)
-    assert result["saved"] == 0
-    assert "error" in result
 
 
 
@@ -1648,22 +1642,32 @@ def test_update_concept_board_save_raises():
 
 def test_update_concept_member_save_raises():
     """验证保存成分股映射异常时优雅降级。"""
-    ak = MagicMock()
-    ak.stock_board_concept_cons_em.return_value = pd.DataFrame({"代码": ["000001"]})
     db = MagicMock()
     db.save_concept_member_batch.side_effect = Exception("save error")
 
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_session = MagicMock()
-        mock_session.get.return_value = _mock_concept_member_push2_response()
-        mock_client.return_value.get_session.return_value = mock_session
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = [
+            SourceResponse(
+                success=True,
+                data=[{"concept_code": "BK1001", "concept_name": "AI概念"}],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            SourceResponse(
+                success=True, data=["000001"],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+        ]
         result = concept_board.update_concept_member(db)
     assert result["member_saved"] == 0
 
 
 def test_fetch_concept_members_ak_none_direct():
-    """直接调用 _fetch_concept_members_em 时 ak 为 None。"""
-    with patch.object(concept_board, "ak", None):
+    """验证概念列表获取失败时优雅返回空列表。"""
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=False, data=None,
+            metadata=FetchMetadata(source_name="eastmoney", error="network error"),
+        )
         members = concept_board._fetch_concept_members_em()
     assert len(members) == 0
 
@@ -1698,31 +1702,42 @@ def test_fetch_em_spot_empty_code_skipped():
     assert result["board_saved"] == 1
 
 
-def test_fetch_concept_members_ak_raises():
-    """验证 akshare 成分股接口异常时优雅跳过。"""
-    ak = MagicMock()
-    ak.stock_board_concept_cons_em.side_effect = Exception("akshare error")
-
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_session = MagicMock()
-        mock_session.get.return_value = _mock_concept_member_push2_response()
-        mock_client.return_value.get_session.return_value = mock_session
+def test_fetch_concept_members_member_fetch_fails():
+    """验证单个概念成分股请求异常时优雅跳过该板块。"""
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = [
+            SourceResponse(
+                success=True,
+                data=[{"concept_code": "BK1001", "concept_name": "AI概念"}],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            SourceResponse(
+                success=False, data=None,
+                metadata=FetchMetadata(source_name="eastmoney", error="network error"),
+            ),
+        ]
         members = concept_board._fetch_concept_members_em()
 
     assert len(members) == 0
 
 
-def test_fetch_concept_members_empty_df():
-    """验证成分股 DataFrame 为空时跳过。"""
-    ak = MagicMock()
-    ak.stock_board_concept_cons_em.return_value = pd.DataFrame()
+def test_fetch_concept_members_empty_member_list():
+    """验证成分股请求返回空列表时跳过。"""
     db = MagicMock()
     db.save_concept_member_batch.return_value = 0
 
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_session = MagicMock()
-        mock_session.get.return_value = _mock_concept_member_push2_response()
-        mock_client.return_value.get_session.return_value = mock_session
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = [
+            SourceResponse(
+                success=True,
+                data=[{"concept_code": "BK1001", "concept_name": "AI概念"}],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            SourceResponse(
+                success=True, data=[],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+        ]
         result = concept_board.update_concept_member(db)
 
     assert result["member_saved"] == 0
@@ -1730,26 +1745,29 @@ def test_fetch_concept_members_empty_df():
 
 def test_fetch_concept_members_push2_fails():
     """验证 push2 概念列表请求异常时优雅降级。"""
-    ak = MagicMock()
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_client.return_value.get_session.side_effect = Exception("push2 error")
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = Exception("push2 error")
         members = concept_board._fetch_concept_members_em()
     assert len(members) == 0
 
 
 def test_fetch_concept_members_empty_code_skip():
     """验证概念板块代码为空时跳过。"""
-    ak = MagicMock()
-    with patch.object(concept_board, "get_default_client") as mock_client, patch.object(concept_board, "ak", ak):
-        mock_client.return_value.call.return_value = SourceResponse(
-            success=True,
-            data=[
-                {"concept_code": "", "concept_name": ""},
-                {"concept_code": "BK3001", "concept_name": "有效概念"},
-            ],
-            metadata=FetchMetadata(source_name="eastmoney"),
-        )
-        ak.stock_board_concept_cons_em.return_value = pd.DataFrame({"代码": ["000001"]})
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = [
+            SourceResponse(
+                success=True,
+                data=[
+                    {"concept_code": "", "concept_name": ""},
+                    {"concept_code": "BK3001", "concept_name": "有效概念"},
+                ],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+            SourceResponse(
+                success=True, data=["000001"],
+                metadata=FetchMetadata(source_name="eastmoney"),
+            ),
+        ]
         members = concept_board._fetch_concept_members_em()
     assert len(members) == 1
 
