@@ -49,6 +49,19 @@ atexit.register(_patcher.stop)
 
 
 @pytest.fixture(autouse=True)
+def _offline_gate_bypass(monkeypatch):
+    """默认让全量管道离线闸门放行，避免 main() 测试发起真实网络探测。
+
+    专测“离线跳过”的用例需在自身测试体内将 daily_pipeline.is_online 覆盖为 False。
+    """
+    monkeypatch.delenv("QUANT_ALLOW_OFFLINE", raising=False)
+    import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "is_online", lambda *a, **k: True)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _fast_default_source_client(monkeypatch):
     """Keep mock-only tests isolated from production source throttling."""
     import core.source_client as source_client
