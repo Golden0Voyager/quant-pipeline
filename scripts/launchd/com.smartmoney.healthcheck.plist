@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 模板说明（2026-09-04）：原部署版（7 月起，每天 20:00）从未纳入仓库，
+         卸载时已删除且未留痕；本文件按运行痕迹（launchd_health.{out,err}.log 命名、
+         每日 20:00 触发、--task health_check）重建，环境变量按 update 模板惯例补全，
+         恢复前请逐项核对。 -->
+    <!-- 任务标识 -->
+    <key>Label</key>
+    <string>com.smartmoney.healthcheck</string>
+
+    <!-- 每天 20:00 运行健康检查 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 运行命令：与 update 模板同一套 venv -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin/python3</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/daily_pipeline.py</string>
+        <string>--task</string>
+        <string>health_check</string>
+    </array>
+
+    <!-- 工作目录 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/hainingyu/Code/quant_pipeline</string>
+
+    <!-- 环境变量 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/hainingyu/Code/quant_hunter</string>
+        <!-- 指向真实数据库 -->
+        <key>QUANT_DB_PATH</key>
+        <string>/Users/hainingyu/Code/quant_data/quant_core.db</string>
+        <!-- 无人值守告警：填好 webhook 后改为 webhook，默认 console 只写日志 -->
+        <key>NOTIFICATION_TYPE</key>
+        <string>console</string>
+        <!-- 飞书/钉钉机器人 Webhook URL，配置后任务异常会主动推送 -->
+        <key>NOTIFICATION_WEBHOOK_URL</key>
+        <string></string>
+        <!-- 推送级别：error（默认，只推失败）/ warning / info -->
+        <key>NOTIFICATION_LEVEL</key>
+        <string>error</string>
+    </dict>
+
+    <!-- 日志输出（沿用历史文件命名 launchd_health.{out,err}.log） -->
+    <key>StandardOutPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_health.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hainingyu/Code/quant_data/logs/launchd_health.err.log</string>
+
+    <!-- 健康检查在数据滞后时可能耗时较长（曾观测 >1h），预留 3 小时上限 -->
+    <key>Timeout</key>
+    <integer>10800</integer>
+</dict>
+</plist>
