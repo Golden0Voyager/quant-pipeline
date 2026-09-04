@@ -4161,6 +4161,22 @@ class TestRunRepairScript:
         # 父管道已持锁，子脚本据此跳过重复加锁
         assert captured["env"]["QUANT_PIPELINE_LOCK_HELD"] == "1"
 
+    def test_reconcile_gets_extended_timeout(self):
+        """全市场对账需 3-4h，reconcile 应拿到 4h 超时而非默认 1h。
+
+        回归：2026-08-27 对账 61 分钟（24%）被旧 3600s 超时杀死。
+        """
+        proc = MagicMock(returncode=0, stdout="done", stderr="")
+
+        with patch("daily_pipeline.subprocess.run", return_value=proc) as m:
+            daily_pipeline._run_repair_script("reconcile_with_akshare.py")
+            daily_pipeline._run_repair_script("backup_database.py")
+            daily_pipeline._run_repair_script("validate_and_vacuum.py")
+            daily_pipeline._run_repair_script("some_other.py")
+
+        timeouts = [c.kwargs["timeout"] for c in m.call_args_list]
+        assert timeouts == [14400, 3600, 3600, 3600]
+
     def test_failure_logs_error_detail(self):
         proc = MagicMock(returncode=1, stdout="", stderr="boom traceback")
         with patch("daily_pipeline.subprocess.run", return_value=proc), \
