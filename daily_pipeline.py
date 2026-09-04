@@ -67,6 +67,7 @@ from core.config import (
 from core.freshness import compute_catch_up_tasks, get_latest_dates
 from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
+from core.netcheck import is_online
 from core.notifications import notify_all
 from core.parallel_runner import ParallelTask, run_parallel_tasks
 from core.progress import ProgressTracker  # noqa: F401
@@ -975,6 +976,23 @@ def main():
         if result.exit_failure:
             sys.exit(1)
         return
+
+    # ── 联网预检（全量管道专用）──
+    # 定时/手动在无网络状态启动（如笔记本在包里被 launchd 唤醒）时，
+    # 任务层的断网报错会把环境问题记成上百条 ERROR / 熔断 / 失败任务 / 告警。
+    # all/daily/update_daily_core 启动前先做 TCP 联网探测：离线则本轮干净跳过
+    # （仅一条 INFO、退出码 0、不初始化 Provider / 不加锁 / 不发告警），
+    # 数据由下一次联网运行增量补齐（bars 增量拉取天然覆盖缺日）。
+    # QUANT_ALLOW_OFFLINE=1 可强制照跑（与 --force 语义解耦的逃生门）。
+    if (
+        task in ("all", "daily", "update_daily_core")
+        and os.getenv("QUANT_ALLOW_OFFLINE", "0").lower() not in ("1", "true", "yes")
+        and not is_online()
+    ):
+        logger.info(
+            "🌐 无网络连接，本轮全量更新离线跳过（不视为错误；联网后下次运行自动补齐）"
+        )
+        sys.exit(0)
 
     task_lock_name: str | None = None
     db = None
