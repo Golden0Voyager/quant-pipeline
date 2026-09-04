@@ -2320,6 +2320,74 @@ def test_main_exits_one_when_daily_core_returns_crashed():
 
 
 # ===========================================================================
+# 离线联网预检闸门：无网络启动全量管道应干净跳过，不产生 ERROR/失败记录
+# ===========================================================================
+
+def test_main_offline_skips_cleanly_with_exit_zero():
+    """离线时全量管道（--task all）应干净跳过：仅一条 INFO、退出码 0、不初始化 Provider。"""
+    with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "all"]), \
+         patch("daily_pipeline.is_online", return_value=False), \
+         patch("daily_pipeline.logger") as mock_logger, \
+         patch("daily_pipeline.ProviderFactory") as factory, \
+         pytest.raises(SystemExit) as exc_info:
+        daily_pipeline.main()
+    assert exc_info.value.code == 0
+    factory.configure.assert_not_called()
+    factory.get_db.assert_not_called()
+    assert mock_logger.info.call_count == 1
+    assert "离线" in mock_logger.info.call_args[0][0]
+    assert mock_logger.error.call_count == 0
+
+
+def test_main_offline_skips_even_with_force():
+    """TUI 一键启动带 --force 时离线同样跳过（--force 不豁免离线闸门）。"""
+    with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "all", "--force"]), \
+         patch("daily_pipeline.is_online", return_value=False), \
+         patch("daily_pipeline.logger"), \
+         patch("daily_pipeline.ProviderFactory") as factory, \
+         pytest.raises(SystemExit) as exc_info:
+        daily_pipeline.main()
+    assert exc_info.value.code == 0
+    factory.configure.assert_not_called()
+
+
+def test_main_offline_force_bypass_env_continues(monkeypatch: pytest.MonkeyPatch):
+    """QUANT_ALLOW_OFFLINE=1 逃生门：离线时仍照常执行全量管道。"""
+    monkeypatch.setenv("QUANT_ALLOW_OFFLINE", "1")
+    with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "daily"]), \
+         patch("daily_pipeline.is_online", return_value=False), \
+         patch("daily_pipeline.ProviderFactory") as f, \
+         patch("daily_pipeline.update_daily_core", return_value={"crashed": False}) as fn, \
+         patch("daily_pipeline.logger"):
+        f.configure.return_value = None
+        f.get_db.return_value = MagicMock()
+        f.get_loader.return_value = MagicMock()
+        f.get_indicator_engine.return_value = MagicMock()
+        daily_pipeline.main()
+        fn.assert_called_once()
+
+
+def test_main_single_task_not_gated_when_offline():
+    """单任务（如 update_bars）不套离线闸门：离线时照常执行（预检仅覆盖全量管道）。"""
+    mock_fn = MagicMock(
+        return_value={"status": "success", "saved": 0, "reason": "current"}
+    )
+    with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]), \
+         patch("daily_pipeline.is_online", return_value=False), \
+         patch(
+             "daily_pipeline._safe_task",
+             side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
+         ), \
+         patch("daily_pipeline.ProviderFactory") as factory, \
+         patch.dict("daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}):
+        factory.get_db.return_value = MagicMock()
+        factory.get_loader.return_value = MagicMock()
+        factory.get_indicator_engine.return_value = MagicMock()
+        daily_pipeline.main()
+        mock_fn.assert_called_once()
+
+
+# ===========================================================================
 # 国际数据维度 (v3.1): gold_price / crude_oil / fx_rate / global_index / us_treasury
 # ===========================================================================
 
