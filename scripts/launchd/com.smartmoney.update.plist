@@ -6,7 +6,19 @@
     <key>Label</key>
     <string>com.smartmoney.update</string>
 
-    <!-- 每天下午 20:30 运行（收盘结算完成之后） -->
+    <!-- 模板说明（2026-09-04）：本机已停用 launchd 自动运行，本文件仅为安装模板。
+         曾部署版（8/26）排期与模板不同（StartCalendarInterval 数组、周一 17:30 起），
+         已删除且未留痕；重新启用时请按需修改下方排期。 -->
+    <!-- 默认排期：每天 20:30（收盘结算完成之后）。
+         如需限定工作日，用数组形式为 Weekday 1–5 各写一个 dict（Weekday 取值 0/1–7），
+         详见 Apple launchd.plist 文档。 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
