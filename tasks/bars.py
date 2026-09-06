@@ -148,6 +148,28 @@ def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None
     return suspended
 
 
+def _is_suspended_realtime(symbol: str) -> bool:
+    """抓取全源落空时的实时停牌确认：查雪球行情 status（status==2 停牌）。
+
+    停牌预检只覆盖断更 ≥2 个交易日的股票（见 _detect_suspended_symbols），
+    「最新交易日当天才开始停牌」的股票（如 2026-09-04 起停牌的 *ST康佳A）
+    只落后 1 天、够不到预检阈值，会走完整 4 源重试并被误计为失败。
+    此处兜底：全源无新数据时单只确认一次，停牌则按 skipped 处理。
+    任一异常静默返回 False（保持原失败语义），北交所雪球不支持直接 False。
+    """
+    code = symbol[:6]
+    if is_beijing_stock(code):
+        return False
+    try:
+        from smartmoney_hunter import xueqiu as xq
+        for quote in xq.get_batch_quotes([code]):
+            if quote.get("status") == 2:
+                return True
+    except Exception as e:
+        logger.debug(f"停牌实时确认失败（{symbol}）: {e}")
+    return False
+
+
 def _canary_probe(loader: DataLoaderInterface) -> bool:
     """熔断前哨兵验证：拉取哨兵股票近期日线，确认数据源是否真的不可用。
 
@@ -1046,6 +1068,13 @@ def _update_single_bar(
                 # 优化点：如果行数没变，说明已经是最新，无需重复保存，直接返回 skipped
                 if len(df_bars) == len(existing):
                     if latest_date and expected_latest and latest_date < expected_latest:
+                        # 全源无新数据时兜底确认停牌（覆盖「当天才开始停牌、
+                        # 落后 1 天够不到预检阈值」的情形），停牌按跳过处理
+                        if _is_suspended_realtime(symbol):
+                            logger.info(f"  ⏸️ {symbol} 停牌中（雪球 status=2），跳过抓取")
+                            if suspended_symbols is not None:
+                                suspended_symbols.add(symbol[:6])
+                            return "skipped"
                         logger.warning(
                             f"  ❌ {symbol}: 增量更新未取得最新交易日数据 "
                             f"({latest_date} < {expected_latest})"
