@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from tasks.bars import _normalize_trade_date, _update_single_bar
+from tasks.bars import _is_suspended_realtime, _normalize_trade_date, _update_single_bar
 
 # ===========================================================================
 # _normalize_trade_date — 纯函数全分支覆盖
@@ -154,11 +154,36 @@ class TestUpdateSingleBarEdge:
         loader.incremental_update.return_value = existing  # 行数不变
         with patch("tasks.bars.get_expected_latest_trading_day",
                    return_value="2026-07-19"), \
+             patch("tasks.bars._is_suspended_realtime", return_value=False), \
              patch("tasks.bars.time.sleep"):
             result = _update_single_bar(
                 db, loader, "000001.SZ",
             )
         assert result == "failed"
+        db.save_daily_bars.assert_not_called()
+
+    def test_incremental_stale_but_suspended_skipped(self):
+        """增量无新数据但实时确认为停牌（雪球 status=2）→ skipped，不计失败。
+
+        场景：最新交易日当天才开始停牌的股票（如 2026-09-04 起停牌的 *ST康佳A），
+        只落后 1 天够不到停牌预检阈值，全源无数据属正常，不应误计失败。
+        """
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_latest_bar_date.return_value = "2026-07-16"
+        existing = _bars_df(["2026-07-16"])
+        db.get_daily_bars.return_value = existing
+        loader.incremental_update.return_value = existing  # 行数不变
+        suspended: set[str] = set()
+        with patch("tasks.bars.get_expected_latest_trading_day",
+                   return_value="2026-07-19"), \
+             patch("tasks.bars._is_suspended_realtime", return_value=True), \
+             patch("tasks.bars.time.sleep"):
+            result = _update_single_bar(
+                db, loader, "000016.SZ", suspended_symbols=suspended,
+            )
+        assert result == "skipped"
+        assert suspended == {"000016"}  # 并入停牌集合，同轮后续路径直接跳过
         db.save_daily_bars.assert_not_called()
 
     def test_watchlist_backfill_yfinance_all(self):
@@ -195,3 +220,60 @@ class TestUpdateSingleBarEdge:
             )
         assert result == "skipped"
         db.save_daily_bars.assert_not_called()
+
+
+# ===========================================================================
+# _is_suspended_realtime — 全源落空后的实时停牌确认
+# ===========================================================================
+
+
+def _stub_xueqiu_modules(mock_xq):
+    """构造可注入 sys.modules 的 smartmoney_hunter stub。"""
+    import types
+
+    pkg = types.ModuleType("smartmoney_hunter")
+    pkg.xueqiu = mock_xq
+    return {"smartmoney_hunter": pkg, "smartmoney_hunter.xueqiu": mock_xq}
+
+
+class TestIsSuspendedRealtime:
+    """雪球 status==2 → True；其余（正常/异常/北交所）→ False。"""
+
+    def test_status_2_returns_true(self):
+        import sys
+
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.return_value = [{"code": "000016", "status": 2}]
+        with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("000016.SZ") is True
+        mock_xq.get_batch_quotes.assert_called_once_with(["000016"])
+
+    def test_status_1_returns_false(self):
+        import sys
+
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.return_value = [{"code": "000001", "status": 1}]
+        with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("000001.SZ") is False
+
+    def test_xueqiu_error_returns_false(self):
+        """雪球查询异常 → 静默降级 False（保持原失败语义）。"""
+        import sys
+
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.side_effect = RuntimeError("network down")
+        with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("000016.SZ") is False
+
+    def test_beijing_skipped_without_query(self):
+        """北交所雪球不支持 → 直接 False，不发请求。
+
+        注：conftest 将 is_beijing_stock 全局打桩为 False，此处按真实行为补桩。
+        """
+        import sys
+
+        mock_xq = MagicMock()
+        with patch("tasks.bars.is_beijing_stock", return_value=True), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("920685.BJ") is False
+        mock_xq.get_batch_quotes.assert_not_called()
