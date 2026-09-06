@@ -2372,8 +2372,11 @@ def test_main_single_task_not_gated_when_offline():
     mock_fn = MagicMock(
         return_value={"status": "success", "saved": 0, "reason": "current"}
     )
+    # _should_update 打桩为 True：本用例聚焦离线闸门，与盘中/非交易日门禁无关，
+    # 否则非交易日（如周末）跑测试会因交易日门禁跳过任务而误失败
     with patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]), \
          patch("daily_pipeline.is_online", return_value=False), \
+         patch("daily_pipeline._should_update", return_value=True), \
          patch(
              "daily_pipeline._safe_task",
              side_effect=lambda name, fn, *a, **kw: fn(*a, **kw),
