@@ -101,6 +101,11 @@ AKSHARE_SOCKET_TIMEOUT = 15  # AkShare HTTP 请求超时（秒）
 
 # 运行时可变的模块级状态
 _eastmoney_available: bool = True  # 东财可用标记，启动时探测设置
+# 北交所东财冷却：东财对北交所单次尝试失败后，N 秒内不再为后续北交所股票
+# 逐个重试（新浪不支持北交所，东财故障时每只都会白耗 15s 超时；
+# 2026-09-04 事故：尾部 341 只北交所拖垮 4h 对账预算）。冷却到期后自动恢复探测。
+_bj_em_dead_until: float = 0.0  # 北交所东财冷却截止时间戳（time.monotonic）
+BJ_EM_RETRY_INTERVAL: float = 300.0  # 北交所东财失败后的冷却时长（秒）
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -240,7 +245,7 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
       全局禁用也单独为其尝试一次东财，失败则如实入队
       （2026-08-02 事故：332 只北交所在新浪路径上结构性失败）
     """
-    global _eastmoney_available
+    global _eastmoney_available, _bj_em_dead_until
     if ak is None:
         logger.error("akshare 未安装")
         return pd.DataFrame()
@@ -280,6 +285,12 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
 
     # --- 北交所：新浪不支持，东财被禁用时也单独尝试一次东财 ---
     if is_beijing:
+        # 东财刚对北交所失败过 → 冷却期内直接快速入失败队列，不再逐只白耗 15s 超时
+        if time.monotonic() < _bj_em_dead_until:
+            logger.warning(
+                f"  {symbol} 北交所跳过东财尝试（东财近期不可用，冷却中）"
+            )
+            return pd.DataFrame()
         try:
             with no_proxy():
                 df = _call_with_timeout(
@@ -292,6 +303,7 @@ def get_akshare_data(symbol: str, start_date: str, end_date: str) -> pd.DataFram
                     adjust="qfq",
                 )
         except Exception as e:
+            _bj_em_dead_until = time.monotonic() + BJ_EM_RETRY_INTERVAL
             logger.warning(f"  {symbol} 北交所东财获取失败（新浪不支持北交所）: {e}")
             return pd.DataFrame()
         if df.empty:
