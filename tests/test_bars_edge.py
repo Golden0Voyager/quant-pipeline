@@ -237,7 +237,8 @@ def _stub_xueqiu_modules(mock_xq):
 
 
 class TestIsSuspendedRealtime:
-    """雪球 status==2 → True；其余（正常/异常/北交所）→ False。"""
+    """雪球 status==2 → True；雪球明确回答非停牌 → False；
+    雪球报错/静默返回空 → 东财停复牌名单兜底；北交所不发请求。"""
 
     def test_status_2_returns_true(self):
         import sys
@@ -248,21 +249,62 @@ class TestIsSuspendedRealtime:
             assert _is_suspended_realtime("000016.SZ") is True
         mock_xq.get_batch_quotes.assert_called_once_with(["000016"])
 
-    def test_status_1_returns_false(self):
+    def test_status_1_returns_false_without_tfp(self):
+        """雪球明确回答非停牌 → 直接 False，不再查东财停复牌名单。"""
         import sys
 
         mock_xq = MagicMock()
         mock_xq.get_batch_quotes.return_value = [{"code": "000001", "status": 1}]
-        with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+        ak = MagicMock()
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             assert _is_suspended_realtime("000001.SZ") is False
+        ak.stock_tfp_em.assert_not_called()
 
-    def test_xueqiu_error_returns_false(self):
-        """雪球查询异常 → 静默降级 False（保持原失败语义）。"""
+    def test_xueqiu_error_falls_back_to_tfp(self):
+        """雪球查询异常 → 东财停复牌名单兜底，名单命中 → True。
+
+        回归：2026-09-07 新华传媒（600825）停牌当日，雪球查询在批量抓取
+        高并发下静默失败，单源实现误判为非停牌、计入失败。
+        """
         import sys
 
         mock_xq = MagicMock()
         mock_xq.get_batch_quotes.side_effect = RuntimeError("network down")
-        with patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame({"代码": ["600825"]})
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("600825.SH") is True
+
+    def test_xueqiu_empty_falls_back_to_tfp(self):
+        """雪球静默返回空列表（限流）→ 同样走东财兜底。"""
+        import sys
+
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.return_value = []
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame({"代码": ["600825"]})
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("600825.SH") is True
+
+    def test_both_sources_unavailable_returns_false(self):
+        """雪球异常 + 东财名单为空/异常 → False（保持原失败语义）。"""
+        import sys
+
+        mock_xq = MagicMock()
+        mock_xq.get_batch_quotes.side_effect = RuntimeError("network down")
+        ak = MagicMock()
+        ak.stock_tfp_em.return_value = pd.DataFrame()
+        with patch("tasks.bars.ak", ak), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
+            assert _is_suspended_realtime("000016.SZ") is False
+
+        ak2 = MagicMock()
+        ak2.stock_tfp_em.side_effect = RuntimeError("em down")
+        with patch("tasks.bars.ak", ak2), \
+             patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             assert _is_suspended_realtime("000016.SZ") is False
 
     def test_beijing_skipped_without_query(self):
@@ -273,7 +315,10 @@ class TestIsSuspendedRealtime:
         import sys
 
         mock_xq = MagicMock()
+        ak = MagicMock()
         with patch("tasks.bars.is_beijing_stock", return_value=True), \
+             patch("tasks.bars.ak", ak), \
              patch.dict(sys.modules, _stub_xueqiu_modules(mock_xq)):
             assert _is_suspended_realtime("920685.BJ") is False
         mock_xq.get_batch_quotes.assert_not_called()
+        ak.stock_tfp_em.assert_not_called()

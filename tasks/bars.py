@@ -149,24 +149,41 @@ def _detect_suspended_symbols(db: DatabaseInterface, expected_latest: str | None
 
 
 def _is_suspended_realtime(symbol: str) -> bool:
-    """抓取全源落空时的实时停牌确认：查雪球行情 status（status==2 停牌）。
+    """抓取全源落空时的实时停牌确认（双源）。
 
     停牌预检只覆盖断更 ≥2 个交易日的股票（见 _detect_suspended_symbols），
     「最新交易日当天才开始停牌」的股票（如 2026-09-04 起停牌的 *ST康佳A）
     只落后 1 天、够不到预检阈值，会走完整 4 源重试并被误计为失败。
     此处兜底：全源无新数据时单只确认一次，停牌则按 skipped 处理。
-    任一异常静默返回 False（保持原失败语义），北交所雪球不支持直接 False。
+    - 主源：雪球行情 status（status==2 停牌）；给出明确回答（无论是否停牌）即采信
+    - 辅源：东财停复牌名单 stock_tfp_em —— 雪球报错或静默返回空（高并发限流，
+      如 2026-09-07 新华传媒因此漏判）时兜底，与停牌预检同源
+    两源均不可用时返回 False（保持原失败语义），北交所雪球不支持直接 False。
     """
     code = symbol[:6]
     if is_beijing_stock(code):
         return False
+    # 主源：雪球行情状态
+    xq_answered = False
     try:
         from smartmoney_hunter import xueqiu as xq
         for quote in xq.get_batch_quotes([code]):
+            xq_answered = True
             if quote.get("status") == 2:
                 return True
     except Exception as e:
-        logger.debug(f"停牌实时确认失败（{symbol}）: {e}")
+        logger.warning(f"⚠️ 停牌实时确认（雪球）失败（{symbol}）: {e}")
+    if xq_answered:
+        return False  # 雪球明确回答非停牌，采信，不再查辅源
+    # 辅源：东财停复牌名单（雪球不可用/限流时兜底）
+    if ak is not None:
+        try:
+            tfp = ak.stock_tfp_em(date=datetime.now().strftime("%Y%m%d"))
+            if tfp is not None and not tfp.empty and "代码" in tfp.columns:
+                tfp_codes = {str(c).split(".")[0].zfill(6) for c in tfp["代码"].tolist()}
+                return code in tfp_codes
+        except Exception as e:
+            logger.warning(f"⚠️ 停牌实时确认（东财停复牌名单）失败（{symbol}）: {e}")
     return False
 
 
