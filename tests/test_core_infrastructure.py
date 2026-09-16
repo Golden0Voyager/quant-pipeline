@@ -120,6 +120,47 @@ class TestSafeTask:
         assert isinstance(result["metadata"]["elapsed_seconds"], float)
         assert result["metadata"]["elapsed_seconds"] >= 0
 
+    # ── 任务级网络错误重试 ─────────────────────────────────────────
+
+    def test_network_failure_retried_once_then_success(self):
+        """error_kind=network 的失败自动重试一次，第二次成功则整体成功。"""
+        fn = MagicMock(side_effect=[
+            {"error": "curl: (28) Operation timed out", "error_kind": "network"},
+            {"saved": 3},
+        ])
+        with patch("core.runner.time.sleep") as mock_sleep:
+            result = safe_task("flaky", fn)
+        assert result["status"] == "success"
+        assert fn.call_count == 2
+        mock_sleep.assert_called_once_with(30.0)
+
+    def test_network_failure_exhausted_stays_failed(self):
+        """重试后仍网络失败 → failed，fn 共调用 2 次。"""
+        fn = MagicMock(return_value={"error": "connection reset", "error_kind": "network"})
+        with patch("core.runner.time.sleep"):
+            result = safe_task("down", fn)
+        assert result["status"] == "failed"
+        assert result["error_kind"] == "network"
+        assert fn.call_count == 2
+
+    def test_non_network_failure_not_retried(self):
+        """非 network 的失败（如 internal/data_quality）不重试。"""
+        fn = MagicMock(return_value={"error": "partial failure"})
+        with patch("core.runner.time.sleep") as mock_sleep:
+            result = safe_task("err", fn)
+        assert result["status"] == "failed"
+        assert fn.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_exception_not_retried(self):
+        """fn 抛异常归为 internal，不触发网络重试。"""
+        fn = MagicMock(side_effect=ValueError("boom"))
+        with patch("core.runner.time.sleep") as mock_sleep:
+            result = safe_task("crash", fn)
+        assert result["status"] == "failed"
+        assert fn.call_count == 1
+        mock_sleep.assert_not_called()
+
     def test_fixed_signature_callback_does_not_receive_internal_run_id(self):
         """A callback with a fixed signature must remain callable."""
 
