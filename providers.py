@@ -785,6 +785,19 @@ class SmartMoneyDBProvider:
         except Exception:
             return None
 
+    def get_global_assets_latest_date(self, symbol: str) -> str | None:
+        """轻量查询：直接 SQL 取 global_assets_bars 的 MAX(trade_date)。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute(
+                    "SELECT MAX(trade_date) FROM global_assets_bars WHERE ts_code = ?",
+                    (symbol,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
     def save_daily_bars(self, symbol: str, df: pd.DataFrame) -> None:
         self._db.save_daily_bars(symbol, df)
 

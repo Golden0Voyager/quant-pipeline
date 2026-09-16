@@ -237,6 +237,10 @@ class DatabaseInterface(Protocol):
         """批量保存全球核心资产日线数据，返回实际保存条数。"""
         ...
 
+    def get_global_assets_latest_date(self, symbol: str) -> str | None:
+        """轻量查询：某全球资产在 global_assets_bars 中的最新 trade_date。"""
+        ...
+
     def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         """获取所有自选股列表。"""
         ...

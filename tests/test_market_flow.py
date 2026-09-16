@@ -184,6 +184,38 @@ def test_update_dragon_tiger_ak_none():
     assert res["error"] == "akshare not installed"
 
 
+def test_update_dragon_tiger_network_error_tagged_retriable():
+    """源端网络异常 → error_kind=network（runner 凭此自动重试一次）。"""
+    db = MagicMock()
+    fake_ak = MagicMock()
+    fake_ak.stock_lhb_detail_em.side_effect = ConnectionError("RemoteDisconnected")
+    with patch.object(mf, "ak", fake_ak), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_dragon_tiger(db)
+    assert res["error_kind"] == "network"
+    assert "RemoteDisconnected" in res["error"]
+    db.save_dragon_tiger_batch.assert_not_called()
+
+
+def test_update_dragon_tiger_timeout_guard():
+    """超时护栏：akshare 调用挂起超过 180s → TimeoutError → network 失败。
+
+    回归：2026-09-15 源端挂起 16.8 分钟才断连，拖长整轮管道。
+    """
+    db = MagicMock()
+    fake_pool = MagicMock()
+    fake_pool.submit.return_value.result.side_effect = TimeoutError("timed out")
+    with patch.object(mf, "ak", MagicMock()), patch.object(
+        mf, "ThreadPoolExecutor", return_value=fake_pool
+    ), patch.object(
+        mf, "get_expected_latest_trading_day", return_value="2026-07-20"
+    ):
+        res = mf.update_dragon_tiger(db)
+    assert res["error_kind"] == "network"
+    fake_pool.shutdown.assert_called_once_with(wait=False)
+
+
 def test_update_block_trade_happy_path():
     db = MagicMock()
     db.save_block_trade_batch.return_value = 1

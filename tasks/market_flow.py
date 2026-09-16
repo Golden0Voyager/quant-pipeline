@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time  # noqa: F401
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
@@ -235,7 +236,17 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
 
     target_date = get_expected_latest_trading_day()
     try:
-        df = ak.stock_lhb_detail_em(start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
+        # 超时护栏：akshare 底层 requests 无可靠超时，2026-09-15 源端挂起
+        # 16.8 分钟才断连。超时的 future 无法强杀，shutdown(wait=False) 放弃它
+        # （泄漏一个线程，对批处理进程无害），配合 runner 网络重试快速恢复
+        compact = target_date.replace("-", "")
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            df = pool.submit(
+                ak.stock_lhb_detail_em, start_date=compact, end_date=compact
+            ).result(timeout=180)
+        finally:
+            pool.shutdown(wait=False)
         if df is None or df.empty:
             logger.warning("⚠️  龙虎榜无数据")
             # 显式 skipped：当日无龙虎榜个股属正常结果，避免被结果契约误判为 failed
@@ -277,7 +288,9 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
         return {"saved": saved, "total": len(df)}
     except Exception as e:
         logger.error(f"❌ 龙虎榜获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        # error_kind=network：本任务的失败模式即源端网络问题（含上方超时护栏
+        # 抛出的 TimeoutError），标记后 runner 会自动重试一次
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================

@@ -1,10 +1,11 @@
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
-from core.task_result import TaskResult
+from core.task_result import ErrorKind, TaskResult
 from interface import ProviderFactory
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,33 @@ GLOBAL_ASSETS = [
     "BTC-USD"
 ]
 
+# 增量拉取的重叠窗口：从库内最新日前回退几天续拉（INSERT OR REPLACE 幂等），
+# 覆盖周末/美股节假日等「暂无新数据」的正常情形，避免空响应被误判为失败
+_INCREMENTAL_OVERLAP_DAYS = 5
+# 新股/库内无数据时的全量回填窗口
+_FULL_LOOKBACK_DAYS = 730
+# yfinance 限流常假报 "possibly delisted; no price data found"
+# （2026-09-15 JNJ/MRK），空响应后重试一次
+_FETCH_RETRY_DELAY = 10.0
+# 高成功率容忍：个别 symbol 限流/缺数不拖垮整个管道（degraded 会被
+# 管道汇总判为失败导致 exit 1），失败清单保留在日志与 metadata 中
+_SUCCESS_TOLERANCE = 0.9
+
+
+def _fetch_with_retry(loader: Any, symbol: str, start_dt: str) -> pd.DataFrame:
+    """拉取单只资产数据，空响应重试一次。"""
+    for attempt in range(2):
+        df = loader.fetch_global_assets_bars(symbol, start_date=start_dt)
+        if df is not None and not df.empty:
+            return df
+        if attempt == 0:
+            logger.warning(f"  [{symbol}] 无数据返回，{_FETCH_RETRY_DELAY:.0f}s 后重试...")
+            time.sleep(_FETCH_RETRY_DELAY)
+    return pd.DataFrame()
+
+
 def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
-    """拉取预设的全球核心资产（如美股科技、BTC）历史/增量数据并存入 global_assets_bars 表。"""
+    """拉取预设的全球核心资产（如美股科技、BTC）增量数据并存入 global_assets_bars 表。"""
 
     db = ProviderFactory.get_db()
     loader = ProviderFactory.get_loader()
@@ -34,18 +60,26 @@ def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
 
     for symbol in GLOBAL_ASSETS:
         try:
-            # 获取最近 2 年的数据，利用 INSERT OR REPLACE 幂等写入
-            start_dt = (datetime.now() - pd.Timedelta(days=730)).strftime("%Y-%m-%d")
+            # 增量拉取：库内最新日前回退数天续拉（2026-09-15 前每天全量拉 730 天，
+            # 既慢又放大 yfinance 限流概率）；库内无数据则全量回填
+            latest = db.get_global_assets_latest_date(symbol)
+            if latest:
+                start_dt = (
+                    datetime.strptime(latest, "%Y-%m-%d")
+                    - pd.Timedelta(days=_INCREMENTAL_OVERLAP_DAYS)
+                ).strftime("%Y-%m-%d")
+            else:
+                start_dt = (
+                    datetime.now() - pd.Timedelta(days=_FULL_LOOKBACK_DAYS)
+                ).strftime("%Y-%m-%d")
 
-            # 使用我们在 DataLoaderInterface 中新加的方法
-            df = loader.fetch_global_assets_bars(symbol, start_date=start_dt)
-            if df is None or df.empty:
+            df = _fetch_with_retry(loader, symbol, start_dt)
+            if df.empty:
                 logger.warning(f"  [{symbol}] 无数据返回")
                 failed_symbols.append(symbol)
                 continue
 
             records = df.to_dict(orient="records")
-            # 使用我们在 DatabaseInterface 中新加的方法
             saved = db.save_global_assets_bars_batch(records)
             logger.info(f"  [{symbol}] 成功更新 {saved} 条全球资产数据")
             success_count += 1
@@ -54,8 +88,7 @@ def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
             logger.exception(f"更新全球核心资产失败 {symbol}: {e}")
             failed_symbols.append(symbol)
 
-    if failed_symbols:
-        from core.task_result import ErrorKind
+    if failed_symbols and success_count < len(GLOBAL_ASSETS) * _SUCCESS_TOLERANCE:
         return TaskResult.degraded(
             task_name="update_global_assets",
             error_kind=ErrorKind.INTERNAL,
@@ -64,8 +97,11 @@ def update_global_assets(*args: Any, **kwargs: Any) -> TaskResult:
             saved=success_count
         )
 
+    if failed_symbols:
+        logger.warning(f"⚠️ 个别全球资产抓取失败（成功率达标，容忍）: {failed_symbols}")
     return TaskResult.success(
         task_name="update_global_assets",
         fetched=len(GLOBAL_ASSETS),
-        saved=success_count
+        saved=success_count,
+        metadata={"failed_symbols": failed_symbols} if failed_symbols else None,
     )

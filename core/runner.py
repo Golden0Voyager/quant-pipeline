@@ -20,6 +20,13 @@ from core.task_result import ErrorKind, TaskResult, TaskStatus, normalize_task_r
 
 logger = logging.getLogger(__name__)
 
+# 任务级网络错误重试：无人值守运行中最常见的假失败是单次网络抖动
+# （2026-09-10 concept_board curl 15s 超时、2026-09-15 dragon_tiger 断连，
+# 手动重跑均立即成功）。对 error_kind=network 的失败整体重试一次，
+# 代价有界（一次 30s 等待），收益是管道不再因抖动 exit 1
+_NETWORK_RETRY_MAX = 1  # 额外重试次数（总尝试 = 1 + 1）
+_NETWORK_RETRY_DELAY = 30.0  # 秒
+
 
 @contextmanager
 def task_timer(name: str):
@@ -123,10 +130,24 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
 
     try:
         logger.info(f"\n{'=' * 60}\n▶ 开始任务: {name}\n{'=' * 60}")
-        raw = fn(*args, **kwargs)
-        result = normalize_task_result(
-            name, raw if isinstance(raw, dict | TaskResult) else {}
-        )
+        result: TaskResult | None = None
+        for attempt in range(1 + _NETWORK_RETRY_MAX):
+            raw = fn(*args, **kwargs)
+            result = normalize_task_result(
+                name, raw if isinstance(raw, dict | TaskResult) else {}
+            )
+            retriable = (
+                result.status == TaskStatus.FAILED
+                and result.error_kind == ErrorKind.NETWORK
+            )
+            if not retriable or attempt >= _NETWORK_RETRY_MAX:
+                break
+            logger.warning(
+                f"⚠️ 任务 {name} 网络错误，{_NETWORK_RETRY_DELAY:.0f}s 后重试 "
+                f"({attempt + 1}/{_NETWORK_RETRY_MAX}): {result.error}"
+            )
+            time.sleep(_NETWORK_RETRY_DELAY)
+        assert result is not None
         result.metadata["elapsed_seconds"] = round(time.time() - task_start, 3)
 
         if result.status in (TaskStatus.SUCCESS, TaskStatus.NO_DATA):
