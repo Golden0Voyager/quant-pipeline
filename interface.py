@@ -229,6 +229,10 @@ class DatabaseInterface(Protocol):
         """批量保存中美国债收益率数据，返回实际保存条数。"""
         ...
 
+    def save_us_macro_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存美国日度宏观利率（FRED），返回实际保存条数。"""
+        ...
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存期货日线数据，返回实际保存条数。"""
         ...
