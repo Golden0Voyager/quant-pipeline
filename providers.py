@@ -1201,6 +1201,44 @@ class SmartMoneyDBProvider:
     def save_us_treasury_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_us_treasury_batch(records)
 
+    def save_us_macro_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存美国日度宏观利率（FRED）到 us_macro_daily 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/012_us_macro_daily.sql 创建。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO us_macro_daily (
+                        trade_date, effr, dgs3mo, dgs10, t10yie,
+                        spread_10y_3m, real_rate_10y, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("effr"),
+                            r.get("dgs3mo"),
+                            r.get("dgs10"),
+                            r.get("t10yie"),
+                            r.get("spread_10y_3m"),
+                            r.get("real_rate_10y"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ 美国宏观利率批量保存失败: {e}")
+            return 0
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
 

@@ -2806,6 +2806,7 @@ class TestGlobalMacroCli:
             ("update_usd", "update_usd"),
             ("update_global_index", "update_global_index"),
             ("update_us_treasury", "update_us_treasury"),
+            ("update_us_macro", "update_us_macro"),
         ],
     )
     def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):
