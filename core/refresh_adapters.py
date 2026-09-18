@@ -75,6 +75,7 @@ from tasks.market_flow import (
 )
 from tasks.market_valuation import fetch_market_valuation_records
 from tasks.option_sentiment import fetch_option_sentiment_record
+from tasks.placement import fetch_placement_announcements_records
 from tasks.sector_derivatives import (
     fetch_index_futures_basis_records,
     fetch_sector_daily_records,
@@ -2277,8 +2278,59 @@ class StockRepurchaseRefreshAdapter:
 
 
 # ===========================================================================
-# update_sector_derivatives（复合：三表目标日分区一次事务替换）
+# update_placement_announcements（运行快照，定增公告台账 → 稳定键 UPSERT）
 # ===========================================================================
+
+_PLACEMENT_COLUMNS = (
+    "ts_code",
+    "symbol",
+    "name",
+    "issue_method",
+    "issue_date",
+    "data_source",
+    "source_record_key",
+)
+
+
+@dataclass
+class PlacementRefreshAdapter:
+    """定增公告：全量快照按稳定源键 UPSERT，快照外旧公告保留。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[], list[dict]] = field(default=fetch_placement_announcements_records)
+
+    task_name = "update_placement_announcements"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+
+        records = self.fetch_records()
+        if not records:
+            raise RefreshValidationError("placement announcements snapshot is empty")
+
+        rows = _snapshot_rows(records, _PLACEMENT_COLUMNS, ("source_record_key",))
+        self.store.upsert_keyed_snapshot(
+            KeyedUpsertReplacement(
+                table="placement_announcements",
+                columns=_PLACEMENT_COLUMNS,
+                rows=_as_store_rows(rows, _PLACEMENT_COLUMNS),
+                natural_keys=("source_record_key",),
+                required_fields=("source_record_key", "issue_date", "ts_code"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=context.target_date,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"run_id": context.run_id},
+        )
 
 _SECTOR_DAILY_COLUMNS = (
     "sector_name",
@@ -2445,12 +2497,13 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_cb_quotation": CbQuotationRefreshAdapter,
     "update_cb_redeem": CbRedeemRefreshAdapter,
     "update_stock_repurchase": StockRepurchaseRefreshAdapter,
+    "update_placement_announcements": PlacementRefreshAdapter,
     "update_sector_derivatives": SectorDerivativesRefreshAdapter,
 }
 
 
 # ===========================================================================
-# 运行时适配器总装配（CLI 收盘刷新入口，全部 29 个键→实例）
+# 运行时适配器总装配（CLI 收盘刷新入口，全部 30 个键→实例）
 # ===========================================================================
 
 
@@ -2461,9 +2514,9 @@ def build_all_refresh_adapters(
     engine: IndicatorEngineInterface,
     store: SQLiteRefreshStore,
 ) -> dict[str, RefreshAdapter]:
-    """装配全部 29 个收盘刷新适配器（键为注册表任务名）。
+    """装配全部 30 个收盘刷新适配器（键为注册表任务名）。
 
-    复用两个已有工厂（核心远端 4 + 派生 5），并显式接入其余 20 个
+    复用两个已有工厂（核心远端 4 + 派生 5），并显式接入其余 21 个
     Task 9 适配器。EM 筹码 throttle 保持生产默认，绝不在此注入测试节流。
     """
     adapters: dict[str, RefreshAdapter] = {}
@@ -2488,6 +2541,7 @@ def build_all_refresh_adapters(
         "update_cb_quotation": CbQuotationRefreshAdapter(store=store),
         "update_cb_redeem": CbRedeemRefreshAdapter(store=store),
         "update_stock_repurchase": StockRepurchaseRefreshAdapter(store=store),
+        "update_placement_announcements": PlacementRefreshAdapter(store=store),
         "update_sector_derivatives": SectorDerivativesRefreshAdapter(store=store),
     })
     return adapters
