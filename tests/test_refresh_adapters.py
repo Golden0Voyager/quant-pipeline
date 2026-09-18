@@ -1366,7 +1366,7 @@ def test_every_refresh_policy_has_runtime_adapter():
 
 
 def test_build_all_refresh_adapters_covers_every_refresh_policy(derived_db_path, store):
-    """build_all_refresh_adapters 组装全部 29 个适配器，键与注册表逐一对应。"""
+    """build_all_refresh_adapters 组装全部 30 个适配器，键与注册表逐一对应。"""
     db = FakeHistoryDb(derived_db_path, {})
     loader = FakeBarsLoader({})
     engine = FakeIndicatorEngine()
