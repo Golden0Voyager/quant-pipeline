@@ -68,6 +68,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_restricted_share": "限售解禁 (Restricted Share)",
     "update_earnings_forecast": "业绩预告 (Earnings Forecast)",
     "update_stock_repurchase": "股票回购 (Stock Repurchase)",
+    "update_placement_announcements": "定增公告 (Private Placement)",
     "update_institution_survey": "机构调研 (Institution Survey)",
     "update_stock_pledge": "股票质押 (Stock Pledge)",
     "update_option_sentiment": "期权情绪 (Option Sentiment)",
