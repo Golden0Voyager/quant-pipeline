@@ -21,7 +21,15 @@ GLOBAL_ASSETS = [
     # 日常消费与零售
     "WMT", "PG", "KO", "PEP", "COST", "MCD", "SBUX", "NKE", "HD",
     # 加密货币
-    "BTC-USD"
+    "BTC-USD",
+    # 宏观与市场情绪（美联储加息周期核心传导变量）
+    "^VIX",            # 恐慌指数
+    "USDCNH=X",        # 离岸人民币（在岸 fx_rate 表为中行牌价）
+    # 大宗商品日线（akshare 原油/黄金接口仅存实时快照，此处补历史序列）
+    "CL=F",            # WTI 原油期货
+    "BZ=F",            # Brent 原油期货
+    "GC=F",            # COMEX 黄金
+    "SI=F",            # COMEX 白银
 ]
 
 # 增量拉取的重叠窗口：从库内最新日前回退几天续拉（INSERT OR REPLACE 幂等），
