@@ -163,6 +163,7 @@ from tasks.market_flow import (
 from tasks.market_valuation import update_market_valuation
 from tasks.money_market import update_money_market
 from tasks.option_sentiment import update_option_sentiment
+from tasks.placement import update_placement_announcements
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.stock_pledge import update_stock_pledge
 from tasks.stock_repurchase import update_stock_repurchase
@@ -239,6 +240,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_sector_derivatives": update_sector_derivatives,
     "update_option_sentiment": update_option_sentiment,
     "update_stock_repurchase": update_stock_repurchase,
+    "update_placement_announcements": update_placement_announcements,
     "update_institution_survey": update_institution_survey,
     "update_stock_pledge": update_stock_pledge,
     "update_chip_distribution": update_chip_distribution,
@@ -326,7 +328,7 @@ def _run_registry_task(
     if task_name in (
         "update_margin_trading", "update_dragon_tiger",
         "update_block_trade", "update_shareholder_count",
-        "update_historical_valuation",
+        "update_historical_valuation", "update_placement_announcements",
     ):
         return _safe_task(task_name, fn, db, symbols=symbols)
 
