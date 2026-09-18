@@ -58,6 +58,7 @@ QUARTERLY_TABLES: set[str] = {
 DELAYED_PUBLISH_TABLES: set[str] = {
     "fx_rate",
     "us_treasury",
+    "us_macro_daily",
     "margin_trading",
     "dragon_tiger",
     "block_trade",

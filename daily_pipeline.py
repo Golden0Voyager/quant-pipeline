@@ -167,6 +167,7 @@ from tasks.placement import update_placement_announcements
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.stock_pledge import update_stock_pledge
 from tasks.stock_repurchase import update_stock_repurchase
+from tasks.us_macro import update_us_macro
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
     update_fundamentals,
@@ -232,6 +233,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_usd": update_usd,
     "update_global_index": update_global_index,
     "update_us_treasury": update_us_treasury,
+    "update_us_macro": update_us_macro,
     "update_futures": update_futures,
     "update_global_assets": update_global_assets,
     "update_concept_board": update_concept_board,
@@ -507,6 +509,7 @@ def run_all(
         results["fx_rate"] = _run_task("update_usd", update_usd, db)
         results["global_index"] = _run_task("update_global_index", update_global_index, db)
         results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
+        results["us_macro"] = _run_task("update_us_macro", update_us_macro, db)
         results["futures"] = _run_task("update_futures", update_futures, db)
         results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
         results["money_market"] = _run_task("update_money_market", update_money_market, db)
@@ -533,6 +536,7 @@ def run_all(
             ("update_usd", update_usd, (db,), {}),
             ("update_global_index", update_global_index, (db,), {}),
             ("update_us_treasury", update_us_treasury, (db,), {}),
+            ("update_us_macro", update_us_macro, (db,), {}),
             ("update_futures", update_futures, (db,), {}),
             ("update_china_macro", update_china_macro, (db,), {}),
             ("update_money_market", update_money_market, (db,), {}),
@@ -575,6 +579,7 @@ def run_all(
         results["fx_rate"] = stage2_results.get("update_usd", {})
         results["global_index"] = stage2_results.get("update_global_index", {})
         results["us_treasury"] = stage2_results.get("update_us_treasury", {})
+        results["us_macro"] = stage2_results.get("update_us_macro", {})
         results["futures"] = stage2_results.get("update_futures", {})
         results["china_macro"] = stage2_results.get("update_china_macro", {})
         results["money_market"] = stage2_results.get("update_money_market", {})

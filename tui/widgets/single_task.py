@@ -48,6 +48,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_usd": "汇率 (USD/CNY)",
     "update_global_index": "全球指数 (Global Index)",
     "update_us_treasury": "美债收益率 (US Treasury)",
+    "update_us_macro": "美国宏观利率 (US Macro Rates)",
     "update_futures": "期货日线 (Futures)",
     "update_money_market": "货币市场 (Money Market)",
     "update_global_assets": "全球资产日线 (Global Assets)",
