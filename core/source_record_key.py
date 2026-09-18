@@ -63,6 +63,12 @@ STOCK_PLEDGE_SOURCE_KEY_FIELDS = (
     "pledger",
 )
 
+PLACEMENT_SOURCE_KEY_FIELDS = (
+    "ts_code",
+    "issue_date",
+    "issue_method",
+)
+
 _DRAGON_TIGER_NUMERIC_FIELDS = frozenset({
     "close_price",
     "pct_change",
@@ -159,3 +165,8 @@ def block_trade_source_key(record: Mapping[str, Any]) -> str:
 def stock_pledge_source_key(record: Mapping[str, Any]) -> str:
     """Stable natural key for one pledge row (null-pledger tolerant)."""
     return _event_key(record, STOCK_PLEDGE_SOURCE_KEY_FIELDS, frozenset())
+
+
+def placement_source_key(record: Mapping[str, Any]) -> str:
+    """Stable natural key for one private-placement announcement row."""
+    return _event_key(record, PLACEMENT_SOURCE_KEY_FIELDS, frozenset())

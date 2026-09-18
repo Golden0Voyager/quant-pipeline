@@ -406,6 +406,10 @@ class DatabaseInterface(Protocol):
         """批量保存股票回购数据，返回实际保存条数。"""
         ...
 
+    def save_placement_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存定增公告数据，返回实际保存条数。"""
+        ...
+
     def save_insider_trading_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存董监高增减持数据，返回实际保存条数。"""
         ...

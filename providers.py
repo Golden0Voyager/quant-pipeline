@@ -28,6 +28,7 @@ from core.source_record_key import (
     STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
     block_trade_source_key,
     dragon_tiger_source_key,
+    placement_source_key,
     source_record_key,
     stock_pledge_source_key,
 )
@@ -558,6 +559,24 @@ class SmartMoneyDBProvider:
                         pledge_org TEXT,
                         source_record_key TEXT NOT NULL
                     )
+                """)
+                # ==================== Phase 2: 定增公告 ====================
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS placement_announcements (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_record_key TEXT NOT NULL UNIQUE,
+                        ts_code TEXT NOT NULL,
+                        symbol TEXT,
+                        name TEXT,
+                        issue_method TEXT,
+                        issue_date DATE,
+                        data_source TEXT,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_placement_code_date
+                    ON placement_announcements(ts_code, issue_date DESC)
                 """)
         except Exception as e:
             logger.warning(f"⚠️ _ensure_tables 创建表失败: {e}")
@@ -1119,6 +1138,46 @@ class SmartMoneyDBProvider:
 
     def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
+
+    def save_placement_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存定增公告数据（稳定源键 UPSERT，老公告重抓走更新）。"""
+        valid_records = [r for r in records if r.get("issue_date") and r.get("ts_code")]
+        if not valid_records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT INTO placement_announcements
+                        (source_record_key, ts_code, symbol, name,
+                         issue_method, issue_date, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_record_key) DO UPDATE SET
+                        ts_code = excluded.ts_code,
+                        symbol = excluded.symbol,
+                        name = excluded.name,
+                        issue_method = excluded.issue_method,
+                        issue_date = excluded.issue_date,
+                        data_source = excluded.data_source,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    [
+                        (r.get("source_record_key") or placement_source_key(r),
+                         r.get("ts_code"), r.get("symbol"), r.get("name"),
+                         r.get("issue_method"), r.get("issue_date"),
+                         r.get("data_source", "akshare"))
+                        for r in valid_records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            # 结构性/约束错误必须外抛：让调用方审计标记失败，而非静默记 0
+            raise
+        except Exception as e:
+            logger.warning(f"⚠️ 定增公告批量保存失败: {e}")
+            return 0
 
     def save_sector_fund_flow(self, sector_name: str, data: dict[str, Any]) -> None:
         self._db.save_sector_fund_flow(sector_name, data)

@@ -578,15 +578,16 @@ def test_composite_component_failure_rolls_back_every_table(
     assert audits["update_sector_derivatives"]["status"] == "failed"
 
 
-# ── acceptance: all 28 tasks persist audited results ───────────────────
+# ── acceptance: all 29 tasks persist audited results ───────────────────
 
 
-def test_all_28_tasks_persist_run_and_task_audit_rows(
+def test_all_29_tasks_persist_run_and_task_audit_rows(
     db_path: Path, store: SQLiteRefreshStore
 ) -> None:
     specs = refreshable_trading_tasks()
-    # 28：update_north_flow 已下线（北向日度流向 2024-08 起停止披露）
-    assert len(specs) == 28
+    # 29：update_north_flow 已下线（北向日度流向 2024-08 起停止披露），
+    # update_placement_announcements 为定增公告台账（2026-09 接入）
+    assert len(specs) == 29
     adapters = _build_adapters(
         specs,
         {
@@ -600,7 +601,7 @@ def test_all_28_tasks_persist_run_and_task_audit_rows(
     assert result.status is TaskStatus.SUCCESS
     audits = _task_audit_rows(db_path)
     assert set(audits) == {spec.name for spec in specs}
-    assert len(audits) == 28
+    assert len(audits) == 29
     assert {row["status"] for row in audits.values()} == {"success"}
     assert {row["requested_date"] for row in audits.values()} == {_TARGET}
     runs = _run_rows(db_path)
