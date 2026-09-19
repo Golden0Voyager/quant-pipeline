@@ -364,20 +364,29 @@ def update_dividend_summary(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
-def _fetch_gold_price(trade_date: str) -> list[dict]:
-    """获取上海金交所基准金价（早盘价/晚盘价）。"""
+# spot_golden_benchmark_sge 返回全量历史（约 10 年）。每次运行只取末尾
+# 最近 N 条：写入是 INSERT OR REPLACE 幂等，重叠窗口可自愈短期缺跑，
+# 又避免把整段历史按运行日重复落库（trade_date 须取 trading_time 的
+# 日期部分，接口返回的是历史基准价，运行日 ≠ 价格所属交易日）。
+_GOLD_PRICE_LOOKBACK_ROWS = 10
+
+
+def _fetch_gold_price() -> list[dict]:
+    """获取上海金交所基准金价（早盘价/晚盘价），只保留最近 N 个交易日。"""
     if ak is None:
         return []
     try:
         df = ak.spot_golden_benchmark_sge()
         if df is None or df.empty:
             return []
+        df = df.sort_values("交易时间").tail(_GOLD_PRICE_LOOKBACK_ROWS)
         records = []
         for _, row in df.iterrows():
+            trading_time = str(row.get("交易时间", "")).strip()
             records.append(
                 {
-                    "trade_date": trade_date,
-                    "trading_time": str(row.get("交易时间", "")).strip(),
+                    "trade_date": trading_time[:10],
+                    "trading_time": trading_time,
                     "evening_price": row.get("晚盘价"),
                     "morning_price": row.get("早盘价"),
                     "data_source": "akshare",
@@ -400,7 +409,7 @@ def update_gold_price(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_gold_price(get_expected_latest_trading_day())
+        records = _fetch_gold_price()
         if not records:
             logger.warning("⚠️ 国际金价无数据")
             # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
