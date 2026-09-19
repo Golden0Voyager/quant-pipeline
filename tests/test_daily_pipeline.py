@@ -2407,9 +2407,31 @@ def test_update_gold_price_success(mock_ak: MagicMock):
         r = daily_pipeline.update_gold_price(db)
     assert r["saved"] == 2
     db.save_gold_price_batch.assert_called_once()
-    rec = db.save_gold_price_batch.call_args[0][0][0]
+    records = db.save_gold_price_batch.call_args[0][0]
+    # 按交易时间升序，只保留尾部窗口
+    assert [r_["trading_time"] for r_ in records] == ["2026-07-10 晚盘", "2026-07-11 早盘"]
+    rec = records[-1]
     assert rec["evening_price"] == 897.58
-    assert rec["trading_time"] == "2026-07-11 早盘"
+    # trade_date 取 trading_time 的日期部分（接口为历史基准价，非运行日）
+    assert rec["trade_date"] == "2026-07-11"
+
+
+@patch("tasks.macro.ak")
+def test_update_gold_price_history_bloat_guard(mock_ak: MagicMock):
+    """全量历史接口只应写入尾部最近 N 条，禁止按运行日整段重复落库。"""
+    db = MagicMock()
+    db.save_gold_price_batch.side_effect = lambda records: len(records)
+    dates = pd.date_range("2020-01-01", periods=100, freq="B").strftime("%Y-%m-%d")
+    mock_ak.spot_golden_benchmark_sge.return_value = pd.DataFrame({
+        "交易时间": list(dates),
+        "晚盘价": [900.0] * 100,
+        "早盘价": [899.0] * 100,
+    })
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_gold_price(db)
+    assert r["total"] == 10
+    records = db.save_gold_price_batch.call_args[0][0]
+    assert records[-1]["trade_date"] == str(dates[-1])[:10]
 
 
 @patch("tasks.macro.ak")
