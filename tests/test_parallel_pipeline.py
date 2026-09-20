@@ -136,8 +136,8 @@ def test_run_all_parallel_execution(tmp_path):
     assert safe_task.call_count > 25
 
 
-def test_run_all_serializes_shared_db_parallel_stages(tmp_path):
-    """共享数据库实例不得被并发阶段的多个线程复用。"""
+def test_run_all_stage2_serial_stage4_parallel(tmp_path):
+    """stage2 维持串行；stage4 写表不相交、已恢复并发（max_workers=workers）。"""
     db = MagicMock()
     db.db_path = str(tmp_path / "quant_core.db")
 
@@ -147,7 +147,7 @@ def test_run_all_serializes_shared_db_parallel_stages(tmp_path):
          patch("daily_pipeline.logger"):
         daily_pipeline.run_all(db, MagicMock(), MagicMock(), parallel_workers=3)
 
-    assert [call.kwargs["max_workers"] for call in runner.call_args_list] == [1, 1]
+    assert [call.kwargs["max_workers"] for call in runner.call_args_list] == [1, 3]
 
 
 def test_run_all_sequential_flag(tmp_path):
