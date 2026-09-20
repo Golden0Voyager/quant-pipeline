@@ -231,15 +231,6 @@ class SmartMoneyDBProvider:
                         data_date TEXT
                     )
                 """)
-                # macro_daily
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS macro_daily (
-                        date TEXT PRIMARY KEY,
-                        shibor_on REAL, shibor_1w REAL, shibor_2w REAL, shibor_1m REAL,
-                        shibor_3m REAL, shibor_6m REAL, shibor_9m REAL, shibor_1y REAL,
-                        data_date TEXT
-                    )
-                """)
                 # money_market（SHIBOR + 回购利率 + 基准利率，日频）
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS money_market (
@@ -516,21 +507,6 @@ class SmartMoneyDBProvider:
                         repurchase_quantity INTEGER,
                         progress_status TEXT,
                         source_record_key TEXT NOT NULL UNIQUE
-                    )
-                """)
-                # ==================== Phase 2: 增减持 ====================
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS insider_trading (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT,
-                        stock_code TEXT,
-                        stock_name TEXT,
-                        changer_name TEXT,
-                        change_type TEXT,
-                        change_quantity INTEGER,
-                        change_price REAL,
-                        holdings_after_change REAL,
-                        UNIQUE(trade_date, stock_code, changer_name, change_type)
                     )
                 """)
                 # ==================== Phase 2: 机构调研 ====================
@@ -1230,9 +1206,6 @@ class SmartMoneyDBProvider:
     def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
         return self._db.get_fundamentals_batch(trade_date)
 
-    def save_north_flow_batch(self, records: list[dict[str, Any]]) -> int:
-        return self._db.save_north_flow_batch(records)
-
     def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_north_hold_batch(records)
 
@@ -1247,9 +1220,6 @@ class SmartMoneyDBProvider:
 
     def save_gold_price_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_gold_price_batch(records)
-
-    def save_crude_oil_batch(self, records: list[dict[str, Any]]) -> int:
-        return self._db.save_crude_oil_batch(records)
 
     def save_usd_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_usd_batch(records)
@@ -1544,27 +1514,6 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 季度宏观数据保存失败: {e}")
-            return 0
-
-    def save_macro_daily_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存日度宏观数据。"""
-        if not records:
-            return 0
-        try:
-            with self._write_lock:
-                conn = self._get_write_conn()
-                before_changes = conn.total_changes
-                conn.executemany(
-                    "INSERT OR REPLACE INTO macro_daily (date, shibor_on, shibor_1w, shibor_2w, shibor_1m, shibor_3m, shibor_6m, shibor_9m, shibor_1y, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        (r["date"], r.get("shibor_on"), r.get("shibor_1w"), r.get("shibor_2w"), r.get("shibor_1m"), r.get("shibor_3m"), r.get("shibor_6m"), r.get("shibor_9m"), r.get("shibor_1y"), r.get("data_date"))
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.warning(f"⚠️ 日度宏观数据保存失败: {e}")
             return 0
 
     def save_money_market_batch(self, records: list[dict[str, Any]]) -> int:
@@ -2239,30 +2188,6 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 股票回购批量保存失败: {e}")
-            return 0
-
-    def save_insider_trading_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存增减持数据。"""
-        if not records:
-            return 0
-        try:
-            with self._write_lock:
-                conn = self._get_write_conn()
-                before_changes = conn.total_changes
-                conn.executemany(
-                    "INSERT OR REPLACE INTO insider_trading (trade_date, stock_code, stock_name, changer_name, change_type, change_quantity, change_price, holdings_after_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        (r.get("trade_date"), r.get("stock_code"), r.get("stock_name"),
-                         r.get("changer_name"), r.get("change_type"),
-                         r.get("change_quantity"), r.get("change_price"),
-                         r.get("holdings_after_change"))
-                        for r in records
-                    ],
-                )
-                return self._commit_delta(conn, before_changes)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.warning(f"⚠️ 增减持批量保存失败: {e}")
             return 0
 
     def save_institution_survey_batch(self, records: list[dict[str, Any]]) -> int:
