@@ -158,6 +158,29 @@ def test_hk_tech_index_batch_roundtrip_and_idempotent():
     provider.close()
 
 
+def test_eia_petroleum_batch_roundtrip_and_idempotent():
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+    rows = [
+        {"week_date": "2026-09-04", "series_id": "PET.WCESTUS1.W",
+         "series_name": "全美商业原油库存(除SPR)", "value": 424069.0, "units": "MBBL",
+         "data_source": "eia"},
+        {"week_date": "2026-09-11", "series_id": "PET.WCESTUS1.W",
+         "series_name": "全美商业原油库存(除SPR)", "value": 423429.0, "units": "MBBL",
+         "data_source": "eia"},
+    ]
+    assert provider.save_eia_petroleum_batch(rows) == 2
+    # UNIQUE(week_date, series_id) + INSERT OR REPLACE：重复写入不产生新行
+    provider.save_eia_petroleum_batch(rows)
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM eia_petroleum_weekly WHERE series_id = 'PET.WCESTUS1.W'"
+        ).fetchone()[0]
+    assert count == 2
+    provider.close()
+
+
 def test_us_macro_batch_persists_dgs2_icsa():
     from providers import SmartMoneyDBProvider
 

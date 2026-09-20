@@ -58,6 +58,7 @@ QUARTERLY_TABLES: set[str] = {
 DELAYED_PUBLISH_TABLES: set[str] = {
     "fx_rate",
     "cftc_cot_weekly",
+    "eia_petroleum_weekly",
     "us_treasury",
     "us_macro_daily",
     "margin_trading",
