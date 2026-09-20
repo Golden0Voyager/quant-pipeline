@@ -2,7 +2,7 @@
 宏观数据更新任务
 ────────────────
 从 daily_pipeline.py 提取：北向资金、指数日线、涨停跌停、分红送转、
-国际金价、国际原油、外汇汇率、全球指数、中美国债收益率。
+国际金价、外汇汇率、全球指数、中美国债收益率。
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 # update_north_flow 已下线（2026-08）：港交所自 2024-08 起停止披露日度北向
-# 资金净买入额，任务自建立起从未产出有效数据。north_flow 表保留在库中，
-# 若未来恢复披露可从 git 历史找回本任务重新接入。
+# 资金净买入额，任务自建立起从未产出有效数据。north_flow 死表已由
+# migration 016 删除；若未来恢复披露可从 git 历史找回本任务重新接入。
 
 
 # ===========================================================================
@@ -419,68 +419,6 @@ def update_gold_price(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 国际金价更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
-
-
-# ===========================================================================
-# 国际原油
-# ===========================================================================
-
-
-def _fetch_crude_oil(trade_date: str) -> list[dict]:
-    """获取国际原油实时行情（WTI=CL, Brent=OIL）。"""
-    if ak is None:
-        return []
-    contracts = {"CL": "WTI原油", "OIL": "Brent原油"}
-    records = []
-    for contract, name in contracts.items():
-        try:
-            df = ak.futures_foreign_commodity_realtime(symbol=contract)
-            if df is None or df.empty:
-                continue
-            for _, row in df.iterrows():
-                records.append(
-                    {
-                        "trade_date": trade_date,
-                        "contract": contract,
-                        "name": name,
-                        "latest_price": row.get("最新价"),
-                        "cny_price": row.get("人民币报价"),
-                        "change": row.get("涨跌额"),
-                        "change_pct": row.get("涨跌幅"),
-                        "open": row.get("开盘价"),
-                        "high": row.get("最高价"),
-                        "low": row.get("最低价"),
-                        "pre_settle": row.get("昨日结算价"),
-                        "data_source": "akshare",
-                    }
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ 原油 {name}({contract}) 获取失败: {e}")
-    return records
-
-
-def update_crude_oil(db: DatabaseInterface) -> dict:
-    """获取国际原油实时行情并保存。"""
-    logger.info("\n" + "=" * 60)
-    logger.info("🛢️ 任务: 更新国际原油")
-    logger.info("=" * 60)
-
-    if ak is None:
-        logger.error("❌ akshare 未安装")
-        return {"saved": 0, "error": "akshare not installed"}
-
-    try:
-        records = _fetch_crude_oil(get_expected_latest_trading_day())
-        if not records:
-            logger.warning("⚠️ 国际原油无数据")
-            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
-            return {"saved": 0, "total": 0}
-        saved = db.save_crude_oil_batch(records)
-        logger.info(f"✅ 国际原油保存完成: {saved} 条")
-        return {"saved": saved, "total": len(records)}
-    except Exception as e:
-        logger.error(f"❌ 国际原油更新失败: {e}")
         return {"saved": 0, "error": str(e)}
 
 
