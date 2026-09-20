@@ -65,12 +65,15 @@ def test_fetch_fred_series_request_failure(mock_requests: MagicMock):
 
 
 def _fred_data() -> dict[str, dict[str, float | None]]:
-    """四个 FRED 序列的 stub 数据（2026-09-16 加息 25bp 场景）。"""
+    """六个 FRED 序列的 stub 数据（2026-09-16 加息 25bp 场景）。"""
     return {
         "EFFR": {"2026-09-14": 3.63, "2026-09-15": 3.63, "2026-09-16": None},
+        "DGS2": {"2026-09-14": 3.85, "2026-09-15": 3.87, "2026-09-16": 3.90},
         "DGS3MO": {"2026-09-14": 3.70, "2026-09-15": 3.71, "2026-09-16": 3.72},
         "DGS10": {"2026-09-14": 4.20, "2026-09-15": 4.22, "2026-09-16": 4.25},
         "T10YIE": {"2026-09-14": 2.35, "2026-09-15": 2.36, "2026-09-16": 2.40},
+        # ICSA 为周度序列，FRED 观察日为周六（如 2026-09-12 → 映射到周五 09-11）
+        "ICSA": {"2026-09-12": 205000},
     }
 
 
@@ -80,22 +83,30 @@ def test_fetch_us_macro_merges_and_derives():
 
     with patch(f"{MODULE}._fetch_fred_series", side_effect=fake_series):
         records = _fetch_us_macro("2026-09-16")
-    assert len(records) == 3
+    # 09-11（周五）为 ICSA 映射落库行，仅 icsa 有值
+    assert len(records) == 4
     by_date = {r["trade_date"]: r for r in records}
+    assert by_date["2026-09-11"]["icsa"] == 205000
+    assert by_date["2026-09-11"]["effr"] is None
     row = by_date["2026-09-15"]
     assert row["effr"] == 3.63
+    assert row["dgs2"] == 3.87
+    assert row["icsa"] is None
     assert row["spread_10y_3m"] == round(4.22 - 3.71, 4)
     assert row["real_rate_10y"] == round(4.22 - 2.36, 4)
     assert row["data_source"] == "fred"
     # EFFR 当日缺失但其余序列有值：保留行，派生值仍计算
     row = by_date["2026-09-16"]
     assert row["effr"] is None
+    assert row["dgs2"] == 3.90
+    # ICSA 周度发布：非发布日稀疏为 None
+    assert row["icsa"] is None
     assert row["spread_10y_3m"] == round(4.25 - 3.72, 4)
 
 
 def test_fetch_us_macro_skips_all_empty_dates():
     def fake_series(series_id, start, end):
-        # 同一日期四个序列均为缺失（长假连休）
+        # 同一日期各序列均为缺失（长假连休）
         return {"2026-09-07": None} if series_id == "EFFR" else {}
 
     with patch(f"{MODULE}._fetch_fred_series", side_effect=fake_series):
