@@ -144,7 +144,6 @@ from tasks.index_chain import (
 from tasks.index_membership import update_index_membership
 from tasks.institution_survey import update_institution_survey
 from tasks.macro import (
-    update_crude_oil,
     update_dividend_summary,
     update_global_index,
     update_gold_price,
@@ -230,7 +229,6 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_china_macro": update_china_macro,
     "update_money_market": update_money_market,
     "update_gold_price": update_gold_price,
-    "update_crude_oil": update_crude_oil,
     "update_usd": update_usd,
     "update_global_index": update_global_index,
     "update_us_treasury": update_us_treasury,
@@ -507,7 +505,6 @@ def run_all(
         results["earnings_forecast"] = _run_task("update_earnings_forecast", update_earnings_forecast, db)
         results["dividend_summary"] = _run_task("update_dividend_summary", update_dividend_summary, db)
         results["gold_price"] = _run_task("update_gold_price", update_gold_price, db)
-        results["crude_oil"] = _run_task("update_crude_oil", update_crude_oil, db)
         results["fx_rate"] = _run_task("update_usd", update_usd, db)
         results["global_index"] = _run_task("update_global_index", update_global_index, db)
         results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
@@ -535,7 +532,6 @@ def run_all(
             ("update_chip_distribution", update_chip_distribution, (db,), {}),
             ("update_global_assets", update_global_assets, (db,), {}),
             ("update_gold_price", update_gold_price, (db,), {}),
-            ("update_crude_oil", update_crude_oil, (db,), {}),
             ("update_usd", update_usd, (db,), {}),
             ("update_global_index", update_global_index, (db,), {}),
             ("update_us_treasury", update_us_treasury, (db,), {}),
@@ -579,7 +575,6 @@ def run_all(
         results["chip_distribution"] = stage2_results.get("update_chip_distribution", {})
         results["global_assets"] = stage2_results.get("update_global_assets", {})
         results["gold_price"] = stage2_results.get("update_gold_price", {})
-        results["crude_oil"] = stage2_results.get("update_crude_oil", {})
         results["fx_rate"] = stage2_results.get("update_usd", {})
         results["global_index"] = stage2_results.get("update_global_index", {})
         results["us_treasury"] = stage2_results.get("update_us_treasury", {})
