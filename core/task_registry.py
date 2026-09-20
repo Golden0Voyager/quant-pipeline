@@ -210,6 +210,7 @@ TABLE_LABELS: dict[str, str] = {
     "us_macro_daily": "US Macro Rates",
     "hk_tech_index_daily": "HS Tech Index",
     "cftc_cot_weekly": "CFTC COT",
+    "eia_petroleum_weekly": "EIA Petroleum",
     # 期货
     "futures_daily": "Futures",
     # 衍生数据
@@ -277,6 +278,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "us_macro_daily": "美国宏观利率",
     "hk_tech_index_daily": "恒生科技指数",
     "cftc_cot_weekly": "CFTC持仓",
+    "eia_petroleum_weekly": "EIA石油指标",
     "placement_announcements": "定增公告",
     # 期货
     "futures_daily": "期货日线",
@@ -341,6 +343,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_us_macro",
         "update_hk_tech_index",
         "update_cftc_cot",
+        "update_eia_petroleum",
         "update_futures",
         "update_money_market",
         "update_global_assets",
@@ -416,6 +419,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_us_macro",
     "update_hk_tech_index",
     "update_cftc_cot",
+    "update_eia_petroleum",
     "update_futures",
     "update_china_macro",
     "update_money_market",
@@ -955,6 +959,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="cftc",
         display_label="CFTC持仓",
+    ),
+    TaskSpec(
+        name="update_eia_petroleum",
+        callable=None,
+        tables=("eia_petroleum_weekly",),
+        cadence=Cadence.DAILY,
+        date_columns={"eia_petroleum_weekly": "week_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="eia",
+        display_label="EIA石油指标",
     ),
     TaskSpec(
         name="update_futures",
