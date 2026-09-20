@@ -245,6 +245,18 @@ class DatabaseInterface(Protocol):
         """批量保存 EIA 周度石油指标，返回实际保存条数。"""
         ...
 
+    def get_futures_latest_date(self, symbol: str) -> str | None:
+        """轻量查询：某品种在 futures_daily 中的最新 trade_date。"""
+        ...
+
+    def save_lithium_spot_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存碳酸锂现货与基差，返回实际保存条数。"""
+        ...
+
+    def get_lithium_spot_latest_date(self) -> str | None:
+        """轻量查询：lithium_spot_daily 中的最新 spot_date。"""
+        ...
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存期货日线数据，返回实际保存条数。"""
         ...
