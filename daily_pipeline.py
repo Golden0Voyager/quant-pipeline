@@ -124,7 +124,6 @@ from tasks.corporate_actions import (
     update_restricted_share,
 )
 from tasks.eia_petroleum import update_eia_petroleum
-from tasks.lithium_spot import update_lithium_spot
 from tasks.finance_flow import (
     update_ah_premium,
     update_etf_daily,
@@ -146,6 +145,7 @@ from tasks.index_chain import (
 )
 from tasks.index_membership import update_index_membership
 from tasks.institution_survey import update_institution_survey
+from tasks.lithium_spot import update_lithium_spot
 from tasks.macro import (
     update_dividend_summary,
     update_global_index,
