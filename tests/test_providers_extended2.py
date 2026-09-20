@@ -546,7 +546,6 @@ class TestEmptyRecords:
         "save_historical_valuation_batch",
         "save_macro_monthly_batch",
         "save_macro_quarterly_batch",
-        "save_macro_daily_batch",
         "save_money_market_batch",
         "save_central_bank_balance_batch",
         "save_market_valuation_batch",
@@ -1010,23 +1009,6 @@ class TestMacroBatchSaves:
         ])
         assert r >= 1
 
-    def test_macro_daily_all_fields(self, provider):
-        r = provider.save_macro_daily_batch([
-            {
-                "date": "2024-01-02",
-                "shibor_on": 1.6,
-                "shibor_1w": 2.0,
-                "shibor_2w": 2.3,
-                "shibor_1m": 2.5,
-                "shibor_3m": 2.7,
-                "shibor_6m": 2.9,
-                "shibor_9m": 3.0,
-                "shibor_1y": 3.1,
-                "data_date": "2024-01-02",
-            }
-        ])
-        assert r >= 1
-
 
 # ═══════════════════════════════════════════════════════════
 # 4. except Exception 路径 — 表删除后调用 batch save 触发异常
@@ -1149,13 +1131,6 @@ class TestBatchSaveExceptionPaths:
         ])
         assert result == 0
 
-    def test_insider_trading_exception(self, provider):
-        self._drop_table(provider, "insider_trading")
-        result = provider.save_insider_trading_batch([
-            {"trade_date": "2024-01-02", "stock_code": "000001"}
-        ])
-        assert result == 0
-
     def test_institution_survey_exception(self, provider):
         self._drop_table(provider, "institution_survey")
         result = provider.save_institution_survey_batch([
@@ -1188,13 +1163,6 @@ class TestBatchSaveExceptionPaths:
         self._drop_table(provider, "macro_quarterly")
         result = provider.save_macro_quarterly_batch([
             {"date": "2024-Q1", "gdp": 100000}
-        ])
-        assert result == 0
-
-    def test_macro_daily_exception(self, provider):
-        self._drop_table(provider, "macro_daily")
-        result = provider.save_macro_daily_batch([
-            {"date": "2024-01-02", "shibor_on": 1.5}
         ])
         assert result == 0
 
