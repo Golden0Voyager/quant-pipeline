@@ -505,6 +505,9 @@ def run_all(
         results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
         results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
         results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
+        results["placement_announcements"] = _run_task(
+            "update_placement_announcements", update_placement_announcements, db
+        )
         results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
         results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
         results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
@@ -566,6 +569,7 @@ def run_all(
             ("update_cb_index", update_cb_index, (db,), {}),
             ("update_option_sentiment", update_option_sentiment, (db,), {}),
             ("update_stock_repurchase", update_stock_repurchase, (db,), {}),
+            ("update_placement_announcements", update_placement_announcements, (db,), {}),
             ("update_institution_survey", update_institution_survey, (db,), {}),
             ("update_stock_pledge", update_stock_pledge, (db,), {}),
         ]
@@ -612,6 +616,7 @@ def run_all(
         results["cb_index"] = stage2_results.get("update_cb_index", {})
         results["option_sentiment"] = stage2_results.get("update_option_sentiment", {})
         results["stock_repurchase"] = stage2_results.get("update_stock_repurchase", {})
+        results["placement_announcements"] = stage2_results.get("update_placement_announcements", {})
         results["institution_survey"] = stage2_results.get("update_institution_survey", {})
         results["stock_pledge"] = stage2_results.get("update_stock_pledge", {})
 
