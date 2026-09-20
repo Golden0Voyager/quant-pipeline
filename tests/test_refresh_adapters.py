@@ -1411,12 +1411,6 @@ def _create_market_tables(db_path: str) -> None:
             UNIQUE(trade_date, market))"""
     )
     conn.execute(
-        """CREATE TABLE north_flow (
-            trade_date TEXT NOT NULL, market TEXT,
-            net_buy_amount REAL, data_source TEXT,
-            UNIQUE(trade_date, market))"""
-    )
-    conn.execute(
         """CREATE TABLE index_daily (
             index_code TEXT NOT NULL, index_name TEXT, trade_date TEXT NOT NULL,
             open REAL, high REAL, low REAL, close REAL, volume REAL,
@@ -2864,7 +2858,8 @@ class TestStockRepurchaseRefreshAdapter:
 
 
 # ===========================================================================
-# 组6：死源（north_flow）——已随 update_north_flow 任务整体下线（2026-08）
+# 组6：死源（north_flow）——已随 update_north_flow 任务整体下线（2026-08），
+# 表本身由 migration 016 删除
 # ===========================================================================
 
 
