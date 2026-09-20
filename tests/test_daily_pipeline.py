@@ -2829,6 +2829,7 @@ class TestGlobalMacroCli:
             ("update_global_index", "update_global_index"),
             ("update_us_treasury", "update_us_treasury"),
             ("update_us_macro", "update_us_macro"),
+            ("update_hk_tech_index", "update_hk_tech_index"),
         ],
     )
     def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):
@@ -2867,6 +2868,13 @@ class TestGlobalMacroAkNone:
                 r = fn(db)
                 assert r["saved"] == 0
                 assert "error" in r
+
+    def test_hk_tech_index_ak_none(self):
+        db = MagicMock()
+        with patch("tasks.hk_tech_index.ak", None), patch("daily_pipeline.logger"):
+            r = daily_pipeline.update_hk_tech_index(db)
+        assert r["saved"] == 0
+        assert "error" in r
 
 
 # ===========================================================================

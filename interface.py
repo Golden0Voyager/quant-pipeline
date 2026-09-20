@@ -233,6 +233,14 @@ class DatabaseInterface(Protocol):
         """批量保存美国日度宏观利率（FRED），返回实际保存条数。"""
         ...
 
+    def save_hk_tech_index_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存恒生科技指数日线，返回实际保存条数。"""
+        ...
+
+    def get_hk_tech_latest_date(self) -> str | None:
+        """轻量查询：hk_tech_index_daily 中的最新 trade_date。"""
+        ...
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存期货日线数据，返回实际保存条数。"""
         ...

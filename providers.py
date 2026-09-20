@@ -1264,7 +1264,8 @@ class SmartMoneyDBProvider:
         """批量保存美国日度宏观利率（FRED）到 us_macro_daily 表。
 
         使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
-        migrations/012_us_macro_daily.sql 创建。
+        migrations/012_us_macro_daily.sql 创建，dgs2/icsa 两列由
+        migrations/014_us_macro_extend.sql 追加。
         """
         if not records:
             return 0
@@ -1275,17 +1276,19 @@ class SmartMoneyDBProvider:
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO us_macro_daily (
-                        trade_date, effr, dgs3mo, dgs10, t10yie,
+                        trade_date, effr, dgs2, dgs3mo, dgs10, t10yie, icsa,
                         spread_10y_3m, real_rate_10y, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
                             r["trade_date"],
                             r.get("effr"),
+                            r.get("dgs2"),
                             r.get("dgs3mo"),
                             r.get("dgs10"),
                             r.get("t10yie"),
+                            r.get("icsa"),
                             r.get("spread_10y_3m"),
                             r.get("real_rate_10y"),
                             r.get("data_source"),
@@ -1297,6 +1300,55 @@ class SmartMoneyDBProvider:
         except Exception as e:
             logging.getLogger(__name__).warning(f"⚠️ 美国宏观利率批量保存失败: {e}")
             return 0
+
+    def save_hk_tech_index_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存恒生科技指数日线到 hk_tech_index_daily 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/015_hk_tech_index_daily.sql 创建。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO hk_tech_index_daily (
+                        trade_date, open, high, low, close, change_pct,
+                        volume, amount, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r.get("open"),
+                            r.get("high"),
+                            r.get("low"),
+                            r.get("close"),
+                            r.get("change_pct"),
+                            r.get("volume"),
+                            r.get("amount"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ 恒生科技指数批量保存失败: {e}")
+            return 0
+
+    def get_hk_tech_latest_date(self) -> str | None:
+        """轻量查询：直接 SQL 取 hk_tech_index_daily 的 MAX(trade_date)。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute("SELECT MAX(trade_date) FROM hk_tech_index_daily")
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
 
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
