@@ -145,6 +145,7 @@ from tasks.index_chain import (
 )
 from tasks.index_membership import update_index_membership
 from tasks.institution_survey import update_institution_survey
+from tasks.lithium_spot import update_lithium_spot
 from tasks.macro import (
     update_dividend_summary,
     update_global_index,
@@ -238,6 +239,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_hk_tech_index": update_hk_tech_index,
     "update_cftc_cot": update_cftc_cot,
     "update_eia_petroleum": update_eia_petroleum,
+    "update_lithium_spot": update_lithium_spot,
     "update_futures": update_futures,
     "update_global_assets": update_global_assets,
     "update_concept_board": update_concept_board,
@@ -516,6 +518,7 @@ def run_all(
         results["hk_tech_index"] = _run_task("update_hk_tech_index", update_hk_tech_index, db)
         results["cftc_cot"] = _run_task("update_cftc_cot", update_cftc_cot, db)
         results["eia_petroleum"] = _run_task("update_eia_petroleum", update_eia_petroleum, db)
+        results["lithium_spot"] = _run_task("update_lithium_spot", update_lithium_spot, db)
         results["futures"] = _run_task("update_futures", update_futures, db)
         results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
         results["money_market"] = _run_task("update_money_market", update_money_market, db)
@@ -545,6 +548,7 @@ def run_all(
             ("update_hk_tech_index", update_hk_tech_index, (db,), {}),
             ("update_cftc_cot", update_cftc_cot, (db,), {}),
             ("update_eia_petroleum", update_eia_petroleum, (db,), {}),
+            ("update_lithium_spot", update_lithium_spot, (db,), {}),
             ("update_futures", update_futures, (db,), {}),
             ("update_china_macro", update_china_macro, (db,), {}),
             ("update_money_market", update_money_market, (db,), {}),
@@ -590,6 +594,7 @@ def run_all(
         results["hk_tech_index"] = stage2_results.get("update_hk_tech_index", {})
         results["cftc_cot"] = stage2_results.get("update_cftc_cot", {})
         results["eia_petroleum"] = stage2_results.get("update_eia_petroleum", {})
+        results["lithium_spot"] = stage2_results.get("update_lithium_spot", {})
         results["futures"] = stage2_results.get("update_futures", {})
         results["china_macro"] = stage2_results.get("update_china_macro", {})
         results["money_market"] = stage2_results.get("update_money_market", {})

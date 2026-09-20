@@ -2791,6 +2791,7 @@ class TestGlobalMacroCli:
             ("update_hk_tech_index", "update_hk_tech_index"),
             ("update_cftc_cot", "update_cftc_cot"),
             ("update_eia_petroleum", "update_eia_petroleum"),
+            ("update_lithium_spot", "update_lithium_spot"),
         ],
     )
     def test_new_global_macro_tasks(self, weekday_mock, task_name: str, func_name: str):

@@ -211,6 +211,7 @@ TABLE_LABELS: dict[str, str] = {
     "hk_tech_index_daily": "HS Tech Index",
     "cftc_cot_weekly": "CFTC COT",
     "eia_petroleum_weekly": "EIA Petroleum",
+    "lithium_spot_daily": "Lithium Spot",
     # 期货
     "futures_daily": "Futures",
     # 衍生数据
@@ -279,6 +280,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "hk_tech_index_daily": "恒生科技指数",
     "cftc_cot_weekly": "CFTC持仓",
     "eia_petroleum_weekly": "EIA石油指标",
+    "lithium_spot_daily": "碳酸锂现货",
     "placement_announcements": "定增公告",
     # 期货
     "futures_daily": "期货日线",
@@ -344,6 +346,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_hk_tech_index",
         "update_cftc_cot",
         "update_eia_petroleum",
+        "update_lithium_spot",
         "update_futures",
         "update_money_market",
         "update_global_assets",
@@ -420,6 +423,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_hk_tech_index",
     "update_cftc_cot",
     "update_eia_petroleum",
+    "update_lithium_spot",
     "update_futures",
     "update_china_macro",
     "update_money_market",
@@ -969,6 +973,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="eia",
         display_label="EIA石油指标",
+    ),
+    TaskSpec(
+        name="update_lithium_spot",
+        callable=None,
+        tables=("lithium_spot_daily",),
+        cadence=Cadence.DAILY,
+        date_columns={"lithium_spot_daily": "spot_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="碳酸锂现货",
     ),
     TaskSpec(
         name="update_futures",
