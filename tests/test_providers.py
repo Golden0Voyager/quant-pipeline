@@ -188,13 +188,15 @@ def test_us_macro_batch_persists_dgs2_icsa():
     provider.save_us_macro_batch([
         {"trade_date": "2026-09-15", "effr": 3.63, "dgs2": 3.87, "dgs3mo": 3.71,
          "dgs10": 4.22, "t10yie": 2.36, "icsa": 205000,
+         "hy_oas": 2.72, "ig_oas": 0.79, "stlfi": -0.8477, "t5yie": 2.34,
          "spread_10y_3m": 0.51, "real_rate_10y": 1.86, "data_source": "fred"},
     ])
     with sqlite3.connect(provider.db_path) as conn:
         row = conn.execute(
-            "SELECT dgs2, icsa FROM us_macro_daily WHERE trade_date = '2026-09-15'"
+            "SELECT dgs2, icsa, hy_oas, stlfi, t5yie FROM us_macro_daily "
+            "WHERE trade_date = '2026-09-15'"
         ).fetchone()
-    assert row == (3.87, 205000)
+    assert row == (3.87, 205000, 2.72, -0.8477, 2.34)
     provider.close()
 
 
