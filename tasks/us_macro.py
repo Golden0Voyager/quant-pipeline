@@ -2,8 +2,9 @@
 美国日度宏观利率更新任务
 ─────────────────────
 从 FRED（圣路易斯联储）抓取加息周期核心定价变量：
-EFFR（有效联邦基金利率）、DGS3MO/DGS10（美债 3M/10Y 收益率）、
-T10YIE（10Y 盈亏平衡通胀率），并派生 10Y-3M 利差与 10Y 实际利率。
+EFFR（有效联邦基金利率）、DGS2/DGS3MO/DGS10（美债 2Y/3M/10Y 收益率）、
+T10YIE（10Y 盈亏平衡通胀率）、ICSA（初请失业金，周度），并派生
+10Y-3M 利差与 10Y 实际利率。
 
 FRED 日度利率均为 T+1 发布（当日收益率尚未公布），故回溯一个窗口取
 已发布记录；fredgraph.csv 无 API key 即可访问，缺失值以空串/`.` 表示。
@@ -30,9 +31,11 @@ _FRED_GRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 # FRED 系列 ID -> 记录字段名
 _FRED_SERIES: dict[str, str] = {
     "EFFR": "effr",        # 有效联邦基金利率
+    "DGS2": "dgs2",        # 美债 2 年收益率（政策利率预期锚）
     "DGS3MO": "dgs3mo",    # 美债 3 个月收益率
     "DGS10": "dgs10",      # 美债 10 年收益率
     "T10YIE": "t10yie",    # 10 年盈亏平衡通胀率
+    "ICSA": "icsa",        # 初请失业金人数（周度发布，日度表中稀疏填充）
 }
 
 # 回溯窗口：覆盖 T+1 发布延迟 + 周末/节假日 + FRED 偶发修订
@@ -77,19 +80,36 @@ def _fetch_fred_series(series_id: str, start: str, end: str) -> dict[str, float 
     return records
 
 
+def _week_to_friday(series: dict[str, float | None]) -> dict[str, float | None]:
+    """周度序列（如 ICSA）的 FRED 观察日为周六，映射到当周周五。
+
+    日度表只有业务日行，周六的观察日永远匹配不上；周度数据按惯例
+    归属其所在交易周，取该周周五落库。
+    """
+    remapped: dict[str, float | None] = {}
+    for date_str, value in series.items():
+        friday = (
+            datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        remapped[friday] = value
+    return remapped
+
+
 def _fetch_us_macro(trade_date: str) -> list[dict]:
-    """抓取并合并 FRED 四个序列，按日期对齐并派生利差/实际利率。"""
+    """抓取并合并 FRED 六个序列，按日期对齐并派生利差/实际利率。"""
     start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     merged: dict[str, dict[str, float | None]] = {}
     for series_id, field in _FRED_SERIES.items():
         series = _fetch_fred_series(series_id, start, trade_date)
+        if field == "icsa":
+            series = _week_to_friday(series)
         for date_str, value in series.items():
             merged.setdefault(date_str, dict.fromkeys(_FRED_SERIES.values()))[field] = value
 
     records = []
     for date_str in sorted(merged):
         row = merged[date_str]
-        # 四个序列全空的日期（如长假连休）无入库价值
+        # 各序列全空的日期（如长假连休）无入库价值
         if all(v is None for v in row.values()):
             continue
         dgs10, dgs3mo, t10yie = row["dgs10"], row["dgs3mo"], row["t10yie"]
