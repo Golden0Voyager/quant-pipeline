@@ -233,6 +233,14 @@ class DatabaseInterface(Protocol):
         """轻量查询：hk_tech_index_daily 中的最新 trade_date。"""
         ...
 
+    def save_cftc_cot_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存 CFTC 周度持仓，返回实际保存条数。"""
+        ...
+
+    def get_cftc_cot_latest_date(self, market: str) -> str | None:
+        """轻量查询：某市场（goods/fx）在 cftc_cot_weekly 中的最新 trade_date。"""
+        ...
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存期货日线数据，返回实际保存条数。"""
         ...

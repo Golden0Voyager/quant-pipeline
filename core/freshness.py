@@ -57,6 +57,7 @@ QUARTERLY_TABLES: set[str] = {
 # T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
 DELAYED_PUBLISH_TABLES: set[str] = {
     "fx_rate",
+    "cftc_cot_weekly",
     "us_treasury",
     "us_macro_daily",
     "margin_trading",

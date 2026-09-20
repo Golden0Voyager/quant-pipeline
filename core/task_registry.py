@@ -209,6 +209,7 @@ TABLE_LABELS: dict[str, str] = {
     "us_treasury": "US Treasury",
     "us_macro_daily": "US Macro Rates",
     "hk_tech_index_daily": "HS Tech Index",
+    "cftc_cot_weekly": "CFTC COT",
     # 期货
     "futures_daily": "Futures",
     # 衍生数据
@@ -275,6 +276,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "us_treasury": "美债收益率",
     "us_macro_daily": "美国宏观利率",
     "hk_tech_index_daily": "恒生科技指数",
+    "cftc_cot_weekly": "CFTC持仓",
     "placement_announcements": "定增公告",
     # 期货
     "futures_daily": "期货日线",
@@ -338,6 +340,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_us_treasury",
         "update_us_macro",
         "update_hk_tech_index",
+        "update_cftc_cot",
         "update_futures",
         "update_money_market",
         "update_global_assets",
@@ -412,6 +415,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_us_treasury",
     "update_us_macro",
     "update_hk_tech_index",
+    "update_cftc_cot",
     "update_futures",
     "update_china_macro",
     "update_money_market",
@@ -941,6 +945,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="恒生科技指数",
+    ),
+    TaskSpec(
+        name="update_cftc_cot",
+        callable=None,
+        tables=("cftc_cot_weekly",),
+        cadence=Cadence.DAILY,
+        date_columns={"cftc_cot_weekly": "trade_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="cftc",
+        display_label="CFTC持仓",
     ),
     TaskSpec(
         name="update_futures",

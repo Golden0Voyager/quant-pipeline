@@ -102,6 +102,35 @@ def test_db_provider_methods():
     assert result is not None
     result = provider.save_hk_tech_index_batch([{"trade_date": "2024-01-01", "close": 4400.0}])
     assert result is not None
+    result = provider.save_cftc_cot_batch(
+        [{"trade_date": "2024-01-01", "market": "goods", "instrument": "黄金", "net_positions": 120000.0}]
+    )
+    assert result is not None
+
+
+def test_cftc_cot_batch_roundtrip_and_idempotent():
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+    rows = [
+        {"trade_date": "2026-09-01", "market": "goods", "instrument": "纽约原油",
+         "long_positions": 350118.0, "short_positions": 105000.0, "net_positions": 245118.0,
+         "data_source": "cftc"},
+        {"trade_date": "2026-09-01", "market": "fx", "instrument": "美元",
+         "long_positions": 859904.0, "short_positions": 665574.0, "net_positions": 194330.0,
+         "data_source": "cftc"},
+    ]
+    assert provider.save_cftc_cot_batch(rows) == 2
+    assert provider.get_cftc_cot_latest_date("goods") == "2026-09-01"
+    assert provider.get_cftc_cot_latest_date("fx") == "2026-09-01"
+    # UNIQUE(trade_date, market, instrument) + INSERT OR REPLACE：重复写入不产生新行
+    provider.save_cftc_cot_batch(rows)
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM cftc_cot_weekly WHERE trade_date = '2026-09-01'"
+        ).fetchone()[0]
+    assert count == 2
+    provider.close()
 
 
 def test_hk_tech_index_batch_roundtrip_and_idempotent():
