@@ -104,6 +104,50 @@ def test_db_provider_methods():
     assert result is not None
     result = provider.save_us_treasury_batch([{"trade_date": "2024-01-01", "us_10y": 4.56, "cn_10y": 1.74}])
     assert result is not None
+    result = provider.save_hk_tech_index_batch([{"trade_date": "2024-01-01", "close": 4400.0}])
+    assert result is not None
+
+
+def test_hk_tech_index_batch_roundtrip_and_idempotent():
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+    rows = [
+        {"trade_date": "2026-09-17", "open": 4350.0, "high": 4360.0, "low": 4340.0,
+         "close": 4355.0, "change_pct": -1.15, "volume": 2.1e9, "amount": 5.9e10,
+         "data_source": "akshare_sina_hk"},
+        {"trade_date": "2026-09-18", "open": 4413.11, "high": 4420.0, "low": 4405.5,
+         "close": 4415.0, "change_pct": 1.38, "volume": 1.9e9, "amount": 5.7e10,
+         "data_source": "akshare_sina_hk"},
+    ]
+    assert provider.save_hk_tech_index_batch(rows) == 2
+    assert provider.get_hk_tech_latest_date() == "2026-09-18"
+    # UNIQUE(trade_date) + INSERT OR REPLACE：重复写入不产生新行
+    provider.save_hk_tech_index_batch(rows)
+    with sqlite3.connect(provider.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM hk_tech_index_daily "
+            "WHERE trade_date IN ('2026-09-17', '2026-09-18')"
+        ).fetchone()[0]
+    assert count == 2
+    provider.close()
+
+
+def test_us_macro_batch_persists_dgs2_icsa():
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+    provider.save_us_macro_batch([
+        {"trade_date": "2026-09-15", "effr": 3.63, "dgs2": 3.87, "dgs3mo": 3.71,
+         "dgs10": 4.22, "t10yie": 2.36, "icsa": 205000,
+         "spread_10y_3m": 0.51, "real_rate_10y": 1.86, "data_source": "fred"},
+    ])
+    with sqlite3.connect(provider.db_path) as conn:
+        row = conn.execute(
+            "SELECT dgs2, icsa FROM us_macro_daily WHERE trade_date = '2026-09-15'"
+        ).fetchone()
+    assert row == (3.87, 205000)
+    provider.close()
 
 
 def test_new_batch_save_methods_return_per_call_change_count():
