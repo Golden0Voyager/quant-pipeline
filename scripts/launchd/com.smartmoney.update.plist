@@ -19,13 +19,6 @@
         <key>Minute</key>
         <integer>30</integer>
     </dict>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>20</integer>
-        <key>Minute</key>
-        <integer>30</integer>
-    </dict>
 
     <!-- 运行命令：python 解释器必须能提供 akshare/pandas 等依赖，
          当前部署使用 quant_hunter venv，按实际情况调整 -->
