@@ -74,6 +74,11 @@ def _fred_data() -> dict[str, dict[str, float | None]]:
         "T10YIE": {"2026-09-14": 2.35, "2026-09-15": 2.36, "2026-09-16": 2.40},
         # ICSA 为周度序列，FRED 观察日为周六（如 2026-09-12 → 映射到周五 09-11）
         "ICSA": {"2026-09-12": 205000},
+        "BAMLH0A0HYM2": {"2026-09-14": 2.75, "2026-09-15": 2.72, "2026-09-16": 2.70},
+        "BAMLC0A0CM": {"2026-09-14": 0.80, "2026-09-15": 0.79, "2026-09-16": 0.78},
+        # STLFSI4 周度、周一观察日，天然落在业务日行（无需 ICSA 式映射）
+        "STLFSI4": {"2026-09-14": -0.8477},
+        "T5YIE": {"2026-09-14": 2.35, "2026-09-15": 2.34, "2026-09-16": 2.33},
     }
 
 
@@ -92,6 +97,12 @@ def test_fetch_us_macro_merges_and_derives():
     assert row["effr"] == 3.63
     assert row["dgs2"] == 3.87
     assert row["icsa"] is None
+    assert row["hy_oas"] == 2.72
+    assert row["ig_oas"] == 0.79
+    assert row["t5yie"] == 2.34
+    # STLFSI4 周一观察日落库（09-14 周一）
+    assert by_date["2026-09-14"]["stlfi"] == -0.8477
+    assert by_date["2026-09-15"]["stlfi"] is None
     assert row["spread_10y_3m"] == round(4.22 - 3.71, 4)
     assert row["real_rate_10y"] == round(4.22 - 2.36, 4)
     assert row["data_source"] == "fred"
