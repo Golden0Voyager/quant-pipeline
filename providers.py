@@ -1320,6 +1320,56 @@ class SmartMoneyDBProvider:
         except Exception:
             return None
 
+    def save_cftc_cot_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存 CFTC 周度持仓到 cftc_cot_weekly 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/017_cftc_cot_weekly.sql 创建。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO cftc_cot_weekly (
+                        trade_date, market, instrument,
+                        long_positions, short_positions, net_positions, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r["market"],
+                            r["instrument"],
+                            r.get("long_positions"),
+                            r.get("short_positions"),
+                            r.get("net_positions"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ CFTC 持仓批量保存失败: {e}")
+            return 0
+
+    def get_cftc_cot_latest_date(self, market: str) -> str | None:
+        """轻量查询：直接 SQL 取某市场 COT 的 MAX(trade_date)。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute(
+                    "SELECT MAX(trade_date) FROM cftc_cot_weekly WHERE market = ?",
+                    (market,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
 
