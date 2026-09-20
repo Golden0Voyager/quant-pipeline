@@ -423,14 +423,14 @@ def run_all(
     sequential: bool = False,
     parallel_workers: int | None = None,
 ) -> dict:
-    """运行完整数据管道（支持 DAG 5 阶段分叉与汇聚并发执行）。"""
+    """运行完整数据管道（DAG 5 阶段编排；stage2/stage4 暂按串行执行）。"""
     start_time = time.time()
     _lower_process_priority()
 
     workers = (
         parallel_workers
         if parallel_workers is not None
-        else int(os.getenv("PARALLEL_WORKERS", "4"))
+        else PARALLEL_WORKERS
     )
     if sequential or os.getenv("PARALLEL_PIPELINE", "1").lower() in (
         "0",
@@ -465,7 +465,8 @@ def run_all(
 
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
-    logger.info(f"⚙️  并行线程: {workers} ({'串行模式' if workers <= 1 else '并发重叠调度'})")
+    logger.info(f"⚙️  并行线程: {workers} ("
+                f"{'串行模式' if workers <= 1 else 'DAG 模式（stage2/stage4 暂按串行执行）'})")
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
@@ -505,6 +506,9 @@ def run_all(
         results["sector_derivatives"] = _run_task("update_sector_derivatives", update_sector_derivatives, db)
         results["option_sentiment"] = _run_task("update_option_sentiment", update_option_sentiment, db)
         results["stock_repurchase"] = _run_task("update_stock_repurchase", update_stock_repurchase, db)
+        results["placement_announcements"] = _run_task(
+            "update_placement_announcements", update_placement_announcements, db
+        )
         results["institution_survey"] = _run_task("update_institution_survey", update_institution_survey, db)
         results["stock_pledge"] = _run_task("update_stock_pledge", update_stock_pledge, db)
         results["restricted_share"] = _run_task("update_restricted_share", update_restricted_share, db)
@@ -566,6 +570,7 @@ def run_all(
             ("update_cb_index", update_cb_index, (db,), {}),
             ("update_option_sentiment", update_option_sentiment, (db,), {}),
             ("update_stock_repurchase", update_stock_repurchase, (db,), {}),
+            ("update_placement_announcements", update_placement_announcements, (db,), {}),
             ("update_institution_survey", update_institution_survey, (db,), {}),
             ("update_stock_pledge", update_stock_pledge, (db,), {}),
         ]
@@ -612,6 +617,7 @@ def run_all(
         results["cb_index"] = stage2_results.get("update_cb_index", {})
         results["option_sentiment"] = stage2_results.get("update_option_sentiment", {})
         results["stock_repurchase"] = stage2_results.get("update_stock_repurchase", {})
+        results["placement_announcements"] = stage2_results.get("update_placement_announcements", {})
         results["institution_survey"] = stage2_results.get("update_institution_survey", {})
         results["stock_pledge"] = stage2_results.get("update_stock_pledge", {})
 
