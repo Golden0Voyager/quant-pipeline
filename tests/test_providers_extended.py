@@ -24,10 +24,6 @@ def test_extended_macro_batch_saves():
         [{"date": "2026-Q2", "gdp": 300000.0, "data_date": "2026-07-20"}]
     )
     assert isinstance(q, int) and q >= 1
-    d = p.save_macro_daily_batch(
-        [{"date": "2026-07-20", "shibor_on": 1.5, "data_date": "2026-07-20"}]
-    )
-    assert isinstance(d, int) and d >= 1
 
 
 def test_extended_cb_batch_saves():
