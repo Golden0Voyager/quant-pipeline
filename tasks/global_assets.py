@@ -41,6 +41,7 @@ GLOBAL_ASSETS = [
     "BZ=F",            # Brent 原油期货
     "GC=F",            # COMEX 黄金
     "SI=F",            # COMEX 白银
+    "HG=F",            # COMEX 铜（全球增长探头，铜金比/铜油比可在读侧派生）
 ]
 
 # 增量拉取的重叠窗口：从库内最新日前回退几天续拉（INSERT OR REPLACE 幂等），
