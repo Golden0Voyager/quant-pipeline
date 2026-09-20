@@ -129,10 +129,6 @@ class MockDatabase:
         self._record("get_fundamentals_batch", date=trade_date)
         return pd.DataFrame({"ts_code": ["000001.SZ"]})
 
-    def save_north_flow_batch(self, records: list[dict]) -> int:
-        self._record("save_north_flow_batch", records)
-        return len(records)
-
     def save_index_daily_batch(self, records: list[dict]) -> int:
         self._record("save_index_daily_batch", records)
         return len(records)
@@ -147,10 +143,6 @@ class MockDatabase:
 
     def save_gold_price_batch(self, records: list[dict]) -> int:
         self._record("save_gold_price_batch", records)
-        return len(records)
-
-    def save_crude_oil_batch(self, records: list[dict]) -> int:
-        self._record("save_crude_oil_batch", records)
         return len(records)
 
     def save_usd_batch(self, records: list[dict]) -> int:
@@ -365,12 +357,10 @@ def test_database_interface_contract():
 
     assert not db.get_fundamentals_batch("2024-01-01").empty
 
-    assert db.save_north_flow_batch([{"net": 100.0}]) == 1
     assert db.save_index_daily_batch([{"close": 3000.0}]) == 1
     assert db.save_limit_up_down_batch([{"limit": "up"}]) == 1
     assert db.save_dividend_summary_batch([{"dividend": 1.0}]) == 1
     assert db.save_gold_price_batch([{"price": 2000.0}]) == 1
-    assert db.save_crude_oil_batch([{"price": 80.0}]) == 1
     assert db.save_usd_batch([{"rate": 7.0}]) == 1
     assert db.save_global_index_batch([{"index": "sp500"}]) == 1
     assert db.save_us_treasury_batch([{"yield": 4.0}]) == 1

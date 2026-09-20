@@ -86,8 +86,6 @@ def test_db_provider_methods():
     assert result is not None
 
     # 全球宏观数据 new save methods
-    result = provider.save_north_flow_batch([{"trade_date": "2024-01-01", "market": "沪市", "net_buy_amount": 1e9}])
-    assert result is not None
     result = provider.save_index_daily_batch([{"trade_date": "2024-01-01", "index_code": "sh000001", "close": 3000}])
     assert result is not None
     result = provider.save_limit_up_down_batch([{"trade_date": "2024-01-01", "ts_code": "000001.SZ", "limit_type": "涨停"}])
@@ -95,8 +93,6 @@ def test_db_provider_methods():
     result = provider.save_dividend_summary_batch([{"ts_code": "000001.SZ", "cumulative_dividend": 1.5}])
     assert result is not None
     result = provider.save_gold_price_batch([{"trade_date": "2024-01-01", "morning_price": 890.0}])
-    assert result is not None
-    result = provider.save_crude_oil_batch([{"trade_date": "2024-01-01", "contract": "CL", "latest_price": 73.5}])
     assert result is not None
     result = provider.save_usd_batch([{"trade_date": "2024-01-01", "currency": "美元", "central_parity_rate": 679.89}])
     assert result is not None

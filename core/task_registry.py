@@ -204,7 +204,6 @@ TABLE_LABELS: dict[str, str] = {
     "chip_distribution_em": "Chip EM",
     # 宏观
     "gold_price": "Gold Price",
-    "crude_oil": "Crude Oil",
     "fx_rate": "USD/CNY",
     "global_index": "Global Index",
     "us_treasury": "US Treasury",
@@ -271,7 +270,6 @@ TABLE_LABELS_CN: dict[str, str] = {
     "chip_distribution_em": "筹码分布(EM)",
     # 宏观
     "gold_price": "黄金价格",
-    "crude_oil": "原油价格",
     "fx_rate": "汇率",
     "global_index": "全球指数",
     "us_treasury": "美债收益率",
@@ -335,7 +333,6 @@ TASK_GROUPS: dict[str, list[str]] = {
     "macro": [
         "update_china_macro",
         "update_gold_price",
-        "update_crude_oil",
         "update_usd",
         "update_global_index",
         "update_us_treasury",
@@ -410,7 +407,6 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_earnings_forecast",
     "update_dividend_summary",
     "update_gold_price",
-    "update_crude_oil",
     "update_usd",
     "update_global_index",
     "update_us_treasury",
@@ -684,8 +680,8 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     ),
     # ── Cross-market ──────────────────────────────────────────────
     # update_north_flow 已下线：北向逐日资金流交易所自 2024-08 停止披露，
-    # 任务/监控/收盘刷新全部移除；north_flow 表保留在库中（空表无害，
-    # 若未来恢复披露可重新接入）。北向持仓 (update_north_hold) 不受影响。
+    # 任务/监控/收盘刷新全部移除；north_flow 死表已由 migration 016 删除
+    # （若未来恢复披露可重新接入）。北向持仓 (update_north_hold) 不受影响。
     TaskSpec(
         name="update_north_hold",
         callable=None,
@@ -864,8 +860,8 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     TaskSpec(
         name="update_china_macro",
         callable=None,
-        # macro_daily 已由 money_market 表接管（update_money_market），
-        # 本任务只产出月度/季度，保留 macro_daily 会让健康面板盯一张废表
+        # macro_daily 死表已由 migration 016 删除（SHIBOR 现由 money_market
+        # 表接管，update_money_market 供给），本任务只产出月度/季度
         tables=("macro_monthly", "macro_quarterly"),
         cadence=Cadence.MONTHLY,
         date_columns={
@@ -895,16 +891,6 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="黄金价格",
-    ),
-    TaskSpec(
-        name="update_crude_oil",
-        callable=None,
-        tables=("crude_oil",),
-        cadence=Cadence.DAILY,
-        date_columns={"crude_oil": "trade_date"},
-        empty_policy=EmptyPolicy.ALLOW,
-        primary_source="akshare",
-        display_label="原油价格",
     ),
     TaskSpec(
         name="update_usd",

@@ -44,7 +44,6 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_financial_history": "财务历史 (Financial History)",
     "update_china_macro": "中国宏观 (China Macro)",
     "update_gold_price": "黄金价格 (Gold Price)",
-    "update_crude_oil": "原油价格 (Crude Oil)",
     "update_usd": "汇率 (USD/CNY)",
     "update_global_index": "全球指数 (Global Index)",
     "update_us_treasury": "美债收益率 (US Treasury)",

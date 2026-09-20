@@ -2391,7 +2391,7 @@ def test_main_single_task_not_gated_when_offline():
 
 
 # ===========================================================================
-# 国际数据维度 (v3.1): gold_price / crude_oil / fx_rate / global_index / us_treasury
+# 国际数据维度 (v3.1): gold_price / fx_rate / global_index / us_treasury
 # ===========================================================================
 
 @patch("tasks.macro.ak")
@@ -2442,46 +2442,6 @@ def test_update_gold_price_empty(mock_ak: MagicMock):
         r = daily_pipeline.update_gold_price(db)
     assert r["saved"] == 0
     db.save_gold_price_batch.assert_not_called()
-
-
-@patch("tasks.macro.ak")
-def test_update_crude_oil_success(mock_ak: MagicMock):
-    db = MagicMock()
-    db.save_crude_oil_batch.return_value = 2
-
-    def _oil(symbol: str) -> pd.DataFrame:
-        is_cl = symbol == "CL"
-        return pd.DataFrame({
-            "名称": ["WTI原油" if is_cl else "Brent原油"],
-            "最新价": [73.5 if is_cl else 75.2],
-            "人民币报价": [3600.0 if is_cl else 3720.0],
-            "涨跌额": [-1.0], "涨跌幅": [-1.3], "开盘价": [74.0],
-            "最高价": [75.0], "最低价": [73.0], "昨日结算价": [74.5],
-        })
-
-    mock_ak.futures_foreign_commodity_realtime.side_effect = _oil
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_crude_oil(db)
-    assert r["saved"] == 2
-    db.save_crude_oil_batch.assert_called_once()
-    recs = db.save_crude_oil_batch.call_args[0][0]
-    assert {x["contract"] for x in recs} == {"CL", "OIL"}
-    # 验证真实映射：昨结价 -> pre_settle，涨跌额/涨跌幅来自 API 实际列
-    cl = next(x for x in recs if x["contract"] == "CL")
-    assert cl["pre_settle"] == 74.5
-    assert cl["change"] == -1.0
-    assert cl["change_pct"] == -1.3
-    assert cl["latest_price"] == 73.5
-
-
-@patch("tasks.macro.ak")
-def test_update_crude_oil_empty(mock_ak: MagicMock):
-    db = MagicMock()
-    mock_ak.futures_foreign_commodity_realtime.return_value = pd.DataFrame()
-    with patch("daily_pipeline.logger"):
-        r = daily_pipeline.update_crude_oil(db)
-    assert r["saved"] == 0
-    db.save_crude_oil_batch.assert_not_called()
 
 
 @patch("tasks.macro.ak")
@@ -2824,7 +2784,6 @@ class TestGlobalMacroCli:
             ("update_limit_up_down", "update_limit_up_down"),
             ("update_dividend_summary", "update_dividend_summary"),
             ("update_gold_price", "update_gold_price"),
-            ("update_crude_oil", "update_crude_oil"),
             ("update_usd", "update_usd"),
             ("update_global_index", "update_global_index"),
             ("update_us_treasury", "update_us_treasury"),
@@ -2860,7 +2819,6 @@ class TestGlobalMacroAkNone:
                 daily_pipeline.update_limit_up_down,
                 daily_pipeline.update_dividend_summary,
                 daily_pipeline.update_gold_price,
-                daily_pipeline.update_crude_oil,
                 daily_pipeline.update_usd,
                 daily_pipeline.update_global_index,
                 daily_pipeline.update_us_treasury,
@@ -2922,13 +2880,6 @@ class TestGlobalMacroFetchException:
         with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
             mock_ak.spot_golden_benchmark_sge.side_effect = ValueError("gold API error")
             r = daily_pipeline.update_gold_price(db)
-        assert r["saved"] == 0
-
-    def test_crude_oil_fetch_exception(self):
-        db = MagicMock()
-        with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
-            mock_ak.futures_foreign_commodity_realtime.side_effect = RuntimeError("oil fetch failed")
-            r = daily_pipeline.update_crude_oil(db)
         assert r["saved"] == 0
 
     def test_usd_fetch_exception(self):
@@ -3007,20 +2958,6 @@ class TestGlobalMacroDbSaveException:
                 "交易时间": ["2026-07-11 早盘"], "晚盘价": [897.58], "早盘价": [891.66],
             })
             r = daily_pipeline.update_gold_price(db)
-        assert r["saved"] == 0
-        assert "error" in r
-
-    def test_crude_oil_db_exception(self):
-        db = MagicMock()
-        db.save_crude_oil_batch.side_effect = RuntimeError("db error")
-        def _oil(symbol: str) -> pd.DataFrame:
-            return pd.DataFrame({
-                "最新价": [73.5], "涨跌额": [-1.0], "涨跌幅": [-1.3], "开盘价": [74.0],
-                "最高价": [75.0], "最低价": [73.0], "昨日结算价": [74.5],
-            })
-        with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
-            mock_ak.futures_foreign_commodity_realtime.side_effect = _oil
-            r = daily_pipeline.update_crude_oil(db)
         assert r["saved"] == 0
         assert "error" in r
 
