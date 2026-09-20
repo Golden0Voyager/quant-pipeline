@@ -50,6 +50,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_us_macro": "美国宏观利率 (US Macro Rates)",
     "update_hk_tech_index": "恒生科技指数 (HS Tech Index)",
     "update_cftc_cot": "CFTC 持仓 (COT Weekly)",
+    "update_eia_petroleum": "EIA 石油指标 (EIA Weekly)",
     "update_futures": "期货日线 (Futures)",
     "update_money_market": "货币市场 (Money Market)",
     "update_global_assets": "全球资产日线 (Global Assets)",
