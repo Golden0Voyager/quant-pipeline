@@ -423,14 +423,14 @@ def run_all(
     sequential: bool = False,
     parallel_workers: int | None = None,
 ) -> dict:
-    """运行完整数据管道（支持 DAG 5 阶段分叉与汇聚并发执行）。"""
+    """运行完整数据管道（DAG 5 阶段编排；stage2/stage4 暂按串行执行）。"""
     start_time = time.time()
     _lower_process_priority()
 
     workers = (
         parallel_workers
         if parallel_workers is not None
-        else int(os.getenv("PARALLEL_WORKERS", "4"))
+        else PARALLEL_WORKERS
     )
     if sequential or os.getenv("PARALLEL_PIPELINE", "1").lower() in (
         "0",
@@ -465,7 +465,8 @@ def run_all(
 
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
-    logger.info(f"⚙️  并行线程: {workers} ({'串行模式' if workers <= 1 else '并发重叠调度'})")
+    logger.info(f"⚙️  并行线程: {workers} ("
+                f"{'串行模式' if workers <= 1 else 'DAG 模式（stage2/stage4 暂按串行执行）'})")
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
