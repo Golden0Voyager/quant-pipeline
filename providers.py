@@ -1410,6 +1410,69 @@ class SmartMoneyDBProvider:
             logging.getLogger(__name__).warning(f"⚠️ EIA 石油指标批量保存失败: {e}")
             return 0
 
+    def get_futures_latest_date(self, symbol: str) -> str | None:
+        """轻量查询：直接 SQL 取某品种 futures_daily 的 MAX(trade_date)。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute(
+                    "SELECT MAX(trade_date) FROM futures_daily WHERE symbol = ?",
+                    (symbol,),
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
+    def save_lithium_spot_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存碳酸锂现货与基差到 lithium_spot_daily 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/020_lithium_spot_daily.sql 创建。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO lithium_spot_daily (
+                        spot_date, spot_price, near_contract, near_contract_price,
+                        dom_contract, dom_contract_price, dom_basis, dom_basis_rate,
+                        data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["spot_date"],
+                            r.get("spot_price"),
+                            r.get("near_contract"),
+                            r.get("near_contract_price"),
+                            r.get("dom_contract"),
+                            r.get("dom_contract_price"),
+                            r.get("dom_basis"),
+                            r.get("dom_basis_rate"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ 碳酸锂现货批量保存失败: {e}")
+            return 0
+
+    def get_lithium_spot_latest_date(self) -> str | None:
+        """轻量查询：直接 SQL 取 lithium_spot_daily 的 MAX(spot_date)。"""
+        try:
+            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+                cursor = conn.execute("SELECT MAX(spot_date) FROM lithium_spot_daily")
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
 
