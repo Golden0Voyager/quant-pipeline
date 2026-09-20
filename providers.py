@@ -1370,6 +1370,41 @@ class SmartMoneyDBProvider:
         except Exception:
             return None
 
+    def save_eia_petroleum_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存 EIA 周度石油指标到 eia_petroleum_weekly 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/018_eia_petroleum_weekly.sql 创建。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO eia_petroleum_weekly (
+                        week_date, series_id, series_name, value, units, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["week_date"],
+                            r["series_id"],
+                            r.get("series_name"),
+                            r.get("value"),
+                            r.get("units"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ EIA 石油指标批量保存失败: {e}")
+            return 0
+
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_futures_daily_batch(records)
 
