@@ -27,7 +27,8 @@ GLOBAL_ASSETS = [
     "^VIX9D",          # VIX 近端（与 ^VIX3M 组成期限结构，contango/backwardation 比点位更有预测力）
     "^VIX3M",          # VIX 3 个月
     "^MOVE",           # 美债波动率（债市定价动荡，加息周期核心仪表）
-    "USDCNH=X",        # 离岸人民币（在岸 fx_rate 表为中行牌价）
+    "USDCNY=X",        # 在岸人民币市场价（Yahoo 的 USDCNH=X 历史已下线、仅剩现货一行；
+                       # fx_rate 表为中行牌价/央行中间价，此处在岸市场价与之互补）
     "DX-Y.NYB",        # 美元指数（akshare global_index 对其覆盖率仅 13/50 交易日，不可靠）
     "^HSI",            # 恒生指数（同上，东财/新浪源均间歇性缺失）
     # 板块权益确认（与商品/芯片现货背离时是趋势预警）
