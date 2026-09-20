@@ -104,6 +104,7 @@ from interface import (
 
 # ── Task module re-exports ──
 from tasks.bars import _update_single_bar, update_bars  # noqa: F401
+from tasks.cftc_cot import update_cftc_cot
 from tasks.china_macro import update_china_macro
 from tasks.concept_board import update_concept_board, update_concept_member
 from tasks.convertible_bond import (
@@ -234,6 +235,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_us_treasury": update_us_treasury,
     "update_us_macro": update_us_macro,
     "update_hk_tech_index": update_hk_tech_index,
+    "update_cftc_cot": update_cftc_cot,
     "update_futures": update_futures,
     "update_global_assets": update_global_assets,
     "update_concept_board": update_concept_board,
@@ -510,6 +512,7 @@ def run_all(
         results["us_treasury"] = _run_task("update_us_treasury", update_us_treasury, db)
         results["us_macro"] = _run_task("update_us_macro", update_us_macro, db)
         results["hk_tech_index"] = _run_task("update_hk_tech_index", update_hk_tech_index, db)
+        results["cftc_cot"] = _run_task("update_cftc_cot", update_cftc_cot, db)
         results["futures"] = _run_task("update_futures", update_futures, db)
         results["china_macro"] = _run_task("update_china_macro", update_china_macro, db)
         results["money_market"] = _run_task("update_money_market", update_money_market, db)
@@ -537,6 +540,7 @@ def run_all(
             ("update_us_treasury", update_us_treasury, (db,), {}),
             ("update_us_macro", update_us_macro, (db,), {}),
             ("update_hk_tech_index", update_hk_tech_index, (db,), {}),
+            ("update_cftc_cot", update_cftc_cot, (db,), {}),
             ("update_futures", update_futures, (db,), {}),
             ("update_china_macro", update_china_macro, (db,), {}),
             ("update_money_market", update_money_market, (db,), {}),
@@ -580,6 +584,7 @@ def run_all(
         results["us_treasury"] = stage2_results.get("update_us_treasury", {})
         results["us_macro"] = stage2_results.get("update_us_macro", {})
         results["hk_tech_index"] = stage2_results.get("update_hk_tech_index", {})
+        results["cftc_cot"] = stage2_results.get("update_cftc_cot", {})
         results["futures"] = stage2_results.get("update_futures", {})
         results["china_macro"] = stage2_results.get("update_china_macro", {})
         results["money_market"] = stage2_results.get("update_money_market", {})
