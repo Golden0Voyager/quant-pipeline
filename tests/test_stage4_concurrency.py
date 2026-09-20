@@ -12,6 +12,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from core.parallel_runner import ParallelTask, run_parallel_tasks
 
 
@@ -39,10 +41,15 @@ def _make_real_database_manager(tmp_path):
     import json
     import sys
     import sysconfig
-    from importlib.metadata import distribution
+    from importlib.metadata import PackageNotFoundError, distribution
     from pathlib import Path
 
-    dist = distribution("smartmoney-hunter")
+    try:
+        dist = distribution("smartmoney-hunter")
+    except PackageNotFoundError:
+        # quant_pipeline CI 环境不安装 smartmoney_hunter（conftest 以 mock 替代），
+        # 真实写连接的并发回归由 quant_hunter 仓库 TestThreadSafeWriteConn 覆盖
+        pytest.skip("smartmoney-hunter not installed in this environment")
     db_py: Path | None = None
     direct = dist.read_text("direct_url.json")
     if direct:
