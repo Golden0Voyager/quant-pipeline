@@ -1235,7 +1235,7 @@ class SmartMoneyDBProvider:
 
         使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
         migrations/012_us_macro_daily.sql 创建，dgs2/icsa 两列由
-        migrations/014_us_macro_extend.sql 追加。
+        migrations/014_us_macro_extend.sql 与 019_us_macro_credit_stress.sql 追加。
         """
         if not records:
             return 0
@@ -1247,8 +1247,9 @@ class SmartMoneyDBProvider:
                     """
                     INSERT OR REPLACE INTO us_macro_daily (
                         trade_date, effr, dgs2, dgs3mo, dgs10, t10yie, icsa,
+                        hy_oas, ig_oas, stlfi, t5yie,
                         spread_10y_3m, real_rate_10y, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1259,6 +1260,10 @@ class SmartMoneyDBProvider:
                             r.get("dgs10"),
                             r.get("t10yie"),
                             r.get("icsa"),
+                            r.get("hy_oas"),
+                            r.get("ig_oas"),
+                            r.get("stlfi"),
+                            r.get("t5yie"),
                             r.get("spread_10y_3m"),
                             r.get("real_rate_10y"),
                             r.get("data_source"),
