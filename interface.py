@@ -189,10 +189,6 @@ class DatabaseInterface(Protocol):
         """批量获取基本面数据。"""
         ...
 
-    def save_north_flow_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存北向资金数据，返回实际保存条数。"""
-        ...
-
     def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存北向资金个股持仓数据，返回实际保存条数。"""
         ...
@@ -211,10 +207,6 @@ class DatabaseInterface(Protocol):
 
     def save_gold_price_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存国际金价数据，返回实际保存条数。"""
-        ...
-
-    def save_crude_oil_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存国际原油数据，返回实际保存条数。"""
         ...
 
     def save_usd_batch(self, records: list[dict[str, Any]]) -> int:
@@ -285,10 +277,6 @@ class DatabaseInterface(Protocol):
 
     def save_macro_quarterly_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存季度宏观指标（GDP），返回实际保存条数。"""
-        ...
-
-    def save_macro_daily_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存日度宏观指标（SHIBOR），返回实际保存条数。"""
         ...
 
     def save_money_market_batch(self, records: list[dict[str, Any]]) -> int:
@@ -416,10 +404,6 @@ class DatabaseInterface(Protocol):
 
     def save_placement_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存定增公告数据，返回实际保存条数。"""
-        ...
-
-    def save_insider_trading_batch(self, records: list[dict[str, Any]]) -> int:
-        """批量保存董监高增减持数据，返回实际保存条数。"""
         ...
 
     def save_institution_survey_batch(self, records: list[dict[str, Any]]) -> int:
