@@ -423,7 +423,7 @@ def run_all(
     sequential: bool = False,
     parallel_workers: int | None = None,
 ) -> dict:
-    """运行完整数据管道（DAG 5 阶段编排；stage2/stage4 暂按串行执行）。"""
+    """运行完整数据管道（DAG 5 阶段编排；stage4 并发，stage2 暂按串行执行）。"""
     start_time = time.time()
     _lower_process_priority()
 
@@ -466,7 +466,7 @@ def run_all(
     logger.info("\n🚀 SmartMoney 每日数据管道启动")
     logger.info(f"📂 数据库: {db.db_path}")
     logger.info(f"⚙️  并行线程: {workers} ("
-                f"{'串行模式' if workers <= 1 else 'DAG 模式（stage2/stage4 暂按串行执行）'})")
+                f"{'串行模式' if workers <= 1 else 'DAG 模式（stage4 并发，stage2 暂串行）'})")
     logger.info(f"📅 今天: {datetime.now().strftime('%Y-%m-%d')}")
 
     if not _should_update():
@@ -653,7 +653,10 @@ def run_all(
             elif ptask is not None:
                 stage4_ptasks.append(ptask)
 
-        stage4_ran = run_parallel_tasks(stage4_ptasks, max_workers=1, runner_fn=_safe_task)
+        # stage4 任务写表已审计为两两不相交，写路径均在 _write_lock 或
+        # 独立连接 + busy_timeout 保护下，可安全并发（bars 内部已有 3 线程先例）
+        stage4_workers = max(1, min(workers, len(stage4_ptasks)))
+        stage4_ran = run_parallel_tasks(stage4_ptasks, max_workers=stage4_workers, runner_fn=_safe_task)
         stage4_results.update(stage4_ran)
 
         results["restricted_share"] = stage4_results.get("update_restricted_share", {})
