@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.freshness import check_task_freshness
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -421,15 +422,22 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
         return {"error": "akshare not installed"}
 
     results: dict[str, Any] = {}
+    stale_parts: list[str] = []
 
     # 1. 行业板块涨跌幅
     try:
         records = _fetch_sector_daily()
         if records:
             warn_if_all_empty(records, ["close", "pct_change"], "sector_daily")
-            saved = db.save_sector_daily_batch(records)
-            results["sector_daily"] = saved
-            logger.info(f"✅ 行业涨跌幅保存完成: {saved} 条")
+            verdict = check_task_freshness(records, date_field="trade_date", expected=get_expected_latest_trading_day())
+            if verdict.is_stale:
+                logger.warning(f"⚠️ 行业涨跌幅数据陈旧 (max_date={verdict.max_date}, expected={verdict.expected})，保留旧数据")
+                results["sector_daily"] = 0
+                stale_parts.append("sector_daily")
+            else:
+                saved = db.save_sector_daily_batch(records)
+                results["sector_daily"] = saved
+                logger.info(f"✅ 行业涨跌幅保存完成: {saved} 条")
         else:
             results["sector_daily"] = 0
             logger.warning("⚠️ 行业涨跌幅无数据")
@@ -476,6 +484,11 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
     if has_error:
         results["status"] = "degraded"
         results["error"] = "部分子任务失败，详见各子任务记录"
+    elif stale_parts:
+        results["status"] = "retained"
+        results["reason"] = f"stale data retained: {', '.join(stale_parts)}"
+        results["retained_old_data"] = True
+        results["stale_parts"] = stale_parts
     elif total_saved > 0:
         results["status"] = "success"
     else:

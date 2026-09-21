@@ -669,7 +669,9 @@ def test_update_sector_derivatives_runs_all():
     db = MagicMock()
     for m in ("save_sector_daily_batch", "save_sector_valuation_batch", "save_index_futures_basis_batch"):
         setattr(db, m, MagicMock(return_value=1))
-    with patch.object(sector_derivatives, "ak", ak):
+    with patch.object(sector_derivatives, "ak", ak), patch.object(
+        sector_derivatives, "get_expected_latest_trading_day", return_value="2024-01-01"
+    ):
         result = sector_derivatives.update_sector_derivatives(db)
     assert "sector_daily" in result and "sector_valuation" in result and "index_futures_basis" in result
     assert db.save_sector_daily_batch.called
@@ -1176,6 +1178,20 @@ def test_update_concept_member_empty_push2():
     assert not db.save_concept_member_batch.called
 
 
+def test_update_concept_member_network_fails():
+    """验证成分股网络异常时返回 retained 而非 failed。"""
+    db = MagicMock()
+    with patch.object(concept_board, "_fetch_concept_members_em") as mock_fetch:
+        mock_fetch.side_effect = Exception("network error")
+        result = concept_board.update_concept_member(db)
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
+    assert result["member_saved"] == 0
+    assert result["pit_saved"] == 0
+    assert not db.save_concept_member_batch.called
+
+
 
 
 
@@ -1616,17 +1632,35 @@ def test_concept_to_int_invalid():
 
 
 def test_update_concept_board_request_fails():
-    """验证 push2 请求异常时优雅降级。"""
+    """验证 push2 请求异常时返回 retained（旧数据保留）。"""
     db = MagicMock()
     with patch.object(concept_board, "get_default_client") as mock_client:
         mock_client.return_value.call.return_value = SourceResponse(
             success=False, data=None, metadata=FetchMetadata(source_name="eastmoney", error="network error"),
         )
         result = concept_board.update_concept_board(db)
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
     assert result["board_saved"] == 0
+    assert not db.save_concept_board_batch.called
 
 
-def test_update_concept_board_save_raises():
+def test_update_concept_board_contract_failure_still_failed():
+    """验证合约校验失败时仍返回 failed/data_quality（不退化为 retained）。"""
+    db = MagicMock()
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=True,
+            data=[{"trade_date": "2026-01-01", "concept_code": "BK1001", "concept_name": "AI概念"}],
+            metadata=FetchMetadata(source_name="eastmoney"),
+        )
+        with patch.object(concept_board, "validate_records") as mock_validate:
+            mock_validate.return_value = ([], ["contract violation"])
+            result = concept_board.update_concept_board(db)
+    assert result["status"] == "failed"
+    assert result["error_kind"] == "data_quality"
+    assert not db.save_concept_board_batch.called
     """验证保存接口异常时优雅降级。"""
     db = MagicMock()
     db.save_concept_board_batch.side_effect = Exception("save error")

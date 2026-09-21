@@ -691,13 +691,25 @@ def run_all(
         if isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
     )
+    retained_tasks = sorted(
+        k
+        for k, v in results.items()
+        if isinstance(v, dict) and v.get("status") == "retained"
+    )
     results["crashed"] = bool(failed_tasks)
+    results["retained_tasks"] = retained_tasks
     # 无人值守告警：整轮结果必须主动外发，不能只靠日志
     if failed_tasks:
         notify_all(
             "error",
             "数据管道完成（含失败任务）",
             f"耗时 {elapsed / 60:.1f}min，失败任务: {', '.join(failed_tasks)}",
+        )
+    elif retained_tasks:
+        notify_all(
+            "warning",
+            "数据管道完成（含保留旧数据任务）",
+            f"耗时 {elapsed / 60:.1f}min，保留旧数据: {', '.join(retained_tasks)}",
         )
     else:
         notify_all("info", "数据管道全部完成", f"耗时 {elapsed / 60:.1f}min")
@@ -747,10 +759,18 @@ def weekly_backfill(
         if isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
     )
+    retained_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict) and v.get("status") == "retained"
+    )
     results["crashed"] = bool(failed_tasks)
+    results["retained_tasks"] = retained_tasks
     if failed_tasks:
         notify_all("error", "每周补全完成（含失败任务）",
                    f"耗时 {elapsed / 60:.1f}min，失败任务: {', '.join(failed_tasks)}")
+    elif retained_tasks:
+        notify_all("warning", "每周补全完成（含保留旧数据任务）",
+                   f"耗时 {elapsed / 60:.1f}min，保留旧数据: {', '.join(retained_tasks)}")
     else:
         notify_all("info", "每周补全全部完成", f"耗时 {elapsed / 60:.1f}min")
     return results
@@ -833,10 +853,18 @@ def monthly_repair(
         if isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
     )
+    retained_tasks = sorted(
+        k for k, v in results.items()
+        if isinstance(v, dict) and v.get("status") == "retained"
+    )
     results["crashed"] = bool(failed_tasks)
+    results["retained_tasks"] = retained_tasks
     if failed_tasks:
         notify_all("error", "每月修复完成（含失败步骤）",
                    f"耗时 {elapsed / 60:.1f}min，失败: {', '.join(failed_tasks)}")
+    elif retained_tasks:
+        notify_all("warning", "每月修复完成（含保留旧数据步骤）",
+                   f"耗时 {elapsed / 60:.1f}min，保留旧数据: {', '.join(retained_tasks)}")
     else:
         notify_all("info", "每月修复全部完成", f"耗时 {elapsed / 60:.1f}min")
     return results

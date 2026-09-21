@@ -232,6 +232,84 @@ class TestErrorKindEnum:
         assert str(ErrorKind.SOURCE_REMOVED) == "source_removed"
 
 
+class TestRetainedStatus:
+    """New RETAINED status: data-source outage keeps old data, no exit failure."""
+
+    def test_retained_factory_contract(self):
+        result = TaskResult.retained("x", reason="source unavailable")
+        assert result.status is TaskStatus.RETAINED
+        assert result.metadata.get("retained_old_data") is True
+        assert result.metadata.get("reason") == "source unavailable"
+        assert result.exit_failure is False
+
+    def test_retained_with_error_kind_network(self):
+        result = TaskResult.retained(
+            "x",
+            reason="akshare timeout",
+            error_kind=ErrorKind.NETWORK,
+            error="connection refused",
+        )
+        assert result.status is TaskStatus.RETAINED
+        assert result.error_kind is ErrorKind.NETWORK
+        assert result.error == "connection refused"
+        d = result.to_dict()
+        assert d["error_kind"] == "network"
+
+    def test_normalize_explicit_retained(self):
+        result = normalize_task_result(
+            "x",
+            {"status": "retained", "reason": "r", "error_kind": "network"},
+        )
+        assert result.status is TaskStatus.RETAINED
+        assert result.metadata.get("retained_old_data") is True
+        assert result.metadata.get("reason") == "r"
+        assert result.error_kind is ErrorKind.NETWORK
+
+    def test_normalize_failed_preserves_metadata(self):
+        result = normalize_task_result(
+            "x",
+            {
+                "status": "failed",
+                "error_kind": "network",
+                "error": "e",
+                "metadata": {"k": 1},
+            },
+        )
+        assert result.status is TaskStatus.FAILED
+        assert result.metadata.get("k") == 1
+
+    def test_normalize_degraded_and_aborted_preserve_metadata(self):
+        degraded = normalize_task_result(
+            "x",
+            {
+                "status": "degraded",
+                "error_kind": "network",
+                "error": "partial",
+                "metadata": {"k": 2},
+            },
+        )
+        assert degraded.status is TaskStatus.DEGRADED
+        assert degraded.metadata.get("k") == 2
+
+        aborted = normalize_task_result(
+            "x",
+            {
+                "status": "aborted",
+                "error": "cb open",
+                "metadata": {"k": 3},
+            },
+        )
+        assert aborted.status is TaskStatus.ABORTED
+        assert aborted.metadata.get("k") == 3
+
+    def test_existing_statuses_unchanged(self):
+        assert TaskResult.degraded("x", ErrorKind.NETWORK, "p").exit_failure is True
+        assert TaskResult.failed("x", ErrorKind.NETWORK, "e").exit_failure is True
+        assert TaskResult.aborted("x", error="e").exit_failure is True
+        assert TaskResult.success("x", saved=1).exit_failure is False
+        assert TaskResult.no_data("x", reason="h").exit_failure is False
+
+
 class TestTaskResultDataclass:
     """``TaskResult`` is a frozen-ish dataclass."""
 

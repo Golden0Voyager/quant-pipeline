@@ -209,3 +209,129 @@ def test_freshness_cache_and_invalidation(tmp_path):
     cov2 = get_daily_bars_coverage(str(db_file), "2026-07-10")
     assert cov2 == (2, 2)
 
+
+class TestCheckTaskFreshness:
+    EXPECTED = "2026-09-21"
+
+    def test_empty_on_trading_day_is_stale(self, monkeypatch):
+        from core.freshness import FreshnessVerdict, check_task_freshness
+
+        monkeypatch.setattr("core.freshness.is_trading_day", lambda d: True)
+        monkeypatch.setattr(
+            "core.freshness.get_expected_latest_trading_day",
+            lambda *a, **k: self.EXPECTED,
+        )
+        v = check_task_freshness(None, expected=self.EXPECTED)
+        assert v.is_stale is True
+        assert "empty" in v.reason.lower() or "空" in v.reason
+        assert "trading day" in v.reason.lower() or "交易日" in v.reason
+        assert v.max_date is None
+        assert v.expected == self.EXPECTED
+        assert isinstance(v, FreshnessVerdict)
+
+    def test_empty_on_holiday_not_stale(self, monkeypatch):
+        from core.freshness import check_task_freshness
+
+        monkeypatch.setattr("core.freshness.is_trading_day", lambda d: False)
+        monkeypatch.setattr(
+            "core.freshness.get_expected_latest_trading_day",
+            lambda *a, **k: self.EXPECTED,
+        )
+        v = check_task_freshness([], expected=self.EXPECTED)
+        assert v.is_stale is False
+        assert v.max_date is None
+        assert v.expected == self.EXPECTED
+
+    def test_stale_max_date(self, monkeypatch):
+        from core.freshness import check_task_freshness
+
+        records = [{"trade_date": "2026-09-18"}]
+        monkeypatch.setattr(
+            "core.freshness.get_recent_trading_days",
+            lambda *a, **k: ["2026-09-21"],
+        )
+        v = check_task_freshness(
+            records, date_field="trade_date", expected=self.EXPECTED
+        )
+        assert v.is_stale is True
+        assert "2026-09-18" in v.reason
+        assert "2026-09-21" in v.reason
+
+    def test_fresh_max_date(self, monkeypatch):
+        from core.freshness import check_task_freshness
+
+        records = [{"trade_date": "2026-09-21"}]
+        monkeypatch.setattr(
+            "core.freshness.get_recent_trading_days",
+            lambda *a, **k: ["2026-09-21"],
+        )
+        v = check_task_freshness(
+            records, date_field="trade_date", expected=self.EXPECTED
+        )
+        assert v.is_stale is False
+
+    def test_holiday_no_false_positive(self, monkeypatch):
+        """期望日为周二节假日，日历回退至上周五；记录 max = 周五 → 不报 stale。"""
+        from core.freshness import check_task_freshness
+
+        records = [{"trade_date": "2026-09-18"}]
+        monkeypatch.setattr(
+            "core.freshness.get_recent_trading_days",
+            lambda end, count: ["2026-09-18"] if end == "2026-09-22" else ["2026-09-21"],
+        )
+        v = check_task_freshness(
+            records, date_field="trade_date", expected="2026-09-22"
+        )
+        assert v.is_stale is False
+
+    def test_calendar_unavailable_fallback_tolerance(self, monkeypatch):
+        from core.freshness import check_task_freshness
+
+        monkeypatch.setattr(
+            "core.freshness.get_recent_trading_days", lambda *a, **k: []
+        )
+
+        records_near = [{"trade_date": "2026-09-20"}]
+        v_near = check_task_freshness(
+            records_near, date_field="trade_date", expected=self.EXPECTED
+        )
+        assert v_near.is_stale is False
+
+        records_old = [{"trade_date": "2026-09-17"}]
+        v_old = check_task_freshness(
+            records_old, date_field="trade_date", expected=self.EXPECTED
+        )
+        assert v_old.is_stale is True
+
+    def test_no_date_field_empty_only(self, monkeypatch):
+        from core.freshness import check_task_freshness
+
+        monkeypatch.setattr(
+            "core.freshness.get_expected_latest_trading_day",
+            lambda *a, **k: self.EXPECTED,
+        )
+        monkeypatch.setattr("core.freshness.is_trading_day", lambda d: False)
+
+        v = check_task_freshness([{"any": "data"}], date_field=None, expected=self.EXPECTED)
+        assert v.is_stale is False
+
+        monkeypatch.setattr("core.freshness.is_trading_day", lambda d: True)
+        v_empty = check_task_freshness(
+            [], date_field=None, expected=self.EXPECTED
+        )
+        assert v_empty.is_stale is True
+
+    def test_accepts_dataframe(self, monkeypatch, tmp_path):
+        import pandas as pd
+
+        from core.freshness import check_task_freshness
+
+        df = pd.DataFrame({"trade_date": ["2026-09-18"]})
+        monkeypatch.setattr(
+            "core.freshness.get_recent_trading_days",
+            lambda *a, **k: ["2026-09-21"],
+        )
+        v = check_task_freshness(df, date_field="trade_date", expected=self.EXPECTED)
+        assert v.is_stale is True
+        assert "2026-09-18" in v.reason
+

@@ -137,7 +137,7 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
                 name, raw if isinstance(raw, dict | TaskResult) else {}
             )
             retriable = (
-                result.status == TaskStatus.FAILED
+                result.status in (TaskStatus.FAILED, TaskStatus.RETAINED)
                 and result.error_kind == ErrorKind.NETWORK
             )
             if not retriable or attempt >= _NETWORK_RETRY_MAX:
@@ -150,7 +150,13 @@ def safe_task(name: str, fn: Callable, *args: Any, **kwargs: Any) -> dict[str, A
         assert result is not None
         result.metadata["elapsed_seconds"] = round(time.time() - task_start, 3)
 
-        if result.status in (TaskStatus.SUCCESS, TaskStatus.NO_DATA):
+        if result.status == TaskStatus.RETAINED:
+            logger.warning(
+                f"🟡 任务 {name} [retained] 保留旧数据，耗时 "
+                f"{result.metadata['elapsed_seconds']:.1f}s"
+                + (f": {result.error}" if result.error else "")
+            )
+        elif result.status in (TaskStatus.SUCCESS, TaskStatus.NO_DATA):
             logger.info(f"✅ 任务 {name} 完成，耗时 {result.metadata['elapsed_seconds']:.1f}s")
         else:
             logger.warning(

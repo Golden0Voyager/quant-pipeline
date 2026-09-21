@@ -64,14 +64,62 @@ def test_update_fund_flow_happy_path():
 
 
 def test_update_fund_flow_empty():
-    """上游返回空 → 不写库、标记 skipped（合法零行）。"""
+    """Trading day + empty source → retained (not silently skipped)."""
     db = MagicMock()
     loader = MagicMock()
     loader.get_market_fund_flow.return_value = pd.DataFrame()
-    with patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"):
+    with (
+        patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"),
+        patch("core.freshness.is_trading_day", return_value=True),
+    ):
+        res = mf.update_fund_flow(db, loader)
+    assert res["status"] == "retained"
+    assert res["retained_old_data"] is True
+    assert res["error_kind"] == "network"
+    assert res["total"] == 0
+    db.save_fund_flow_batch.assert_not_called()
+
+
+def test_update_fund_flow_empty_non_trading_day_is_skipped():
+    """Non-trading day + empty source → legacy skipped (not retained)."""
+    db = MagicMock()
+    loader = MagicMock()
+    loader.get_market_fund_flow.return_value = pd.DataFrame()
+    with (
+        patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"),
+        patch("core.freshness.is_trading_day", return_value=False),
+    ):
         res = mf.update_fund_flow(db, loader)
     assert res.get("skipped") is True
+    assert res.get("status") != "retained"
     db.save_fund_flow_batch.assert_not_called()
+
+
+def test_update_fund_flow_exception_marks_network():
+    """Loader raises → error_kind=network (runner 30s retry fires)."""
+    db = MagicMock()
+    loader = MagicMock()
+    loader.get_market_fund_flow.side_effect = RuntimeError("boom")
+    with patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"):
+        res = mf.update_fund_flow(db, loader)
+    assert res["saved"] == 0
+    assert res["total"] == 0
+    assert res["error_kind"] == "network"
+    assert "boom" in res["error"]
+
+
+def test_update_fund_flow_retained_carries_error_kind_for_retry():
+    """Retained result carries error_kind=network so runner retries."""
+    db = MagicMock()
+    loader = MagicMock()
+    loader.get_market_fund_flow.return_value = pd.DataFrame()
+    with (
+        patch.object(mf, "get_expected_latest_trading_day", return_value="2026-07-20"),
+        patch("core.freshness.is_trading_day", return_value=True),
+    ):
+        res = mf.update_fund_flow(db, loader)
+    assert res["error_kind"] == "network"
+    assert res["status"] == "retained"
 
 
 def test_update_fund_flow_symbols_filter():
