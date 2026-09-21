@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.freshness import check_task_freshness
 from core.source_record_key import block_trade_source_key, dragon_tiger_source_key
 from interface import DatabaseInterface, DataLoaderInterface
 
@@ -42,7 +43,16 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
         df = loader.get_market_fund_flow()
         if df.empty:
             logger.warning("⚠️  未获取到资金流向数据")
-            # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed
+            verdict = check_task_freshness(df, date_field=None, expected=today)
+            if verdict.is_stale:
+                logger.warning(f"⚠️  资金流向源端空数据：{verdict.reason}")
+                return {
+                    "status": "retained",
+                    "reason": verdict.reason,
+                    "error_kind": "network",
+                    "retained_old_data": True,
+                    "total": 0,
+                }
             return {"skipped": True, "reason": "no market fund flow data", "total": 0}
 
         batch_records = []
@@ -89,7 +99,7 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 
     except Exception as e:
         logger.error(f"❌ 资金流向获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
