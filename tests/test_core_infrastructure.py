@@ -143,6 +143,35 @@ class TestSafeTask:
         assert result["error_kind"] == "network"
         assert fn.call_count == 2
 
+    def test_safe_task_retries_retained_network_once(self):
+        """retained + network 也按网络错误重试一次，最终仍保留 retained。"""
+        fn = MagicMock(return_value={
+            "status": "retained",
+            "reason": "source down",
+            "error_kind": "network",
+        })
+        with patch("core.runner.time.sleep") as mock_sleep:
+            result = safe_task("retained", fn)
+        assert result["status"] == "retained"
+        assert fn.call_count == 2
+        mock_sleep.assert_called_once_with(30.0)
+
+    def test_safe_task_retained_logs_warning_not_success(self, caplog):
+        """retained 结果记录 warning，且不会记录 ✅ 成功日志。"""
+        fn = MagicMock(return_value={
+            "status": "retained",
+            "reason": "source down",
+            "error_kind": "network",
+        })
+        with caplog.at_level("INFO", logger="core.runner"), patch("core.runner.time.sleep"):
+            result = safe_task("retained", fn)
+        assert result["status"] == "retained"
+        assert any(
+            record.levelname == "WARNING" and "retained" in record.message
+            for record in caplog.records
+        )
+        assert not any("✅" in record.message for record in caplog.records)
+
     def test_non_network_failure_not_retried(self):
         """非 network 的失败（如 internal/data_quality）不重试。"""
         fn = MagicMock(return_value={"error": "partial failure"})
