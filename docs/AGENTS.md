@@ -85,6 +85,12 @@ rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.S
 | Cross-source check | Opt-in, OFF by default. `REFRESH_CROSS_SOURCE=1` enables a read-only sampled comparison against Xueqiu daily bars (never used for writes; price aligned on qfq, volume normalized by the lot/share convention, Beijing excluded). **Enabling it starts in observe mode**: `REFRESH_CROSS_SOURCE_REPORT_ONLY` defaults to `1` (records/warns disagreements, never degrades); set `0` to enforce after tolerances are validated. Audit metadata `cross_source` splits `mismatched` (real disagreement), `unverifiable` (Xueqiu had no data that day, e.g. suspended) and `reference_dead` (zero hits overall). Tuning knobs: `REFRESH_CROSS_SOURCE_TASK` (default `update_bars`), `REFRESH_CROSS_SOURCE_SAMPLE_SIZE` (default 30), `REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL` (defaults 0.005/0.05 — provisional, must be tuned on real data). Enable/tune 3-step flow: docs/runbooks/cross-source-verification-rollout.md |
 | TUI | `u` key ("Close Refresh") launches `daily_pipeline.py --refresh-today` after confirmation |
 
+## Glossary
+
+| Term | Meaning |
+|------|---------|
+| Pipeline `retained` status | 上游数据源不可用 → 保留旧数据，不算整轮失败（exit 0），但会 warning 通知；不同于收盘刷新审计元数据 `retained_old_data`（后者表示 refresh 任务失败/降级后旧行未发布） |
+
 ## Data Flow
 
 ```
