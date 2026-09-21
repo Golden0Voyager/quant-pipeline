@@ -19,6 +19,7 @@ class TaskStatus(StrEnum):
     DEGRADED = "degraded"
     FAILED = "failed"
     ABORTED = "aborted"
+    RETAINED = "retained"
 
 
 class ErrorKind(StrEnum):
@@ -125,6 +126,7 @@ class TaskResult:
         accepted: int = 0,
         rejected: int = 0,
         source: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> TaskResult:
         return cls(
             task_name=task_name,
@@ -137,6 +139,7 @@ class TaskResult:
             source=source,
             error_kind=error_kind,
             error=error,
+            metadata=metadata or {},
         )
 
     @classmethod
@@ -149,6 +152,7 @@ class TaskResult:
         fetched: int = 0,
         rejected: int = 0,
         source: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> TaskResult:
         return cls(
             task_name=task_name,
@@ -158,6 +162,7 @@ class TaskResult:
             source=source,
             error_kind=error_kind,
             error=error,
+            metadata=metadata or {},
         )
 
     @classmethod
@@ -174,6 +179,7 @@ class TaskResult:
         error_kind: ErrorKind = ErrorKind.INTERNAL,
         source: str | None = None,
         data_date: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> TaskResult:
         return cls(
             task_name=task_name,
@@ -187,6 +193,49 @@ class TaskResult:
             data_date=data_date,
             error_kind=error_kind,
             error=error,
+            metadata=metadata or {},
+        )
+
+    @classmethod
+    def retained(
+        cls,
+        task_name: str,
+        *,
+        reason: str,
+        error_kind: ErrorKind | None = None,
+        error: str | None = None,
+        attempted: int = 0,
+        fetched: int = 0,
+        accepted: int = 0,
+        rejected: int = 0,
+        saved: int = 0,
+        source: str | None = None,
+        data_date: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskResult:
+        """Source unavailable → previous data kept; not an exit failure.
+
+        ``metadata`` always carries ``retained_old_data=True`` and ``reason``;
+        callers may pass extra keys via ``metadata`` (they win on conflict).
+        """
+        merged: dict[str, Any] = {
+            "retained_old_data": True,
+            "reason": reason,
+            **(metadata or {}),
+        }
+        return cls(
+            task_name=task_name,
+            status=TaskStatus.RETAINED,
+            attempted=attempted,
+            fetched=fetched,
+            accepted=accepted,
+            rejected=rejected,
+            saved=saved,
+            source=source,
+            data_date=data_date,
+            error_kind=error_kind,
+            error=error,
+            metadata=merged,
         )
 
     # ── serialisation ────────────────────────────────────────────────
@@ -264,6 +313,7 @@ def normalize_task_result(
                     fetched=value.get("fetched", 0),
                     rejected=value.get("rejected", 0),
                     source=value.get("source"),
+                    metadata=value.get("metadata"),
                 )
             if status is TaskStatus.DEGRADED:
                 return TaskResult.degraded(
@@ -276,6 +326,7 @@ def normalize_task_result(
                     accepted=value.get("accepted", 0),
                     rejected=value.get("rejected", 0),
                     source=value.get("source"),
+                    metadata=value.get("metadata"),
                 )
             if status is TaskStatus.ABORTED:
                 return TaskResult.aborted(
@@ -289,6 +340,26 @@ def normalize_task_result(
                     error_kind=_parse_error_kind(value),
                     source=value.get("source"),
                     data_date=value.get("data_date"),
+                    metadata=value.get("metadata"),
+                )
+            if status is TaskStatus.RETAINED:
+                extra = dict(value.get("metadata") or {})
+                raw_retained = value.get("retained_old_data")
+                if isinstance(raw_retained, bool):
+                    extra["retained_old_data"] = raw_retained
+                return TaskResult.retained(
+                    task_name,
+                    reason=str(value.get("reason", "source unavailable; kept old data")),
+                    error_kind=_parse_error_kind(value) if value.get("error_kind") else None,
+                    error=value.get("error"),
+                    saved=saved if isinstance(saved, int) else 0,
+                    attempted=value.get("attempted", 0),
+                    fetched=value.get("fetched", 0),
+                    accepted=value.get("accepted", 0),
+                    rejected=value.get("rejected", 0),
+                    source=value.get("source"),
+                    data_date=value.get("data_date"),
+                    metadata=extra,
                 )
         except ValueError:
             pass  # unknown status string → fall through to heuristics
@@ -302,6 +373,7 @@ def normalize_task_result(
             error=str(error),
             fetched=value.get("fetched", 0),
             rejected=value.get("rejected", 0),
+            metadata=value.get("metadata"),
         )
 
     saved = value.get("saved", 0)
@@ -317,6 +389,7 @@ def normalize_task_result(
             fetched=value.get("fetched", 0),
             accepted=value.get("accepted", 0),
             rejected=value.get("rejected", 0),
+            metadata=value.get("metadata"),
         )
 
     if isinstance(saved, (int, float)) and saved > 0:
@@ -349,6 +422,7 @@ def normalize_task_result(
         error=value.get("error", "zero rows without explanation"),
         fetched=value.get("fetched", 0),
         rejected=value.get("rejected", 0),
+        metadata=value.get("metadata"),
     )
 
 
