@@ -753,13 +753,28 @@ class TestUpdateFundFlow:
         assert r["saved"] == 1
 
     def test_empty(self):
-        """上游资金流向为空 → skipped（合法零行）。"""
+        """上游资金流向为空且非交易日 → skipped（合法零行）。"""
         db = MagicMock()
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = pd.DataFrame()
-        with patch("daily_pipeline.logger"):
+        with patch("daily_pipeline.logger"), patch(
+            "core.freshness.is_trading_day", return_value=False
+        ):
             r = daily_pipeline.update_fund_flow(db, loader)
         assert r.get("skipped") is True
+
+    def test_empty_on_trading_day_is_retained(self):
+        """上游资金流向为空且在交易日 → retained（源端不可用，保留旧数据）。"""
+        db = MagicMock()
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = pd.DataFrame()
+        with patch("daily_pipeline.logger"), patch(
+            "core.freshness.is_trading_day", return_value=True
+        ):
+            r = daily_pipeline.update_fund_flow(db, loader)
+        assert r.get("status") == "retained"
+        assert r.get("retained_old_data") is True
+        assert r.get("error_kind") == "network"
 
     def test_loader_error(self):
         db = MagicMock()
@@ -2301,6 +2316,106 @@ def test_run_all_notifies_error_with_failed_task_names():
     level, _title, message = mock_notify.call_args.args
     assert level == "error"
     assert "bars" in message
+
+
+def test_run_all_retained_does_not_crash():
+    """run_all 含 retained 任务时 crashed=False，且 retained_tasks 列出任务名。"""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+    with patch("daily_pipeline._safe_task",
+               return_value={"status": "retained", "reason": "source unavailable"}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("time.sleep"):
+        results = run_all(db, loader, engine)
+
+    assert results.get("crashed") is False, \
+        "run_all should NOT set crashed=True for retained-only results"
+    retained = results.get("retained_tasks", [])
+    assert isinstance(retained, list)
+    assert len(retained) > 0, "run_all should list retained task names"
+
+
+def test_run_all_notifies_warning_on_retained():
+    """run_all 仅含 retained 任务时发送 warning 级通知，正文列出保留任务名。"""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+    with patch("daily_pipeline._safe_task",
+               return_value={"status": "retained", "reason": "source unavailable"}), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("daily_pipeline.notify_all") as mock_notify, \
+         patch("time.sleep"):
+        run_all(db, loader, engine)
+
+    mock_notify.assert_called_once()
+    level, _title, message = mock_notify.call_args.args
+    assert level == "warning", \
+        f"expected warning level, got {level!r}"
+    assert "bars" in message, \
+        f"notification message should mention retained task name, got: {message!r}"
+
+
+def test_run_all_failed_still_error_notify():
+    """run_all 同时含 retained + failed 时仍发 error 级通知（回归防护）。"""
+    from daily_pipeline import run_all
+
+    db = MagicMock()
+    loader = MagicMock()
+    engine = MagicMock()
+    call_count = 0
+
+    def _side_effect(name, *a, **kw):
+        nonlocal call_count
+        call_count += 1
+        return {"status": "retained", "reason": "src unavailable"} \
+            if call_count == 1 \
+            else {"status": "failed", "error": "simulated crash"}
+
+    with patch("daily_pipeline._safe_task", side_effect=_side_effect), \
+         patch("daily_pipeline._should_update", return_value=True), \
+         patch("daily_pipeline.logger"), \
+         patch("daily_pipeline.notify_all") as mock_notify, \
+         patch("time.sleep"):
+        run_all(db, loader, engine)
+
+    mock_notify.assert_called_once()
+    level, _title, _message = mock_notify.call_args.args
+    assert level == "error", \
+        f"expected error level when failed tasks coexist with retained, got {level!r}"
+
+
+def test_main_single_task_retained_exits_zero():
+    """单任务返回 retained 时 main() 不应以退出码 1 退出。"""
+    mock_fn = MagicMock(
+        return_value={
+            "status": "retained",
+            "reason": "source unavailable",
+        }
+    )
+    with patch.object(
+        sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
+    ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
+        "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+    ):
+        factory.get_db.return_value = db = MagicMock()
+        factory.get_loader.return_value = loader = MagicMock()
+        factory.get_indicator_engine.return_value = MagicMock()
+        daily_pipeline.main()
+    mock_fn.assert_called_once()
+    args, kwargs = mock_fn.call_args
+    assert args == (db, loader)
+    assert kwargs["limit"] is None
+    assert kwargs["resume"] is False
+    assert kwargs["symbols"] is None
+    assert kwargs["force"] is False
+    assert "_task_run_id" in kwargs
 
 
 def test_main_exits_one_when_daily_core_returns_crashed():
