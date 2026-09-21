@@ -628,6 +628,65 @@ def test_update_sector_derivatives_all_and_errors():
     assert str(result_err["sector_daily"]).startswith("error")
 
 
+def test_sector_daily_stale_fallback_data_is_retained():
+    """Sector daily data stale (max_date < expected) → status=retained, not saved."""
+    stale_records = [
+        {"sector_name": "银行", "trade_date": "2026-09-18", "close": 100.0, "pct_change": 1.0},
+    ]
+    db = MagicMock()
+    for m in ("save_sector_daily_batch", "save_sector_valuation_batch", "save_index_futures_basis_batch"):
+        setattr(db, m, MagicMock(return_value=1))
+    with patch.object(sector_derivatives, "_fetch_sector_daily", return_value=stale_records), patch.object(
+        sector_derivatives, "get_expected_latest_trading_day", return_value="2026-09-21"
+    ):
+        result = sector_derivatives.update_sector_derivatives(db)
+    assert result["status"] == "retained"
+    assert result["retained_old_data"] is True
+    assert "sector_daily" in result["stale_parts"]
+    assert "stale" in result["reason"]
+    db.save_sector_daily_batch.assert_not_called()
+    # valuation and basis still saved (fresh by default)
+    assert db.save_sector_valuation_batch.called
+    assert db.save_index_futures_basis_batch.called
+
+
+def test_sector_daily_fresh_still_success():
+    """Fresh sector daily data → status=success, saved as before."""
+    fresh_records = [
+        {"sector_name": "银行", "trade_date": "2024-01-01", "close": 100.0, "pct_change": 1.0},
+    ]
+    db = MagicMock()
+    for m in ("save_sector_daily_batch", "save_sector_valuation_batch", "save_index_futures_basis_batch"):
+        setattr(db, m, MagicMock(return_value=1))
+    with patch.object(sector_derivatives, "_fetch_sector_daily", return_value=fresh_records), patch.object(
+        sector_derivatives, "get_expected_latest_trading_day", return_value="2024-01-01"
+    ):
+        result = sector_derivatives.update_sector_derivatives(db)
+    assert result["status"] == "success"
+    db.save_sector_daily_batch.assert_called_once()
+
+
+def test_sector_stale_but_others_saved_is_retained():
+    """sector_daily stale, valuation+basis fresh → retained, others still saved."""
+    stale_records = [
+        {"sector_name": "银行", "trade_date": "2026-09-18", "close": 100.0, "pct_change": 1.0},
+    ]
+    db = MagicMock()
+    db.save_sector_daily_batch.return_value = 0
+    db.save_sector_valuation_batch.return_value = 1
+    db.save_index_futures_basis_batch.return_value = 1
+    with patch.object(sector_derivatives, "_fetch_sector_daily", return_value=stale_records), patch.object(
+        sector_derivatives, "get_expected_latest_trading_day", return_value="2026-09-21"
+    ):
+        result = sector_derivatives.update_sector_derivatives(db)
+    assert result["status"] == "retained"
+    assert result["retained_old_data"] is True
+    assert "sector_daily" in result["stale_parts"]
+    db.save_sector_daily_batch.assert_not_called()
+    assert db.save_sector_valuation_batch.called
+    assert db.save_index_futures_basis_batch.called
+
+
 # ===========================================================================
 # 收盘刷新 helper（Task 9）：只抓取/归一化，不写库，源异常直接上抛
 # ===========================================================================
