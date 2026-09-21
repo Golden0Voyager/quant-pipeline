@@ -1817,6 +1817,14 @@ def test_classify_refresh_task_state_distinguishes_retained_from_committed():
     assert REFRESH_STATE_LABELS["committed"] != REFRESH_STATE_LABELS["retained"]
 
 
+def test_refresh_state_labels_and_classification_keep_retained_status():
+    """TUI 展示层固定 retained 状态标签与归类结果。"""
+    from tui import REFRESH_STATE_LABELS, classify_refresh_task_state
+
+    assert REFRESH_STATE_LABELS["retained"] == "保留旧数据"
+    assert classify_refresh_task_state({"status": "retained"}) == "retained"
+
+
 def test_get_latest_refresh_task_states_reads_latest_run(tmp_path):
     """从 refresh_runs/refresh_task_runs 审计表读取最近一次运行并归类。"""
     from tui import get_latest_refresh_task_states
