@@ -287,9 +287,11 @@ def update_concept_board(db: DatabaseInterface) -> dict:
         error_msg = str(resp.metadata.error) if resp.metadata.error else "network error"
         logger.warning(f"⚠️ 概念板块行情获取失败: {error_msg}")
         return {
-            "status": "failed",
+            "status": "retained",
             "error_kind": "network",
+            "reason": f"eastmoney concept spot unavailable: {error_msg}",
             "error": error_msg,
+            "retained_old_data": True,
             "board_saved": 0,
             "saved": 0,
         }
@@ -378,9 +380,11 @@ def update_concept_member(
         pit_saved = 0
         logger.warning(f"⚠️ 概念板块成分股获取失败: {e}")
         return {
-            "status": "failed",
+            "status": "retained",
             "error_kind": "network",
+            "reason": f"eastmoney concept members unavailable: {e}",
             "error": str(e),
+            "retained_old_data": True,
             "member_saved": 0,
             "pit_saved": 0,
             "saved": 0,
