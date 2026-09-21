@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from core.calendar import (
+    get_expected_latest_trading_day,
+    get_recent_trading_days,
+    is_trading_day,
+)
 from core.task_registry import (
     CATCH_UP_TASK_ORDER,
     panel_date_columns,
@@ -256,3 +262,73 @@ def compute_catch_up_tasks(
             tasks.append(task)
             claimed.update(hit)
     return tasks
+
+
+@dataclass(frozen=True)
+class FreshnessVerdict:
+    is_stale: bool
+    reason: str | None
+    max_date: str | None
+    expected: str
+
+
+def check_task_freshness(
+    records,
+    *,
+    date_field: str | None = None,
+    expected: str | None = None,
+) -> FreshnessVerdict:
+    """判定任务数据是否陈旧。
+
+    适用于在抓取后快速判断「源端是否返回了有效数据」——当记录为空且当日
+    为交易日时视为陈旧（疑似上游吞没错误），而非静默成功。
+    """
+    exp = expected or get_expected_latest_trading_day()
+    is_empty = records is None or (hasattr(records, "empty") and records.empty) or len(records) == 0
+
+    if is_empty:
+        if is_trading_day(date.fromisoformat(exp)):
+            return FreshnessVerdict(
+                is_stale=True,
+                reason=f"empty on trading day {exp}; suspected swallowed upstream error",
+                max_date=None,
+                expected=exp,
+            )
+        return FreshnessVerdict(is_stale=False, reason=None, max_date=None, expected=exp)
+
+    if date_field is None:
+        return FreshnessVerdict(is_stale=False, reason=None, max_date=None, expected=exp)
+
+    dates = [
+        normalize_date(r[date_field])
+        for r in records
+        if isinstance(r, dict)
+    ]
+    # DataFrame rows are Series-like; fall back to column access
+    if not dates and hasattr(records, "iloc") and len(records) > 0:
+        dates = [
+            normalize_date(records.iloc[i][date_field])
+            for i in range(len(records))
+        ]
+
+    valid = [d for d in dates if d is not None]
+    if not valid:
+        return FreshnessVerdict(
+            is_stale=True,
+            reason=f"no parseable date in {date_field} across {len(records)} records",
+            max_date=None,
+            expected=exp,
+        )
+
+    max_date = max(valid)
+    ref_days = get_recent_trading_days(exp, 1)
+    reference = ref_days[0] if ref_days else (date.fromisoformat(exp) - timedelta(days=2)).strftime("%Y-%m-%d")
+
+    if max_date < reference:
+        return FreshnessVerdict(
+            is_stale=True,
+            reason=f"stale: max_date={max_date} < reference={reference} (expected={exp})",
+            max_date=max_date,
+            expected=exp,
+        )
+    return FreshnessVerdict(is_stale=False, reason=None, max_date=max_date, expected=exp)
