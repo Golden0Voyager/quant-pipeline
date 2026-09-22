@@ -574,7 +574,7 @@ def update_historical_valuation(db: DatabaseInterface, symbols: list[str] | None
         return {"saved": saved, "total": len(df)}
     except Exception as e:
         logger.error(f"❌ 历史估值快照失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -808,7 +808,7 @@ def update_sector_industry(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(grouped)}
     except Exception as e:
         logger.error(f"❌ 行业对比数据生成失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================

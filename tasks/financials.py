@@ -88,7 +88,7 @@ def update_shareholder_count(db: DatabaseInterface, symbols: list[str] | None = 
         return {"saved": saved, "total": len(df)}
     except Exception as e:
         logger.error(f"❌ 股东户数获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 def update_quarterly_financials(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
