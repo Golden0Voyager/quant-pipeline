@@ -2399,10 +2399,12 @@ def test_main_single_task_retained_exits_zero():
             "reason": "source unavailable",
         }
     )
-    with patch.object(
-        sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]
-    ), patch("daily_pipeline.ProviderFactory") as factory, patch.dict(
-        "daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}
+    with (
+        patch.object(sys, "argv", ["daily_pipeline.py", "--task", "update_bars"]),
+        patch("daily_pipeline.is_online", return_value=False),
+        patch("daily_pipeline._should_update", return_value=True),
+        patch("daily_pipeline.ProviderFactory") as factory,
+        patch.dict("daily_pipeline._TASK_CALLABLES", {"update_bars": mock_fn}),
     ):
         factory.get_db.return_value = db = MagicMock()
         factory.get_loader.return_value = loader = MagicMock()
