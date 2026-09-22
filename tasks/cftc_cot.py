@@ -130,4 +130,4 @@ def update_cftc_cot(db: DatabaseInterface) -> dict:
         return {"saved": total_saved, "total": total_new}
     except Exception as e:
         logger.error(f"❌ CFTC 持仓更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
