@@ -144,3 +144,46 @@ class TestUpdateFinancialHistory:
         assert result["skipped"] is True
         normalized = normalize_task_result("update_financial_history", result)
         assert normalized.status.value == "no_data"
+
+    def test_period_retry_then_success(self) -> None:
+        db = MagicMock()
+        db.save_financial_history_batch.return_value = {"history_saved": 1}
+        merge = MagicMock(side_effect=[Exception("boom"), Exception("boom"), [{"x": 1}]])
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            result = update_financial_history(db, periods=["20260630"])
+
+        assert result["saved"] == 1
+        assert merge.call_count == 3
+
+    def test_all_periods_failed_is_retained(self) -> None:
+        db = MagicMock()
+        merge = MagicMock(side_effect=Exception("boom"))
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            result = update_financial_history(db, periods=["20260630", "20260331"])
+
+        assert result["status"] == "retained"
+        assert result["retained_old_data"] is True
+        assert result["metadata"]["failed_periods"] == ["20260630", "20260331"]
+        db.save_financial_history_batch.assert_not_called()
+
+    def test_partial_failure_keeps_current_contract(self) -> None:
+        db = MagicMock()
+        db.save_financial_history_batch.return_value = {"history_saved": 1}
+        merge = MagicMock(side_effect=[Exception("boom"), [{"x": 1}]])
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            result = update_financial_history(db, periods=["20260630", "20260331"])
+
+        assert result["saved"] > 0
+        assert "error" in result
