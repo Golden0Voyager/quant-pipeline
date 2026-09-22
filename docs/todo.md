@@ -134,15 +134,15 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | **实际任务** | `update_stock_repurchase`（`tasks/stock_repurchase.py`） |
 | **表** | `stock_repurchase`（TRADING_DAY cadence） |
 
-### 3.8 基金持股 — 未做
+### ✅ 3.8 基金持股 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_fund_hold_em` |
-| **当前状态** | 无 |
-| **量化价值** | 每季度公募基金重仓股变化，跟踪"聪明钱" |
-| **实现建议** | 季频任务，存 `fund_holdings` 表 |
-| **数据量预估** | ~2000 只 × 每季 |
+| **实际任务** | `update_fund_holdings`（`tasks/fund_holdings.py`） |
+| **数据源** | 东财主力数据中心 `RPT_FUND_HOLD_STOCK`（6 类机构：基金/QFII/社保/券商/保险/信托） |
+| **表** | `fund_holdings`（ts_code, stock_name, report_date, institution_type, fund_count, total_shares, hold_value, hold_ratio, update_kind, update_shares, update_ratio, data_source） |
+| **Cadence** | QUARTERLY（挂入 monthly_repair） |
+| **数据量** | ~5000 只 × 6 类机构 × 4 季/年 ≈ 12 万行/年 |
 
 ### ✅ 3.9 大盘估值指标 — 已接入（乐咕）
 
@@ -246,7 +246,7 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | 🟡 P1 | 东财 | 概念板块 | ✅ 已接入（`update_concept_board` 东财源） |
 | 🟡 P1 | 东财 | 机构调研 | ✅ 已接入（`update_institution_survey`） |
 | 🟢 P2 | 同花顺 | 技术选股系列 | 未接入（因子输入，不直接入库） |
-| 🟢 P2 | 东财 | 股票质押/回购/基金持股 | 质押✅ 回购✅ / 基金持股⏳ |
+| 🟢 P2 | 东财 | 股票质押/回购/基金持股 | 质押✅ 回购✅ 基金持股✅ |
 | ⚪ P3 | 腾讯 | 日线 fallback / 分笔 | 未接入（备用/高级分析） |
 | ⚪ P3 | 乐咕 | 基金仓位 | 未接入（低更新频率） |
 | ⚪ P3 | 东财/同花顺 | 期权数据 | ✅ 已接入（`update_option_sentiment`） |
