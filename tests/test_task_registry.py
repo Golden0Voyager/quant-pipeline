@@ -368,6 +368,7 @@ def test_registry_date_columns_match_production():
     assert cols["shareholder_count"] == "report_date"
     assert cols["quarterly_financials"] == "report_period"
     assert cols["dividend_summary"] == "updated_at"
+    assert cols["placement_announcements"] == "updated_at"
 
 
 def test_panel_date_columns_includes_legacy_tables():
