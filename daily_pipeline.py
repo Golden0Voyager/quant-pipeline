@@ -171,6 +171,7 @@ from tasks.placement import update_placement_announcements
 from tasks.sector_derivatives import update_sector_derivatives
 from tasks.stock_pledge import update_stock_pledge
 from tasks.stock_repurchase import update_stock_repurchase
+from tasks.top10_shareholders import update_top10_shareholders
 from tasks.us_macro import update_us_macro
 from tasks.utility import health_check, retry_failed
 from tasks.valuation_chain import (
@@ -220,6 +221,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_industry": update_industry,
     "update_north_hold": update_north_hold,
     "update_fund_holdings": update_fund_holdings,
+    "update_top10_shareholders": update_top10_shareholders,
     "update_south_flow": update_south_flow,
     "update_ah_premium": update_ah_premium,
     "update_etf_daily": update_etf_daily,
@@ -645,6 +647,7 @@ def run_all(
             ("update_industry", update_industry, (db,), {}),
             ("update_north_hold", update_north_hold, (db,), {}),
             ("update_fund_holdings", update_fund_holdings, (db,), {}),
+            ("update_top10_shareholders", update_top10_shareholders, (db,), {}),
             ("update_index_membership", update_index_membership, (db,), {}),
             ("update_concept_member", update_concept_member, (db,), {}),
         ]
@@ -671,6 +674,7 @@ def run_all(
         results["industry"] = stage4_results.get("update_industry", {})
         results["north_hold"] = stage4_results.get("update_north_hold", {})
         results["fund_holdings"] = stage4_results.get("update_fund_holdings", {})
+        results["top10_shareholders"] = stage4_results.get("update_top10_shareholders", {})
         results["index_membership"] = stage4_results.get("update_index_membership", {})
         results["concept_member"] = stage4_results.get("update_concept_member", {})
 

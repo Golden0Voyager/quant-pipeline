@@ -8,20 +8,13 @@
 from __future__ import annotations
 
 import logging
-import random
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
 
-from core.config import (
-    MAX_RETRY_VAL as MAX_RETRY,
-)
-from core.config import (
-    RETRY_DELAY_VAL as RETRY_DELAY,
-)
 from interface import DatabaseInterface
+from tasks.retry_utils import retry_on_network
 
 try:
     import akshare as ak
@@ -76,46 +69,47 @@ _COLUMN_MAP = {
 
 
 def _fetch_single_north_hold(symbol: str, name_map: dict[str, str] | None = None) -> dict | None:
-    """获取单只股票的北向历史持仓并返回最新一条记录。"""
+    """获取单只股票的北向历史持仓并返回最新一条记录。
+
+    网络抓取部分由 ``retry_on_network`` 装饰器做指数退避重试；
+    数据清洗、转换与日志由本函数负责，重试装饰器失败时返回 None。
+    """
     if ak is None:
         return None
-    for attempt in range(MAX_RETRY):
-        try:
-            df = ak.stock_hsgt_individual_em(symbol=symbol)
-            if df is None or df.empty:
-                return None
-            df = df.rename(columns=_COLUMN_MAP)
-            if "trade_date" not in df.columns:
-                return None
-            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
-            df = df[df["trade_date"].notna()]
-            if df.empty:
-                return None
-            latest = df.iloc[-1]
-            security_name = ""
-            if name_map:
-                security_name = name_map.get(symbol, "")
-            if not security_name and "security_name" in df.columns:
-                security_name = str(latest.get("security_name") or "").strip()
-            return {
-                "ts_code": symbol,
-                "security_name": security_name,
-                "trade_date": latest["trade_date"].strftime("%Y-%m-%d"),
-                "close_price": _to_float(latest.get("close_price")),
-                "hold_shares": _to_float(latest.get("hold_shares")),
-                "hold_market_cap": _to_float(latest.get("hold_market_cap")),
-                "hold_shares_ratio": _to_float(latest.get("hold_shares_ratio")),
-                "total_shares_ratio": _to_float(latest.get("total_shares_ratio")),
-                "data_source": "akshare",
-            }
-        except Exception as e:
-            if attempt < MAX_RETRY - 1:
-                sleep_time = RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(f"⚠️ 北向持仓 {symbol} 第 {attempt + 1} 次失败，{sleep_time:.1f}s 后重试: {e}")
-                time.sleep(sleep_time)
-            else:
-                logger.warning(f"⚠️ 北向持仓 {symbol} 获取失败（已重试 {MAX_RETRY} 次）: {e}")
-    return None
+
+    @retry_on_network(max_attempts=3, base_delay=6.0, label=f"north_hold_{symbol}")
+    def _do_fetch(sym: str) -> pd.DataFrame | None:
+        return ak.stock_hsgt_individual_em(symbol=sym)
+
+    df = _do_fetch(symbol)
+    if df is None:
+        return None
+    if df.empty:
+        return None
+    df = df.rename(columns=_COLUMN_MAP)
+    if "trade_date" not in df.columns:
+        return None
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+    df = df[df["trade_date"].notna()]
+    if df.empty:
+        return None
+    latest = df.iloc[-1]
+    security_name = ""
+    if name_map:
+        security_name = name_map.get(symbol, "")
+    if not security_name and "security_name" in df.columns:
+        security_name = str(latest.get("security_name") or "").strip()
+    return {
+        "ts_code": symbol,
+        "security_name": security_name,
+        "trade_date": latest["trade_date"].strftime("%Y-%m-%d"),
+        "close_price": _to_float(latest.get("close_price")),
+        "hold_shares": _to_float(latest.get("hold_shares")),
+        "hold_market_cap": _to_float(latest.get("hold_market_cap")),
+        "hold_shares_ratio": _to_float(latest.get("hold_shares_ratio")),
+        "total_shares_ratio": _to_float(latest.get("total_shares_ratio")),
+        "data_source": "akshare",
+    }
 
 
 def update_hkscc_holder(db: DatabaseInterface) -> dict:

@@ -1212,6 +1212,9 @@ class SmartMoneyDBProvider:
     def save_fund_holdings_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_fund_holdings_batch(records)
 
+    def save_top10_shareholders_batch(self, records: list[dict[str, Any]]) -> int:
+        return self._db.save_top10_shareholders_batch(records)
+
     def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_index_daily_batch(records)
 

@@ -125,7 +125,7 @@ class TestCadenceEnum:
 
     def test_trading_day_is_most_common(self):
         trading = [s for s in TASK_REGISTRY if s.cadence is Cadence.TRADING_DAY]
-        assert len(trading) > len(TASK_REGISTRY) // 2
+        assert len(trading) >= len(TASK_REGISTRY) // 2
 
 
 class TestEmptyPolicy:

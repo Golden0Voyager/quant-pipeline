@@ -197,6 +197,10 @@ class DatabaseInterface(Protocol):
         """批量保存基金持股明细数据，返回实际保存条数。"""
         ...
 
+    def save_top10_shareholders_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存十大股东明细数据，返回实际保存条数。"""
+        ...
+
     def save_index_daily_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存指数日线数据，返回实际保存条数。"""
         ...

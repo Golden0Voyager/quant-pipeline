@@ -200,6 +200,7 @@ TABLE_LABELS: dict[str, str] = {
     # 股东
     "shareholder_count": "Shareholders",
     "institutional_holdings": "Inst. Holdings",
+    "top10_shareholders": "Top 10 Shareholders",
     # 筹码分布
     "chip_distribution": "Chip Dist.",
     "chip_distribution_em": "Chip EM",
@@ -270,6 +271,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     # 股东
     "shareholder_count": "股东户数",
     "institutional_holdings": "机构持仓",
+    "top10_shareholders": "十大股东",
     # 筹码分布
     "chip_distribution": "筹码分布",
     "chip_distribution_em": "筹码分布(EM)",
@@ -327,6 +329,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_sector_fund_flow",
         "update_north_hold",
         "update_fund_holdings",
+        "update_top10_shareholders",
         "update_margin_trading",
         "update_dragon_tiger",
         "update_block_trade",
@@ -716,6 +719,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="eastmoney",
         display_label="基金持股",
+    ),
+    TaskSpec(
+        name="update_top10_shareholders",
+        callable=None,
+        tables=("top10_shareholders",),
+        cadence=Cadence.QUARTERLY,
+        date_columns={"top10_shareholders": "report_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="十大股东",
     ),
     TaskSpec(
         name="update_south_flow",
