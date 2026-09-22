@@ -81,7 +81,7 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 指数日线更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 def _fetch_cyq_em(symbol: str) -> pd.DataFrame | None:

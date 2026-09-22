@@ -129,7 +129,7 @@ def test_update_futures_all_empty():
     fake_ak.futures_main_sina.return_value = pd.DataFrame()
     with patch.object(futures_mod, "ak", fake_ak):
         res = update_futures(db)
-    assert res == {"saved": 0, "total": 0}
+    assert res == {"saved": 0, "total": 0, "error_kind": "network"}
     db.save_futures_daily_batch.assert_not_called()
 
 

@@ -94,7 +94,7 @@ def update_stock_list(db: DatabaseInterface) -> dict:
         return {"saved": saved, "sh": int(sh_count), "sz": int(sz_count), "bj": int(bj_count)}
     except Exception as e:
         logger.error(f"❌ 股票列表更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 def update_indicators(

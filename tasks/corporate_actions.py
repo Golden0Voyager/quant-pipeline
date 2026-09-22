@@ -109,7 +109,7 @@ def update_restricted_share(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 限售解禁更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -192,7 +192,7 @@ def update_earnings_forecast(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 业绩预告更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================

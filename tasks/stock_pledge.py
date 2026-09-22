@@ -112,7 +112,7 @@ def update_stock_pledge(db: DatabaseInterface) -> dict:
 
     if fetch_error and df is None:
         logger.error(f"❌ 股权质押数据获取失败: {fetch_error}")
-        return {"saved": 0, "error": fetch_error}
+        return {"saved": 0, "error": fetch_error, "error_kind": "network"}
 
     if df is None or df.empty:
         logger.warning("⚠️ 股权质押数据为空")

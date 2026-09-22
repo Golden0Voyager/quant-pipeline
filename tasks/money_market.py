@@ -236,6 +236,7 @@ def update_money_market(db: DatabaseInterface) -> dict:
     except Exception as e:
         saved_b = 0
         logger.warning(f"⚠️ 央行资产负债表获取失败: {e}")
+        results["error_kind"] = "network"
     results["balance_saved"] = saved_b
 
     total_saved = results.get("daily_saved", 0) + results.get("balance_saved", 0)

@@ -363,7 +363,7 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
         return {"saved": saved, "total": len(df)}
     except Exception as e:
         logger.error(f"❌ 大宗交易获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -415,7 +415,7 @@ def update_sector_fund_flow(db: DatabaseInterface) -> dict:
         df = _fetch_sector_fund_flow(target_date)
     except Exception as e:
         logger.error(f"❌ 板块资金流向获取失败: {e}")
-        return {"saved": 0, "total": 0, "error": str(e)}
+        return {"saved": 0, "total": 0, "error": str(e), "error_kind": "network"}
     if df is None or df.empty:
         logger.warning("⚠️  板块资金流向无数据")
         # 显式 skipped：非交易日/上游无数据属正常结果，避免被结果契约误判为 failed

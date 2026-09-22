@@ -137,7 +137,7 @@ def update_hkscc_holder(db: DatabaseInterface) -> dict:
         stock_list = db.get_stock_list()
     except Exception as e:
         logger.warning(f"⚠️ 获取股票列表失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
     if stock_list is None or stock_list.empty:
         logger.warning("⚠️ 股票列表为空，跳过北向个股持仓更新")
