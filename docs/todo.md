@@ -95,15 +95,15 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | **实现建议** | 事件驱动型任务，存 `shareholder_change` 表，字段：ts_code, date, name, change_type, volume, price, ratio |
 | **阻塞** | 东财 datacenter API 当前 SSL 不稳定（2026-09-22 实测失败）；恢复后再接入 |
 
-### 3.3 十大流通股东 / 十大股东 — 未做
+### ✅ 3.3 十大流通股东 / 十大股东 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_top10_holders`（十大股东）、`stock_top10_flow_holders`（十大流通股东） |
-| **当前状态** | 无（`update_shareholder_count` 是股东户数，非十大股东） |
-| **量化价值** | 季报级别的大机构持仓变化，补全基本面拼图 |
-| **实现建议** | 季频任务，存 `top10_holders` 表 |
-| **说明** | `stock_circulate_stock_holder` 可单股取历史但极慢（~67 页/只），批量接入需评估 |
+| **实际任务** | `update_top10_shareholders`（`tasks/top10_shareholders.py`） |
+| **数据源** | 新浪财经 `stock_main_stock_holder()`（Sina，非东财；东财 API 已失效） |
+| **表** | `top10_shareholders`（ts_code, report_date, holder_rank, holder_name, shares_held, share_ratio, share_nature, announcement_date） |
+| **Cadence** | QUARTERLY（挂入 monthly_repair，20 线程并行） |
+| **说明** | Sina API 返回全量历史，按"截至日期"取最新报告期；~5500 只 × 10 股东 ≈ 5.5 万行/期 |
 
 ### ✅ 3.4 机构调研 — 已接入
 
@@ -303,9 +303,9 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 - 上游东财/同花顺接口限流或网络抖动时，curl 连接被服务端关闭
 - 这些任务与 `update_financial_history` 一样：**单次尝试，失败即放弃**，无重试/退避
 
-### 修复状态（2026-09-22，部分）
+### 修复状态（2026-09-22，全部完成）
 
 1. ✅ `update_concept_board` → PR #103 已改 `retained`（源不可用保留旧数据，exit 0）
 2. ✅ **8 个高频 daily 任务补 `error_kind=network`**（PR #105）：hk_tech_index、us_macro、cftc_cot、eia_petroleum、lithium_spot、macro.py 的 index_daily/limit_up_down/dividend_summary/gold_price/usd/global_index/us_treasury
-3. ⏳ 剩余 15 个低频任务补 `error_kind=network`（convertible_bond×3、south_flow、ah_premium、etf_daily、restricted_share、earnings_forecast、historical_valuation、sector_industry、block_trade、sector_fund_flow 等）→ 未做
-4. ⏳ 统一重试装饰器（`tasks/retry_utils.py` 的 `@retry(attempts=3, backoff=...)`）→ 未做，长期方案
+3. ✅ **17 个低频任务补 `error_kind=network`**（PR #106 + 直接提交）：convertible_bond×3、futures、china_macro、hkscc_holder、money_market、stock_pledge、stock_repurchase、finance_flow×3、core_chain、corporate_actions×2、financials、index_chain、market_flow×2、valuation_chain×2
+4. ✅ **统一重试装饰器**（`tasks/retry_utils.py` 的 `@retry_on_network`）→ 已创建，hkscc_holder 已迁移
