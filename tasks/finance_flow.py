@@ -102,7 +102,7 @@ def update_south_flow(db: DatabaseInterface) -> dict:
         return {"status": "success", "saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 南向资金更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -268,7 +268,7 @@ def update_ah_premium(db: DatabaseInterface) -> dict:
         return {"status": "success", "saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ A/H 溢价更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -473,7 +473,7 @@ def update_etf_daily(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ ETF 日线更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================

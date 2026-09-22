@@ -72,81 +72,69 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 
 ---
 
-## 3. 高价值 AkShare 数据接入（未立项）
+## 3. 高价值数据接入清单（2026-09 复核）
 
-与已有 41 个数据任务对比，以下 10 项是 AkShare 提供但尚未接入的**最高价值数据**，按量化分析价值排序。
+> **复核结论（2026-09-22）**：原 10 项中 **7 项已接入**，仅 3 项仍未做。已接入项标记 ✅ 并指向实际任务；未做项保留待办。
 
-### 3.1 沪深港通持股个股明细
-
-| 项目 | 内容 |
-|------|------|
-| **AkShare API** | `stock_hsgt_hold_stock_em`（北向持股）、`stock_hsgt_history_stock`（历史持仓） |
-| **当前状态** | 只有北向资金每日净买入总额（`north_flow`），无个股级别 |
-| **量化价值** | 北向资金是 A 股最重要的外部资金，个股持仓变化是强信号 |
-| **实现建议** | 日频任务，存 `north_bound_hold` 表，字段：ts_code, date, hold_market_value, hold_ratio, change_ratio |
-| **数据量预估** | ~1000 只标的 × 每日 ≈ 20 万行/年 |
-
-### 3.2 股东增减持
+### ✅ 3.1 沪深港通持股个股明细 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_share_holder_change`（东财股东增减持） |
-| **当前状态** | 只有股东户数（数量变化），缺实际买卖记录 |
+| **实际任务** | `update_north_hold`（`tasks/macro.py`） |
+| **数据源** | 东财数据中心分页 API `RPT_MUTUAL_HOLDSTOCKNORTH_STA`（季度快照，全市场 ~3900 只） |
+| **表** | `north_hold`（ts_code, trade_date, hold_shares, hold_market_cap, hold_shares_ratio, …） |
+| **说明** | HKEX 自 2024-08-19 停止每日个股北向披露，故为**季度快照**（非日频）。`tasks/hkscc_holder.py` 是旧的逐股轮询方案（遍历 5500 只），**已废弃，勿注册** |
+
+### 3.2 股东增减持 — 未做
+
+| 项目 | 内容 |
+|------|------|
+| **AkShare API** | `stock_gdfx_free_holding_change_em` / `stock_gdfx_holding_change_em`（东财股东增减持，按季度） |
+| **当前状态** | 无；akshare 无 `stock_share_holder_change`（todo 旧文有误） |
 | **量化价值** | 董监高/大股东增减持是内部人交易信号，公告级别数据 |
 | **实现建议** | 事件驱动型任务，存 `shareholder_change` 表，字段：ts_code, date, name, change_type, volume, price, ratio |
-| **数据量预估** | 几千条/月 |
+| **阻塞** | 东财 datacenter API 当前 SSL 不稳定（2026-09-22 实测失败）；恢复后再接入 |
 
-### 3.3 十大流通股东 / 十大股东
+### 3.3 十大流通股东 / 十大股东 — 未做
 
 | 项目 | 内容 |
 |------|------|
 | **AkShare API** | `stock_top10_holders`（十大股东）、`stock_top10_flow_holders`（十大流通股东） |
-| **当前状态** | 无 |
+| **当前状态** | 无（`update_shareholder_count` 是股东户数，非十大股东） |
 | **量化价值** | 季报级别的大机构持仓变化，补全基本面拼图 |
 | **实现建议** | 季频任务，存 `top10_holders` 表 |
-| **数据量预估** | 5000+ 只 × 10 位 × 4 季/年 ≈ 20 万行/年 |
+| **说明** | `stock_circulate_stock_holder` 可单股取历史但极慢（~67 页/只），批量接入需评估 |
 
-### 3.4 机构调研
-
-| 项目 | 内容 |
-|------|------|
-| **AkShare API** | `stock_jgdy_tj_em`（机构调研统计）、`stock_jgdy_detail_em`（调研详细） |
-| **当前状态** | 无 |
-| **量化价值** | 机构调研频率与被调研公司后续表现存在正相关，是另类数据信号 |
-| **实现建议** | 日频任务，存 `institution_survey` 表 |
-| **数据量预估** | 每日几十条 |
-
-### 3.5 概念板块
+### ✅ 3.4 机构调研 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_board_concept_*_em`（东财概念板块）/ `stock_board_concept_*_ths`（同花顺） |
-| **当前状态** | 只有行业板块（申万分类），无概念板块 |
-| **量化价值** | AI、新能源、芯片等概念板块是 A 股热点交易的驱动力 |
-| **实现建议** | 日频任务，存 `concept_sector` 和 `concept_sector_constituents` 表 |
-| **数据量预估** | ~500 个概念板块 × 每日行情 |
+| **实际任务** | `update_institution_survey`（`tasks/institution_survey.py`） |
+| **表** | `institution_survey`（TRADING_DAY cadence） |
 
-### 3.6 股票质押
+### ✅ 3.5 概念板块 — 已接入（东财源）
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_pledge_statistics_em`（质押统计）、`stock_pledge_detail_em`（质押明细） |
-| **当前状态** | 无 |
-| **量化价值** | 高质押比例是风险指标，质押爆仓是系统性风险源 |
-| **实现建议** | 日/周频任务，存 `stock_pledge` 表 |
-| **数据量预估** | 几千只股票 |
+| **实际任务** | `update_concept_board`（`tasks/concept_board.py`）+ `update_concept_member` |
+| **表** | `concept_board` / `concept_member` / `concept_member_history` |
+| **说明** | 东财 push2 直调（双主机 failover）。**同花顺第二源未接**（THS 375 概念 vs EM 504，code 格式纯数字不兼容 EM 的 BK 前缀，逐条调用开销大）——评估后放弃，详见 2026-09 调研 |
 
-### 3.7 股票回购
+### ✅ 3.6 股票质押 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_repurchase_em` |
-| **当前状态** | 无 |
-| **量化价值** | 回购是公司认为股价被低估的信号 |
-| **实现建议** | 日频任务，存 `stock_repurchase` 表 |
-| **数据量预估** | 每日几条到几十条 |
+| **实际任务** | `update_stock_pledge`（`tasks/stock_pledge.py`） |
+| **表** | `stock_pledge`（WEEKLY cadence） |
 
-### 3.8 基金持股
+### ✅ 3.7 股票回购 — 已接入
+
+| 项目 | 内容 |
+|------|------|
+| **实际任务** | `update_stock_repurchase`（`tasks/stock_repurchase.py`） |
+| **表** | `stock_repurchase`（TRADING_DAY cadence） |
+
+### 3.8 基金持股 — 未做
 
 | 项目 | 内容 |
 |------|------|
@@ -156,41 +144,37 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | **实现建议** | 季频任务，存 `fund_holdings` 表 |
 | **数据量预估** | ~2000 只 × 每季 |
 
-### 3.9 大盘估值指标
+### ✅ 3.9 大盘估值指标 — 已接入（乐咕）
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `stock_a_all_pb`（全市场PB）、`stock_a_all_pe`（全市场PE）、`stock_bond_spread`（股债利差） |
-| **当前状态** | 无 |
-| **量化价值** | 全市场 PE/PB 中位数、股债利差是判断市场整体估值水位的关键指标 |
-| **实现建议** | 日频任务，存 `market_valuation` 表 |
-| **数据量预估** | 每日 1 行 |
+| **实际任务** | `update_market_valuation`（`tasks/market_valuation.py`） |
+| **数据源** | 乐咕乐咕：`stock_a_ttm_lyr`（全A PE）、`stock_a_all_pb`（全A PB）、`stock_ebs_lg`（股债利差） |
+| **表** | `market_valuation`（date, pe_median, pb_median, equity_bond_spread, csi300_close, data_source='legu'） |
+| **状态** | TRADING_DAY cadence，最新数据已到当日 |
 
-### 3.10 期权数据
+### ✅ 3.10 期权数据 — 已接入
 
 | 项目 | 内容 |
 |------|------|
-| **AkShare API** | `option_50etf_*`（50ETF 期权）、`option_300etf_*`（300ETF 期权） |
-| **当前状态** | 无任何期权数据 |
-| **量化价值** | 期权持仓 PCR、隐含波动率是市场情绪和风险偏好的实时指标 |
-| **实现建议** | 日频任务，存 `option_daily` 表，字段：date, etf_type, pcr, iv, put_volume, call_volume |
-| **数据量预估** | 每日几条 |
+| **实际任务** | `update_option_sentiment`（`tasks/option_sentiment.py`） |
+| **表** | `option_sentiment`（TRADING_DAY cadence） |
 
 ---
 
 ## 4. 新数据源调研
 
-### 4.1 乐咕乐咕 (legulegu.com) — 21 个函数，基本独占
+### ✅ 4.1 乐咕乐咕 (legulegu.com) — 部分接入
 
-**估值指标类（已列入 3.9 大盘估值指标）：**
-- `stock_a_ttm_lyr()` — 全A PE（LYR+TTM、等权+中位数）
-- `stock_a_all_pb()` — 全A PB（等权+中位数）
-- `stock_ebs_lg()` — 股债利差（FED spread）
-- `stock_buffett_index_lg()` — 巴菲特指标（总市值/GDP + 分位数）
-- `stock_a_congestion_lg()` — 大盘拥挤度
-- `stock_market_pe_lg()` / `stock_market_pb_lg()` — 上证/深证/创业板/科创板 PE+PB
-- `stock_index_pe_lg()` / `stock_index_pb_lg()` — 12 个主流指数 PE+PB（等权/加权/中位数）
-- `stock_a_gxl_lg()` / `stock_hk_gxl_lg()` — 市场级股息率时间序列
+**估值指标类（已接入 → `tasks/market_valuation.py`）：**
+- ✅ `stock_a_ttm_lyr()` — 全A PE（LYR+TTM、等权+中位数）→ `market_valuation.pe_median/pe_quantile`
+- ✅ `stock_a_all_pb()` — 全A PB（等权+中位数）→ `market_valuation.pb_median/pb_quantile`
+- ✅ `stock_ebs_lg()` — 股债利差（FED spread）→ `market_valuation.equity_bond_spread/ebs_ma`
+- ⏳ `stock_buffett_index_lg()` — 巴菲特指标（总市值/GDP + 分位数）→ `csi300_close` 已存，GDP 分位数未存
+- ⏳ `stock_a_congestion_lg()` — 大盘拥挤度 → 未接入
+- ⏳ `stock_market_pe_lg()` / `stock_market_pb_lg()` — 上证/深证/创业板/科创板 PE+PB → 未接入
+- ⏳ `stock_index_pe_lg()` / `stock_index_pb_lg()` — 12 个主流指数 PE+PB（等权/加权/中位数）→ 未接入
+- ⏳ `stock_a_gxl_lg()` / `stock_hk_gxl_lg()` — 市场级股息率时间序列 → 未接入
 
 **市场宽度类（另类数据信号）：**
 - `stock_a_high_low_statistics()` — 20/60/120 日新高新低计数
@@ -202,10 +186,10 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 - `fund_balance_position_lg()` — 平衡混合型基金仓位
 - `fund_linghuo_position_lg()` — 灵活配置型基金仓位
 
-**接入建议**：
-- 高优先级：策略信号类（股债利差、巴菲特指标、全A PE）→ 可合并到 `tasks/macro.py` 或新建 `tasks/market_valuation.py`
-- 中优先级：市场宽度类 → 与已有 limit_up_down 任务合并
-- 低优先级：基金仓位 → 等仓位数据需求明确后再做
+**接入状态（2026-09 复核）**：
+- ✅ 高优先级：策略信号类（股债利差、全A PE/PB）→ 已在 `tasks/market_valuation.py`，TRADING_DAY 每日运行
+- ⏳ 中优先级：市场宽度类（新高新低/破净/赚钱效应）→ 未接入，可并入 limit_up_down 或新建任务
+- ⏳ 低优先级：基金仓位 / 巴菲特分位数 / 指数 PE+PB → 等需求明确后再做
 
 ### 4.2 同花顺 (10jqka) — 30+ 个函数
 
@@ -251,26 +235,26 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 
 ---
 
-## 5. 数据源优先级总排序
+## 5. 数据源优先级总排序（2026-09 复核）
 
-| 优先级 | 来源 | 数据 | 原因 |
+| 优先级 | 来源 | 数据 | 状态 |
 |--------|------|------|------|
-| 🔴 P0 | 乐咕 | 股债利差、巴菲特指标、全A PE | 独占、策略核心、日频、量小易接入 |
-| 🔴 P0 | 东财 | 沪深港通持股个股明细 | 北向资金个股级、量化核心信号 |
-| 🔴 P0 | 东财 | 股东增减持 | 内部人交易强信号 |
-| 🟡 P1 | 乐咕 | 市场宽度（新高新低/破净） | 独占、辅助判断市场状态 |
-| 🟡 P1 | 东财 | 概念板块 | 热点交易驱动力，分类与现有行业不同 |
-| 🟡 P1 | 东财 | 机构调研 | 另类数据信号 |
-| 🟢 P2 | 同花顺 | 技术选股系列 | 因子输入，不直接入库 |
-| 🟢 P2 | 东财 | 股票质押/回购/基金持股 | 辅助信号 |
-| ⚪ P3 | 腾讯 | 日线 fallback / 分笔 | 备用/高级分析 |
-| ⚪ P3 | 乐咕 | 基金仓位 | 低更新频率 |
-| ⚪ P3 | 东财/同花顺 | 期权数据 | 市场较小 |
+| 🔴 P0 | 乐咕 | 股债利差、巴菲特指标、全A PE | ✅ 已接入（`update_market_valuation`） |
+| 🔴 P0 | 东财 | 沪深港通持股个股明细 | ✅ 已接入（`update_north_hold` 季度快照） |
+| 🔴 P0 | 东财 | 股东增减持 | ⏳ 未做（东财 API 暂不稳定） |
+| 🟡 P1 | 乐咕 | 市场宽度（新高新低/破净） | ⏳ 未接入 |
+| 🟡 P1 | 东财 | 概念板块 | ✅ 已接入（`update_concept_board` 东财源） |
+| 🟡 P1 | 东财 | 机构调研 | ✅ 已接入（`update_institution_survey`） |
+| 🟢 P2 | 同花顺 | 技术选股系列 | 未接入（因子输入，不直接入库） |
+| 🟢 P2 | 东财 | 股票质押/回购/基金持股 | 质押✅ 回购✅ / 基金持股⏳ |
+| ⚪ P3 | 腾讯 | 日线 fallback / 分笔 | 未接入（备用/高级分析） |
+| ⚪ P3 | 乐咕 | 基金仓位 | 未接入（低更新频率） |
+| ⚪ P3 | 东财/同花顺 | 期权数据 | ✅ 已接入（`update_option_sentiment`） |
 ```
 
 ---
 
-## 6. update_financial_history 报告期处理无重试（2026-08-04 观察）
+## ✅ 6. update_financial_history 报告期处理无重试（2026-08-04 观察 → 2026-09-22 已修复）
 
 ### 现象
 
@@ -293,15 +277,15 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 - **结构性弱点**：`tasks/financial_history.py:276-278` 每个报告期**单次尝试**，异常即 `continue` 放弃，无重试机制（对比 `update_bars` 有 3 次重试）
 - 单报告期连续拉 4 个全量接口（yjbb/lrb/zcfz/xjll + 披露日期表，各 1-2 分钟），上游任一断流即失败
 
-### 建议方案
+### 修复状态（PR #104，2026-09-22 ✅）
 
-1. 报告期处理加 1-2 次指数退避重试（对齐 `update_bars` 的重试标准）
-2. 区分「接口失败」与「空数据」日志级别，空数据不应计入失败
-3. 失败报告期持久化到待重试列表，跨运行保留（类似 `failed_symbols` 队列），避免下次运行重新发现时重复拉全部
+1. ✅ 报告期处理已加 3 次指数退避重试（`_retry` helper，照抄 `sector_derivatives.py`）
+2. ✅ 全部报告期失败 → 返回 `retained`（保留旧数据、exit 0），不再 failed 阻塞下游
+3. ⏳ 失败报告期持久化到待重试列表（类似 `failed_symbols` 队列）→ 未做，可后续补
 
 ---
 
-## 7. 单次尝试任务遇上游瞬断即失败（2026-08-04 观察）
+## 🟡 7. 单次尝试任务遇上游瞬断即失败（2026-08-04 观察 → 2026-09-22 部分修复）
 
 ### 现象
 
@@ -319,10 +303,9 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 - 上游东财/同花顺接口限流或网络抖动时，curl 连接被服务端关闭
 - 这些任务与 `update_financial_history` 一样：**单次尝试，失败即放弃**，无重试/退避
 
-### 建议方案
+### 修复状态（2026-09-22，部分）
 
-与第 6 节统一处理：
-
-1. 提炼统一的重试装饰器（如 `tasks/retry_utils.py` 的 `@retry(attempts=3, backoff=...)`），覆盖所有单次尝试的抓取任务
-2. 统一将「接口失败」标为可重试错误，空数据/校验失败不重试
-3. 任务级失败与 per-symbol 失败队列统一记录，便于跨运行恢复
+1. ✅ `update_concept_board` → PR #103 已改 `retained`（源不可用保留旧数据，exit 0）
+2. ✅ **8 个高频 daily 任务补 `error_kind=network`**（PR #105）：hk_tech_index、us_macro、cftc_cot、eia_petroleum、lithium_spot、macro.py 的 index_daily/limit_up_down/dividend_summary/gold_price/usd/global_index/us_treasury
+3. ⏳ 剩余 15 个低频任务补 `error_kind=network`（convertible_bond×3、south_flow、ah_premium、etf_daily、restricted_share、earnings_forecast、historical_valuation、sector_industry、block_trade、sector_fund_flow 等）→ 未做
+4. ⏳ 统一重试装饰器（`tasks/retry_utils.py` 的 `@retry(attempts=3, backoff=...)`）→ 未做，长期方案

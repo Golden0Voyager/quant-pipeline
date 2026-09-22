@@ -91,7 +91,7 @@ def update_cb_quotation(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 可转债行情更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -147,7 +147,7 @@ def update_cb_redeem(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 可转债强赎更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================
@@ -211,7 +211,7 @@ def update_cb_index(db: DatabaseInterface) -> dict:
         return {"saved": saved, "total": len(records)}
     except Exception as e:
         logger.error(f"❌ 可转债指数更新失败: {e}")
-        return {"saved": 0, "error": str(e)}
+        return {"saved": 0, "error": str(e), "error_kind": "network"}
 
 
 # ===========================================================================

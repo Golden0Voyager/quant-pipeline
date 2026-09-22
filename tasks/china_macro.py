@@ -645,6 +645,7 @@ def update_china_macro(db: DatabaseInterface) -> dict:
     except Exception as e:
         saved_q = 0
         logger.warning(f"⚠️ GDP 获取失败: {e}")
+        results["error_kind"] = "network"
     results["quarterly_saved"] = saved_q
 
     # If we got here without an exception, the task ran to completion.

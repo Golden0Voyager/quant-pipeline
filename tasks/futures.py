@@ -162,7 +162,7 @@ def update_futures(db: DatabaseInterface) -> dict:
 
     if not records:
         logger.warning("⚠️ 期货日线全部无数据")
-        return {"saved": 0, "total": 0}
+        return {"saved": 0, "total": 0, "error_kind": "network"}
 
     saved = db.save_futures_daily_batch(records)
     logger.info(f"✅ 期货日线保存完成: {saved}/{len(records)} 条")

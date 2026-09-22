@@ -88,7 +88,7 @@ def update_stock_repurchase(db: DatabaseInterface) -> dict:
     resp = get_default_client().call("eastmoney", lambda: ak.stock_repurchase_em())
     if not resp.success:
         logger.error(f"❌ 股票回购数据获取失败: {resp.metadata.error}")
-        return {"saved": 0, "error": resp.metadata.error or "fetch failed"}
+        return {"saved": 0, "error": resp.metadata.error or "fetch failed", "error_kind": "network"}
     df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         logger.warning("⚠️ 股票回购数据为空")
