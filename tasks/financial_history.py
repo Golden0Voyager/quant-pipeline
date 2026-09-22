@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -164,6 +165,20 @@ def _normalize_code(raw: Any) -> str:
     return s.zfill(6)
 
 
+def _retry(fn: Callable[[], Any], *, tries: int = 3, base_delay: float = 1.0, label: str = "") -> Any:
+    """对易受网络波动影响的 AkShare 调用做指数退避重试，全部失败返回 None。"""
+    last_exc: Exception | None = None
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — 网络类异常统一重试
+            last_exc = e
+            if i < tries - 1:
+                time.sleep(base_delay * (2**i))
+    logger.warning(f"⚠️ {label} 重试 {tries} 次仍失败: {last_exc}")
+    return None
+
+
 def _merge_financial_period(period: str) -> list[dict]:
     """获取一个报告期的全部财务数据，合并后返回记录列表。"""
     if ak is None:
@@ -298,10 +313,19 @@ def update_financial_history(
     total_saved = 0
     last_error: str | None = None
 
+    failed_periods: list[str] = []
     for period in periods:
         logger.info(f"  🔄 处理报告期 {period}...")
         try:
-            records = _merge_financial_period(period)
+            records = _retry(
+                lambda p=period: _merge_financial_period(p),
+                label=f"financial_history:{period}",
+            )
+            if records is None:
+                logger.warning(f"  ⚠️ {period} 重试耗尽")
+                failed_periods.append(period)
+                last_error = f"{period}: retry exhausted"
+                continue
             if not records:
                 logger.warning(f"  ⚠️ {period} 无有效记录")
                 continue
@@ -312,9 +336,20 @@ def update_financial_history(
             time.sleep(2)
         except Exception as e:
             last_error = f"{period}: {e}"
+            failed_periods.append(period)
             logger.warning(f"  ⚠️ {period} 处理失败: {e}")
 
     logger.info(f"✅ 财务历史更新完成: 共写入 {total_saved} 条")
+    if total_saved == 0 and failed_periods:
+        return {
+            "status": "retained",
+            "reason": f"all {len(failed_periods)} periods failed; kept old data",
+            "error": last_error,
+            "retained_old_data": True,
+            "saved": 0,
+            "metadata": {"failed_periods": failed_periods},
+        }
+
     result: dict[str, Any] = {"saved": total_saved}
     if last_error:
         result["error"] = last_error
