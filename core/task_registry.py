@@ -188,6 +188,7 @@ TABLE_LABELS: dict[str, str] = {
     "block_trade": "Block Trade",
     "sector_fund_flow": "Sector Flow",
     "north_hold": "North Hold",
+    "fund_holdings": "Fund Holdings",
     # 行业/大盘
     "sector_industry": "Industry",
     "index_daily": "Index Daily",
@@ -257,6 +258,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "block_trade": "大宗交易",
     "sector_fund_flow": "板块资金",
     "north_hold": "北向持仓",
+    "fund_holdings": "基金持股",
     # 行业/大盘
     "sector_industry": "行业分类",
     "index_daily": "大盘指数",
@@ -324,6 +326,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_fund_flow",
         "update_sector_fund_flow",
         "update_north_hold",
+        "update_fund_holdings",
         "update_margin_trading",
         "update_dragon_tiger",
         "update_block_trade",
@@ -703,6 +706,16 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
         empty_policy=EmptyPolicy.ALLOW,
         primary_source="akshare",
         display_label="北向持仓",
+    ),
+    TaskSpec(
+        name="update_fund_holdings",
+        callable=None,
+        tables=("fund_holdings",),
+        cadence=Cadence.QUARTERLY,
+        date_columns={"fund_holdings": "report_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="eastmoney",
+        display_label="基金持股",
     ),
     TaskSpec(
         name="update_south_flow",

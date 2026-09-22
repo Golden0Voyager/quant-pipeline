@@ -24,12 +24,27 @@ class LogsWidget(RichLog):
         kwargs.setdefault("max_lines", 1000)
         kwargs.setdefault("wrap", True)
         super().__init__(*args, **kwargs)
+        self._user_at_bottom = True
 
     def on_mount(self) -> None:
         self.border_title = "Live Logs"
         self.active_log: str | None = None
         self.file_handle: TextIO | None = None
         self.set_interval(1.0, self.tail_log)
+
+    def on_scroll_y(self) -> None:
+        """检测用户是否滚动到底部：在底部则恢复自动滚动，否则暂停。"""
+        was_at_bottom = self._user_at_bottom
+        self._user_at_bottom = self.is_vertical_scroll_end
+        # 用户从底部滚开时关闭 auto_scroll，避免后续写入强制滚回
+        if not self._user_at_bottom:
+            self.auto_scroll = False
+        elif was_at_bottom:
+            # 已经就在底部，无需重复设置
+            pass
+        else:
+            # 用户滚回底部，恢复自动滚动
+            self.auto_scroll = True
 
     def on_unmount(self) -> None:
         if self.file_handle:

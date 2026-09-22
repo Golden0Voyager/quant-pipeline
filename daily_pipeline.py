@@ -135,6 +135,7 @@ from tasks.financials import (
     update_quarterly_financials,
     update_shareholder_count,
 )
+from tasks.fund_holdings import update_fund_holdings
 from tasks.futures import update_futures
 from tasks.global_assets import update_global_assets
 from tasks.hk_tech_index import update_hk_tech_index
@@ -218,6 +219,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_sector_industry": update_sector_industry,
     "update_industry": update_industry,
     "update_north_hold": update_north_hold,
+    "update_fund_holdings": update_fund_holdings,
     "update_south_flow": update_south_flow,
     "update_ah_premium": update_ah_premium,
     "update_etf_daily": update_etf_daily,
@@ -642,6 +644,7 @@ def run_all(
             ("update_quarterly_financials", update_quarterly_financials, (db, loader), {}),
             ("update_industry", update_industry, (db,), {}),
             ("update_north_hold", update_north_hold, (db,), {}),
+            ("update_fund_holdings", update_fund_holdings, (db,), {}),
             ("update_index_membership", update_index_membership, (db,), {}),
             ("update_concept_member", update_concept_member, (db,), {}),
         ]
@@ -667,6 +670,7 @@ def run_all(
         results["quarterly_financials"] = stage4_results.get("update_quarterly_financials", {})
         results["industry"] = stage4_results.get("update_industry", {})
         results["north_hold"] = stage4_results.get("update_north_hold", {})
+        results["fund_holdings"] = stage4_results.get("update_fund_holdings", {})
         results["index_membership"] = stage4_results.get("update_index_membership", {})
         results["concept_member"] = stage4_results.get("update_concept_member", {})
 
