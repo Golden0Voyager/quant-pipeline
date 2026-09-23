@@ -17,6 +17,7 @@ import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
 from core.freshness import check_task_freshness
+from core.utils import to_float as _to_float
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -65,17 +66,6 @@ FUTURES_CONTRACTS: dict[str, tuple[str, str]] = {
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _to_float(val: Any) -> float | None:
-    """将值转换为 float，失败返回 None。"""
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
 
 
 def _retry(fn, *, tries: int = 3, base_delay: float = 1.0, label: str = ""):
