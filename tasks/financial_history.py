@@ -13,6 +13,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import date
+from functools import partial
 from typing import Any
 
 import pandas as pd
@@ -317,8 +318,9 @@ def update_financial_history(
     for period in periods:
         logger.info(f"  🔄 处理报告期 {period}...")
         try:
+            # partial 才能给出 Callable[[], ...]，带默认参数的 lambda 不行
             records = _retry(
-                lambda p=period: _merge_financial_period(p),
+                partial(_merge_financial_period, period),
                 label=f"financial_history:{period}",
             )
             if records is None:
@@ -329,8 +331,8 @@ def update_financial_history(
             if not records:
                 logger.warning(f"  ⚠️ {period} 无有效记录")
                 continue
-            result = db.save_financial_history_batch(records)
-            saved = result.get("history_saved", 0)
+            save_result = db.save_financial_history_batch(records)
+            saved = save_result.get("history_saved", 0)
             total_saved += saved
             logger.info(f"  ✅ {period}: 写入 {saved} 条历史记录")
             time.sleep(2)
