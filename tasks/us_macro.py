@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 from core.calendar import get_expected_latest_trading_day
 from interface import DatabaseInterface
@@ -118,11 +119,15 @@ def _fetch_us_macro(trade_date: str) -> list[dict]:
         if all(v is None for v in row.values()):
             continue
         dgs10, dgs3mo, t10yie = row["dgs10"], row["dgs3mo"], row["t10yie"]
-        row["spread_10y_3m"] = round(dgs10 - dgs3mo, 4) if dgs10 is not None and dgs3mo is not None else None
-        row["real_rate_10y"] = round(dgs10 - t10yie, 4) if dgs10 is not None and t10yie is not None else None
-        row["trade_date"] = date_str
-        row["data_source"] = "fred"
-        records.append(row)
+        # merged 的值类型是「数值序列」（dict[str, float | None]），而输出行
+        # 还要带 trade_date / data_source 两个字符串；此前直接往 row 里塞字符串，
+        # 与声明的值类型矛盾。改为在独立 record 上组装，merged 保持纯数值。
+        record: dict[str, Any] = dict(row)
+        record["spread_10y_3m"] = round(dgs10 - dgs3mo, 4) if dgs10 is not None and dgs3mo is not None else None
+        record["real_rate_10y"] = round(dgs10 - t10yie, 4) if dgs10 is not None and t10yie is not None else None
+        record["trade_date"] = date_str
+        record["data_source"] = "fred"
+        records.append(record)
     return records
 
 
