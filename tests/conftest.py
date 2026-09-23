@@ -79,6 +79,29 @@ def pinned_trading_calendar(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_pipeline_lock(monkeypatch):
+    """隔离**真实的 OS 管道锁**，消除跨进程环境依赖。
+
+    ``daily_pipeline.main()`` 的进程锁与全局锁探测直接作用于真实文件
+    ``/tmp/daily_pipeline.pid``（并非 mock）：``ProcessLock.acquire()`` 失败时
+    fail-closed ``sys.exit(1)``，``global_lock_held()`` 为真时单任务路径同样退出。
+    本机若同时有 launchd daemon、TUI 或另一个 agent 在跑 pipeline，main() 会
+    打印“管道已在运行，请勿重复启动”并让测试批**假失败**，与测试内容无关。
+
+    只替换 daily_pipeline 命名空间的入口，因此：
+    - 直接验证锁语义的 tests/test_lock.py（走 core.lock）不受影响；
+    - 显式覆盖该探测的用例（如
+      test_single_task_refused_when_global_lock_held）在测试体内 patch，优先生效；
+    - 断言 _acquire_lock 被调用的用例同理。
+    """
+    import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "_acquire_lock", lambda: None)
+    monkeypatch.setattr(daily_pipeline, "global_lock_held", lambda: False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _offline_gate_bypass(monkeypatch):
     """默认让全量管道离线闸门放行，避免 main() 测试发起真实网络探测。
 
