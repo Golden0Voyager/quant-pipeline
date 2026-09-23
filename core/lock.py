@@ -64,24 +64,23 @@ class ProcessLock:
         try:
             fcntl.flock(cls._lock_file_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            # flock 失败 ⇒ 锁确实在**某个活进程**手里（内核在进程退出时释放 flock），
+            # 所以这里绝不能 unlink 锁文件：删掉它只会让本进程在**新 inode** 上
+            # 加锁成功，于是两个 pipeline 同时自认持有全局锁、并发写同一个库，
+            # 同时令 global_lock_held() 对其它进程永远返回 False（单任务互斥失效）。
+            # PID 文件内容只有在“持有者刚 flock 成功、尚未写入”的窗口里
+            # 才可能不可信，因此一律 fail-closed 拒绝启动，不做自愈。
             cls._lock_file_fd.seek(0)
             old_pid = cls._lock_file_fd.read().strip()
-            alive = False
+            cls._lock_file_fd.close()
+            cls._lock_file_fd = None
+            holder = f"PID {old_pid}" if old_pid.isdigit() else "PID 尚未写入的进程"
+            print(f"❌ 管道已在运行 ({holder})，请勿重复启动")
             if old_pid.isdigit():
-                try:
-                    os.kill(int(old_pid), 0)
-                    alive = True
-                except OSError:
-                    pass
-            if alive:
-                print(f"❌ 管道已在运行 (PID: {old_pid})，请勿重复启动")
                 print(f"   如需强制重启，请先执行: kill {old_pid}")
-                sys.exit(1)
-            print(f"⚠️  检测到残留锁文件（PID {old_pid} 已不存在），自动清理后启动")
-            cls.release()
-            # 递归重新加锁成功后直接返回，不得落入 sys.exit
-            cls.acquire()
-            return
+            else:
+                print("   锁文件为空说明持有者正在启动中；请稍候重试")
+            sys.exit(1)
         cls._lock_file_fd.truncate(0)
         cls._lock_file_fd.seek(0)
         cls._lock_file_fd.write(str(os.getpid()))
@@ -97,15 +96,24 @@ class ProcessLock:
 
     @classmethod
     def release(cls) -> None:
-        """释放文件锁并清理 PID 文件。"""
+        """释放文件锁。
+
+        锁文件**不删除**，只清空 PID 内容：unlink 会让并发启动的进程在
+        新 inode 上加锁成功（旧 inode 的锁仍由本进程持有到 close 为止），
+        形成双持有；文件本身是稳定的锁锚点，留着才能保证互斥成立。
+        清空发生在解锁**之前**，避免解锁后另一个进程刚写入 PID 就被本
+        进程截断。读者（TUI / global_lock_held）按空内容、失活 PID 处理。
+        """
         if cls._lock_file_fd is not None:
             try:
+                cls._lock_file_fd.seek(0)
+                cls._lock_file_fd.truncate(0)
+                cls._lock_file_fd.flush()
                 fcntl.flock(cls._lock_file_fd, fcntl.LOCK_UN)
                 cls._lock_file_fd.close()
             except OSError:
                 pass
             cls._lock_file_fd = None
-        _PIDFILE.unlink(missing_ok=True)
 
 
 class TaskLock:
@@ -139,11 +147,16 @@ class TaskLock:
         if fd is None:
             return
         try:
+            # 与 ProcessLock 同理：不 unlink，解锁前清空 PID 即可。
+            # unlink 会让并发启动的同名任务在新 inode 上加锁成功 —— 那正是
+            # skip_if_task_locked 要防的重复运行。
+            fd.seek(0)
+            fd.truncate(0)
+            fd.flush()
             fcntl.flock(fd, fcntl.LOCK_UN)
             fd.close()
         except OSError:
             pass
-        _task_lock_path(name).unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
