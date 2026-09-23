@@ -1845,12 +1845,12 @@ class TestSouthFlowRefreshAdapter:
         assert rows == [("沪市港股通", 99.0), ("深市港股通", 88.0)]
 
 
-_INDEX_UNIVERSE = ("sh000001", "sz399001", "sz399006", "sh000688")
+_INDEX_UNIVERSE = ("sh000001", "sz399001", "sz399006", "sh000688", "sh000300")
 
 
 class TestIndexDailyRefreshAdapter:
     def test_accepts_latest_complete_partition(self, market_db_path, store):
-        """目标日缺指数 → 回退到最近包含静态全集四指数的完整分区。"""
+        """目标日缺指数 → 回退到最近包含静态全集五指数的完整分区。"""
         fetch = FakeFetcher([
             *(_index_record(code, "2026-07-24") for code in _INDEX_UNIVERSE),
             _index_record("sh000001", TARGET, close=3310.0),
@@ -1860,7 +1860,7 @@ class TestIndexDailyRefreshAdapter:
         result = adapter.refresh(_context())
 
         assert result.as_of_date == "2026-07-24"
-        assert result.replaced == 4
+        assert result.replaced == 5
         rows = _query(
             market_db_path,
             "SELECT index_code, trade_date FROM index_daily ORDER BY index_code",
@@ -1868,7 +1868,7 @@ class TestIndexDailyRefreshAdapter:
         assert rows == [(code, "2026-07-24") for code in sorted(_INDEX_UNIVERSE)]
 
     def test_missing_index_never_shrinks_existing_partition(self, market_db_path, store):
-        """完整性按静态指数全集判定：源只回 3/4 指数 → 上抛，既有 4 行分区不缩。"""
+        """完整性按静态指数全集判定：源只回 3/5 指数 → 上抛，既有 5 行分区不缩。"""
         for code in _INDEX_UNIVERSE:
             _execute(
                 market_db_path,
@@ -1887,7 +1887,7 @@ class TestIndexDailyRefreshAdapter:
         assert _query(
             market_db_path,
             "SELECT COUNT(*) FROM index_daily WHERE trade_date = '2026-07-24'",
-        ) == [(4,)]
+        ) == [(5,)]
 
     def test_no_complete_partition_within_lookback_raises(self, market_db_path, store):
         fetch = FakeFetcher([
@@ -1922,12 +1922,12 @@ class TestIndexDailyRefreshAdapter:
         assert _query(
             market_db_path,
             "SELECT COUNT(*) FROM index_daily WHERE trade_date = '2026-07-24'",
-        ) == [(6,)]
+        ) == [(7,)]
 
     def test_complete_partition_at_coverage_floor_replaces_old_rows(
         self, market_db_path, store
     ):
-        """达到 0.8 覆盖率下限（4/5）的完整分区仍正常整体替换。"""
+        """达到 0.8 覆盖率下限（5/6）的完整分区仍正常整体替换。"""
         for code in (*_INDEX_UNIVERSE, "sh000016"):
             _execute(
                 market_db_path,
@@ -1942,7 +1942,7 @@ class TestIndexDailyRefreshAdapter:
 
         result = adapter.refresh(_context())
 
-        assert result.replaced == 4
+        assert result.replaced == 5
         rows = _query(
             market_db_path,
             "SELECT index_code FROM index_daily WHERE trade_date = '2026-07-24'"
