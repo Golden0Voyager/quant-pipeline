@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -518,3 +518,84 @@ def test_latest_date_getters_log_warning_on_db_error(caplog):
     ):
         assert name in caplog.text, f"缺少 {name} 的告警"
     provider.close()
+
+
+# ===========================================================================
+# 资金流向同花顺降级兜底（东财 push2 全挂时的 fallback）
+# ===========================================================================
+
+
+def _ths_flow_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"股票代码": 688512, "股票简称": "慧智微", "净额": "1838.66万"},
+            {"股票代码": 300308, "股票简称": "中际旭创", "净额": "-4.85亿"},
+        ]
+    )
+
+
+def test_get_market_fund_flow_falls_back_to_ths_when_loader_empty():
+    from providers import SmartMoneyLoaderProvider
+
+    provider = SmartMoneyLoaderProvider()
+    provider._loader = MagicMock()
+    provider._loader.get_market_fund_flow.return_value = pd.DataFrame()
+
+    with patch("akshare.stock_fund_flow_individual", return_value=_ths_flow_df()):
+        result = provider.get_market_fund_flow()
+
+    assert list(result["code"]) == ["688512", "300308"]
+    assert result["main_net_inflow"].iloc[0] == pytest.approx(1838.66e4)
+    assert result["main_net_inflow"].iloc[1] == pytest.approx(-4.85e8)
+
+
+def test_get_market_fund_flow_prefers_loader_when_nonempty():
+    from providers import SmartMoneyLoaderProvider
+
+    primary = pd.DataFrame([{"code": "600000", "main_net_inflow": 1.0}])
+    provider = SmartMoneyLoaderProvider()
+    provider._loader = MagicMock()
+    provider._loader.get_market_fund_flow.return_value = primary
+
+    with patch("akshare.stock_fund_flow_individual") as mock_ths:
+        result = provider.get_market_fund_flow()
+
+    assert result is primary
+    mock_ths.assert_not_called()
+
+
+def test_get_market_fund_flow_returns_empty_when_fallback_also_fails():
+    from providers import SmartMoneyLoaderProvider
+
+    provider = SmartMoneyLoaderProvider()
+    provider._loader = MagicMock()
+    provider._loader.get_market_fund_flow.return_value = pd.DataFrame()
+
+    with patch("akshare.stock_fund_flow_individual", side_effect=RuntimeError("ths down")):
+        result = provider.get_market_fund_flow()
+
+    assert result.empty
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("4.85亿", 4.85e8),
+        ("1838.66万", 1838.66e4),
+        ("1234", 1234.0),
+        ("-2.5亿", -2.5e8),
+        ("1,234.5万", 1234.5e4),
+        ("-", None),
+        ("--", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_cn_amount(raw: object, expected: float | None) -> None:
+    from providers import _parse_cn_amount
+
+    result = _parse_cn_amount(raw)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected)
