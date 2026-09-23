@@ -1695,15 +1695,34 @@ def test_update_concept_member_save_raises():
     assert result["member_saved"] == 0
 
 
-def test_fetch_concept_members_ak_none_direct():
-    """验证概念列表获取失败时优雅返回空列表。"""
+def test_fetch_concept_members_list_fetch_fails():
+    """验证概念列表获取失败时上抛异常（源故障不能被静默吞掉）。"""
     with patch.object(concept_board, "get_default_client") as mock_client:
         mock_client.return_value.call.return_value = SourceResponse(
             success=False, data=None,
             metadata=FetchMetadata(source_name="eastmoney", error="network error"),
         )
-        members = concept_board._fetch_concept_members_em()
-    assert len(members) == 0
+        with pytest.raises(RuntimeError, match="network error"):
+            concept_board._fetch_concept_members_em()
+
+
+def test_update_concept_member_source_failure_returns_retained():
+    """源故障时 update_concept_member 必须返回 retained（保留旧数据），而非 no_data。"""
+    db = MagicMock()
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.return_value = SourceResponse(
+            success=False, data=None,
+            metadata=FetchMetadata(source_name="eastmoney", error="network error"),
+        )
+        result = concept_board.update_concept_member(db)
+
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
+    assert result["saved"] == 0
+    assert not db.save_concept_member_batch.called
+    assert not db.save_concept_member_history_batch.called
 
 
 def test_fetch_em_spot_empty_code_skipped():
@@ -1778,11 +1797,11 @@ def test_fetch_concept_members_empty_member_list():
 
 
 def test_fetch_concept_members_push2_fails():
-    """验证 push2 概念列表请求异常时优雅降级。"""
+    """验证 push2 概念列表请求异常时上抛（源故障不能被静默吞掉）。"""
     with patch.object(concept_board, "get_default_client") as mock_client:
         mock_client.return_value.call.side_effect = Exception("push2 error")
-        members = concept_board._fetch_concept_members_em()
-    assert len(members) == 0
+        with pytest.raises(Exception, match="push2 error"):
+            concept_board._fetch_concept_members_em()
 
 
 def test_fetch_concept_members_empty_code_skip():
