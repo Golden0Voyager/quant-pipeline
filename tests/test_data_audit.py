@@ -169,6 +169,7 @@ class TestCheckTable:
         db_path = tmp_path / "ok.db"
         spec = _spec("ok_tbl")
         expected_date = _expected_date_for(spec)
+        assert expected_date is not None  # 有日期列的表必然算出日期；否则本用例无意义
         _build_db(str(db_path), stale_tables={"ok_tbl": expected_date})
         conn = sqlite3.connect(str(db_path))
         h = _check_table("ok_tbl", conn, spec, set())
