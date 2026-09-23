@@ -234,17 +234,20 @@ def _fetch_concept_members_em() -> list[dict]:
     通过 ``SourceClient`` + curl_cffi 浏览器掩护直调 push2 / push2delay
     双域名，规避 akshare 内部硬编码 ``29.push2.eastmoney.com`` 编号子域名
     被东方财富 WAF 封锁（RemoteDisconnected）的问题。
+
+    概念板块列表获取失败时**上抛异常**（而非返回空列表），把源故障的
+    失败语义交给调用方（``update_concept_member`` 返回 retained 保留旧
+    数据，见 PR #103 规范），避免把网络故障误报为 ``no_data`` 而静默
+    丢失整月数据。
+    只有列表成功返回但确实无板块时才返回空列表。
     """
     client = get_default_client()
-    try:
-        resp = client.call("eastmoney", _fetch_concept_list_em)
-        if not resp.success:
-            logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {resp.metadata.error}")
-            return []
-        items = resp.data
-    except Exception as e:
-        logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {e}")
-        items = []
+    resp = client.call("eastmoney", _fetch_concept_list_em)
+    if not resp.success:
+        error = resp.metadata.error or "network error"
+        logger.warning(f"⚠️ 东方财富概念板块列表获取失败: {error}")
+        raise RuntimeError(error)
+    items = resp.data
 
     members: list[dict] = []
     for item in items:
@@ -361,23 +364,7 @@ def update_concept_member(
 
     try:
         members = _fetch_concept_members_em()
-        if members:
-            # legacy snapshot table
-            saved_member = db.save_concept_member_batch(members)
-            # PIT history table
-            pit_saved = db.save_concept_member_history_batch(members, run_id, valid_from)
-            unique_codes = {m["concept_code"] for m in members}
-            logger.info(
-                f"✅ 概念板块成分股: 快照 {saved_member} 条 / "
-                f"PIT {pit_saved} 条 / {len(unique_codes)} 个板块"
-            )
-        else:
-            saved_member = 0
-            pit_saved = 0
-            logger.warning("⚠️ 概念板块成分股无数据")
     except Exception as e:
-        saved_member = 0
-        pit_saved = 0
         logger.warning(f"⚠️ 概念板块成分股获取失败: {e}")
         return {
             "status": "retained",
@@ -385,6 +372,37 @@ def update_concept_member(
             "reason": f"eastmoney concept members unavailable: {e}",
             "error": str(e),
             "retained_old_data": True,
+            "member_saved": 0,
+            "pit_saved": 0,
+            "saved": 0,
+        }
+
+    if not members:
+        # 仅当源成功响应但确无数据时才视为 no_data（不告警）
+        logger.warning("⚠️ 概念板块成分股无数据")
+        return {
+            "status": "no_data",
+            "member_saved": 0,
+            "pit_saved": 0,
+            "saved": 0,
+        }
+
+    try:
+        # legacy snapshot table
+        saved_member = db.save_concept_member_batch(members)
+        # PIT history table
+        pit_saved = db.save_concept_member_history_batch(members, run_id, valid_from)
+        unique_codes = {m["concept_code"] for m in members}
+        logger.info(
+            f"✅ 概念板块成分股: 快照 {saved_member} 条 / "
+            f"PIT {pit_saved} 条 / {len(unique_codes)} 个板块"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ 概念板块成分股保存失败: {e}")
+        return {
+            "status": "failed",
+            "error_kind": "internal",
+            "error": str(e),
             "member_saved": 0,
             "pit_saved": 0,
             "saved": 0,
