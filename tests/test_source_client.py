@@ -148,7 +148,7 @@ class TestRetry:
             resp = MagicMock()
             resp.status_code = 404
             resp.raise_for_status.side_effect = RuntimeError("HTTP 404")
-            return resp  # type: ignore[return-value]
+            return resp
 
         resp = client.call("t", _not_found)
         assert resp.success is False
@@ -167,7 +167,7 @@ class TestRetry:
                 resp = MagicMock()
                 resp.status_code = 429
                 resp.raise_for_status.side_effect = RuntimeError("HTTP 429")
-                return resp  # type: ignore[return-value]
+                return resp
             return "ok"
 
         resp = client.call("t", _rate_limited)

@@ -73,13 +73,13 @@ class TestShanghaiClock:
 class TestExpectedLatestTradingDayShanghai:
     """expected 翻转与放行窗口统一在上海 16:00。"""
 
-    def test_before_close_settled_is_previous_day(self):
+    def test_before_close_settled_is_previous_day(self, pinned_trading_calendar):
         assert get_expected_latest_trading_day(_sh(15, 30)) == "2026-07-30"
 
-    def test_after_close_settled_is_today(self):
+    def test_after_close_settled_is_today(self, pinned_trading_calendar):
         assert get_expected_latest_trading_day(_sh(16, 0)) == "2026-07-31"
 
-    def test_machine_tz_does_not_shift_result(self):
+    def test_machine_tz_does_not_shift_result(self, pinned_trading_calendar):
         # 本机 +0700 的 15:30 = 上海 16:30 → 期望应为今天
         local = datetime(2026, 7, 31, 15, 30, tzinfo=ZoneInfo("Asia/Bangkok"))
         assert get_expected_latest_trading_day(local.astimezone(SHANGHAI)) == "2026-07-31"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +20,7 @@ from core.refresh import (
 from core.refresh_audit import (
     CROSS_SOURCE_BOARDS,
     CrossSourceTolerance,
+    RefreshAudit,
     RefreshAuditError,
     stratified_cross_source_sample,
 )
@@ -470,8 +471,12 @@ def test_adapter_failure_is_retried_once_then_success_is_audited() -> None:
     assert record["metadata"]["attempts"] == 2
 
 
-class FailingAudit:
-    """Audit fake：适配器发布后必抛，模拟发布后审计失败。"""
+class FailingAudit(RefreshAudit):
+    """Audit fake：适配器发布后必抛，模拟发布后审计失败。
+
+    继承 RefreshAudit 而不是靠 duck typing：orchestrator 的形参是具体类而非
+    Protocol，不继承就无法通过类型检查。
+    """
 
     def validate_task(self, spec, context, adapter_result):
         raise RefreshAuditError("bars coverage 0.500 is below minimum 0.800")
@@ -606,7 +611,7 @@ class FakeVerifier:
 
     def primary_quotes(
         self,
-        symbols: tuple[str, ...],
+        symbols: Sequence[str],
         target_date: str,
     ) -> Mapping[str, Mapping[str, float]]:
         self.primary_calls.append(tuple(symbols))
@@ -618,7 +623,7 @@ class FakeVerifier:
 
     def reference_quotes(
         self,
-        symbols: tuple[str, ...],
+        symbols: Sequence[str],
         target_date: str,
     ) -> Mapping[str, Mapping[str, float]]:
         if self.reference_error is not None:

@@ -19,7 +19,7 @@ from interface import DatabaseInterface, DataLoaderInterface
 try:
     import akshare as ak
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 import pandas as pd
 

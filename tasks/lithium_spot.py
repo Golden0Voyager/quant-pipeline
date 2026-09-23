@@ -57,7 +57,7 @@ def _fetch_lithium_spot(latest_date: str | None) -> list[dict]:
         return []
     if df is None or df.empty:
         return []
-    records = []
+    records: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         date_str = str(row.get("date", ""))[:10]
         if not date_str:

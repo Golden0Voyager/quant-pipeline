@@ -144,7 +144,7 @@ class TestSharedSessionNotClosed:
         db = MagicMock()
         db_path = tmp_path / "test.db"
         db.db_path = str(db_path)
-        stocks = [
+        stocks: list[tuple[str, str, str | None]] = [
             (f"{i:06d}", "sz", None) for i in range(1, n_stocks + 1)
         ]
         _create_db(str(db_path), stocks)

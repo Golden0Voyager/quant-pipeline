@@ -185,7 +185,7 @@ from tasks.valuation_chain import (
 try:
     import akshare as ak
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: F401
 

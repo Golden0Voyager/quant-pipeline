@@ -553,9 +553,11 @@ class ProviderFactory:
       - akdirect: 直接调用 akshare（不经过 smartmoney_hunter 封装）
     """
 
-    _db_provider: DatabaseInterface = None
-    _loader_provider: DataLoaderInterface = None
-    _indicator_provider: IndicatorEngineInterface = None
+    # 未 configure 前为 None；标注成 Optional 才是事实（非 Optional 的
+    # 标注会让 mypy 无法校验真实实现是否满足 Protocol）。
+    _db_provider: DatabaseInterface | None = None
+    _loader_provider: DataLoaderInterface | None = None
+    _indicator_provider: IndicatorEngineInterface | None = None
 
     @classmethod
     def configure(

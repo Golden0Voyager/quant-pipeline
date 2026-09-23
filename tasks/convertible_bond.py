@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 
-def _to_float(value: object) -> float | None:
+def _to_float(value: Any) -> float | None:
     """安全转换数值字段，非数字 / None / 空字符串 返回 None。"""
     if value is None:
         return None

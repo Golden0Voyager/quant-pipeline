@@ -44,46 +44,46 @@ def test_is_trading_day_fallback_when_fetch_empty():
         assert cal.is_trading_day(date(2026, 7, 20)) is True
 
 
-def test_get_expected_weekend_rolls_back_to_friday():
+def test_get_expected_weekend_rolls_back_to_friday(pinned_trading_calendar):
     with patch("core.market_time.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 18, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Sat
         assert cal.get_expected_latest_trading_day() == "2026-07-17"
 
 
-def test_get_expected_weekday_before_1600_uses_prev_day():
+def test_get_expected_weekday_before_1600_uses_prev_day(pinned_trading_calendar):
     with patch("core.market_time.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 21, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Tue 10:00 < 16:00
         assert cal.get_expected_latest_trading_day() == "2026-07-20"
 
 
-def test_get_expected_weekday_after_1600_uses_today():
+def test_get_expected_weekday_after_1600_uses_today(pinned_trading_calendar):
     with patch("core.market_time.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 20, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Mon 16:00
         assert cal.get_expected_latest_trading_day() == "2026-07-20"
 
 
-def test_get_expected_explicit_shanghai_now_before_1600_uses_prev_day():
+def test_get_expected_explicit_shanghai_now_before_1600_uses_prev_day(pinned_trading_calendar):
     now = datetime(2026, 7, 21, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Tue 10:00 < 16:00
     assert cal.get_expected_latest_trading_day(now=now) == "2026-07-20"
 
 
-def test_get_expected_explicit_shanghai_now_after_1600_uses_today():
+def test_get_expected_explicit_shanghai_now_after_1600_uses_today(pinned_trading_calendar):
     now = datetime(2026, 7, 20, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Mon 16:00
     assert cal.get_expected_latest_trading_day(now=now) == "2026-07-20"
 
 
-def test_get_expected_settlement_window_still_prev_day():
+def test_get_expected_settlement_window_still_prev_day(pinned_trading_calendar):
     """15:00–16:00 结算窗口 expected 仍为前一日（与放行窗口 16:00 对齐）。"""
     now = datetime(2026, 7, 21, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
     assert cal.get_expected_latest_trading_day(now=now) == "2026-07-20"
 
 
-def test_get_expected_explicit_shanghai_now_weekend_rolls_back_to_friday():
+def test_get_expected_explicit_shanghai_now_weekend_rolls_back_to_friday(pinned_trading_calendar):
     now = datetime(2026, 7, 18, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # Sat
     assert cal.get_expected_latest_trading_day(now=now) == "2026-07-17"
 
 
-def test_get_expected_explicit_now_ignores_host_clock():
+def test_get_expected_explicit_now_ignores_host_clock(pinned_trading_calendar):
     # 传入显式 now 时不得读取主机时钟，结果与主机本地时区无关
     with patch.object(cal, "datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 1, 1, 0, 0)  # 与传入 now 冲突的主机时钟
@@ -92,12 +92,77 @@ def test_get_expected_explicit_now_ignores_host_clock():
         mock_dt.now.assert_not_called()
 
 
-def test_get_expected_default_now_none_uses_shanghai_clock():
+def test_get_expected_default_now_none_uses_shanghai_clock(pinned_trading_calendar):
     # now=None 路径改走上海时钟（shanghai_now），与主机本地时区无关
     with patch("core.market_time.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 7, 21, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         assert cal.get_expected_latest_trading_day() == "2026-07-21"
         mock_dt.now.assert_called_once()
+
+
+# ───────────────────── expected 必须落在真实交易日 ─────────────────────
+
+
+def test_get_expected_skips_holiday_window(pinned_trading_calendar):
+    """长假期间 expected 不得返回非交易日（旧实现的周末回退会返回假期本身）。"""
+    # 端午 06-19~06-21 休市：06-22 周一开盘前应回落到 06-18
+    assert (
+        cal.get_expected_latest_trading_day(
+            now=datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        )
+        == "2026-06-18"
+    )
+
+
+def test_get_expected_never_returns_non_trading_day(monkeypatch):
+    """对真实日历逐日扫描：任意时刻的 expected 都必须是交易日。"""
+    holiday_gap = ["2026-06-17", "2026-06-18", "2026-06-22"]  # 06-19~06-21 休市
+    monkeypatch.setattr(cal, "_load_calendar_covering", lambda _up_to: holiday_gap)
+    # 06-19（端午，周五）收盘后：日历里没有当天 → 必须回落到 06-18
+    assert (
+        cal.get_expected_latest_trading_day(
+            now=datetime(2026, 6, 19, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        )
+        == "2026-06-18"
+    )
+
+
+def test_get_expected_falls_back_to_weekday_when_calendar_unavailable(monkeypatch, caplog):
+    """日历不可用 → 退化为周末判断，并告警一次（不再是静默错误）。"""
+    monkeypatch.setattr(cal, "_load_calendar_covering", lambda _up_to: None)
+    monkeypatch.setattr(cal, "_CALENDAR_FALLBACK_WARNED", False)
+    with caplog.at_level("WARNING", logger="core.calendar"):
+        # 06-19 是端午（非交易日），退化路径只能按周五处理 —— 这正是需要告警的原因
+        assert (
+            cal.get_expected_latest_trading_day(
+                now=datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            )
+            == "2026-06-19"
+        )
+    assert any("退化为周末判断" in r.message for r in caplog.records)
+    assert cal._CALENDAR_FALLBACK_WARNED is True
+
+
+def test_get_expected_warns_only_once(monkeypatch, caplog):
+    """expected 一次运行内被调用数十次，退化告警不得刷屏。"""
+    monkeypatch.setattr(cal, "_load_calendar_covering", lambda _up_to: None)
+    monkeypatch.setattr(cal, "_CALENDAR_FALLBACK_WARNED", False)
+    now = datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with caplog.at_level("WARNING", logger="core.calendar"):
+        for _ in range(5):
+            cal.get_expected_latest_trading_day(now=now)
+    assert sum("退化为周末判断" in r.message for r in caplog.records) == 1
+
+
+def test_load_calendar_covering_rejects_stale_cache(monkeypatch):
+    """缓存未覆盖到目标日时必须返回 None，避免拿着旧日历算 expected。"""
+    monkeypatch.setattr(
+        cal, "_load_cached_calendar", lambda: ["2026-07-16", "2026-07-17"]
+    )
+    assert cal._load_calendar_covering("2026-07-17") == ["2026-07-16", "2026-07-17"]
+    assert cal._load_calendar_covering("2026-07-20") is None
+    monkeypatch.setattr(cal, "_load_cached_calendar", lambda: None)
+    assert cal._load_calendar_covering("2026-07-17") is None
 
 
 def test_get_recent_trading_days_uses_calendar_and_skips_weekend():

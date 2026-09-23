@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -20,7 +21,7 @@ from core.data_contract import (
 
 
 def _contract(**overrides) -> DataContract:
-    defaults = {
+    defaults: dict[str, Any] = {
         "name": "test",
         "fields": (FieldRule(name="date", required=True),),
         "unique_by": ("date",),

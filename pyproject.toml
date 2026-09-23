@@ -48,6 +48,61 @@ ignore = ["E501"]
 "reconcile_with_akshare.py" = ["E402"]
 "__init__.py" = ["N999"]
 
+[tool.mypy]
+# 全仓 mypy 门禁（CI 里直接跑 `uv run mypy`，范围由 files 决定）。
+#
+# explicit_package_bases + mypy_path：providers.py 顶层 import smartmoney_hunter
+# （只装在 quant_hunter venv），项目根必须参与模块名解析，否则 mypy 会以
+# "source file found twice under different module names" 直接退出、一行都不检查。
+#
+# files 覆盖生产代码与 tests/：全仓门禁，任何一处类型错误都会让 CI 变红。
+# （tests/ 曾有 34 个错误，集中在夹具的 **dict[str, object] 解包、Mock 属性访问、
+#   以及测试替身与 Protocol/具体类的签名不兼容，已逐项修完。）
+explicit_package_bases = true
+mypy_path = "."
+warn_unused_ignores = true
+files = [
+    "core",
+    "tasks",
+    "tui",
+    "scripts",
+    "tests",
+    "daily_pipeline.py",
+    "interface.py",
+    "providers.py",
+]
+
+# 以下依赖没有 stub / py.typed，对其 import 做检查没有意义。逐个模块豁免，
+# 而不是全局 ignore_missing_imports = true，以免把自有代码的 import 错误一并吞掉。
+# 裸名与 ``.*`` 需分开写：mypy 的 ``pkg.*`` 不匹配 ``pkg`` 自身。
+[[tool.mypy.overrides]]
+module = [
+    "akshare",
+    "akshare.*",
+    "pandas",
+    "pandas.*",
+    "pyarrow",
+    "pyarrow.*",
+    "yfinance",
+    "yfinance.*",
+    "curl_cffi",
+    "curl_cffi.*",
+    "smartmoney_hunter",
+    "smartmoney_hunter.*",
+    "tradingagents",
+    "tradingagents.*",
+    # 平台条件依赖：CI 是 Ubuntu，本地开发机是 macOS，同一条 import 的
+    # 解析结果不同，会让门禁结果随操作系统翻转。
+    # py-mini-racer 是 akshare 的 Linux 专属传递依赖，uv.lock 锁在 0.6.0
+    # （无 py.typed），因此只在 CI 上触发 import-untyped；macOS 侧该 marker
+    # 为假，本地装的是 mini-racer（带 py.typed）而不是它。
+    # 已用「把无 py.typed 的包放进临时 venv 的 site-packages + --python-executable」
+    # 在本地复现过该报错，确认需豁免。
+    "py_mini_racer",
+    "py_mini_racer.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [

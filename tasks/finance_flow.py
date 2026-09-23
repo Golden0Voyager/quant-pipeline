@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from typing import Any
 
 import pandas as pd
 
@@ -496,7 +498,11 @@ def update_finance_flow(db: DatabaseInterface) -> dict:
     def _fetch_ah_with_fallback() -> list[dict]:
         return _fetch_ah_premium() or _fetch_ah_premium_fallback(getattr(db, "db_path", None))
 
-    sub_tasks = [
+    # 显式标注：三元组里 fetch/save 是不同函数，不标注 mypy 会把联合类型
+    # 退化成「unknown」，直接调用报错（参数按元组解包后无法还原签名）
+    sub_tasks: list[
+        tuple[str, Callable[..., Any], Callable[..., Any], tuple[str, str] | None]
+    ] = [
         ("south_flow", _fetch_south_flow, db.save_south_flow_batch, None),
         ("ah_premium", _fetch_ah_with_fallback, db.save_ah_premium_batch, None),
         ("etf_daily", _fetch_etf_daily, db.save_etf_daily_batch, (etf_start, etf_end)),

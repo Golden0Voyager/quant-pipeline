@@ -77,6 +77,10 @@ def _make_real_database_manager(tmp_path):
 
     def _exec_submodule(name: str, path: Path):
         sub_spec = importlib.util.spec_from_file_location(name, path)
+        # 显式断言而非静默 None：签名上 spec_from_file_location 可返回 None，
+        # 直接往下走只会得到难以定位的 AttributeError
+        assert sub_spec is not None, f"无法为 {name} 创建 ModuleSpec"
+        assert sub_spec.loader is not None, f"{name} 的 ModuleSpec 缺少 loader"
         sub = importlib.util.module_from_spec(sub_spec)
         sys.modules[name] = sub
         sub_spec.loader.exec_module(sub)

@@ -5,8 +5,10 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -25,10 +27,12 @@ from core.task_result import ErrorKind, TaskResult, normalize_task_result
 # ===========================================================================
 @pytest.fixture(autouse=True)
 def mock_pipeline_lock():
-    """Bypass flock logic so tests don't fail when the daemon is running."""
-    with patch("daily_pipeline._acquire_lock"), \
-         patch("daily_pipeline._release_lock"), \
-         patch("core.lock.TaskLock.acquire", return_value=True), \
+    """隔离单任务路径的 TaskLock（按任务名的真实 flock 文件）。
+
+    ``_acquire_lock`` / ``global_lock_held`` 的隔离统一在 tests/conftest.py
+    的 ``_isolate_pipeline_lock`` 里完成（全仓生效），此处不重复。
+    """
+    with patch("core.lock.TaskLock.acquire", return_value=True), \
          patch("core.lock.TaskLock.release"):
         yield
 
@@ -75,7 +79,7 @@ def health_db(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-def weekday_mock() -> None:
+def weekday_mock() -> Iterator[None]:
     with patch("daily_pipeline.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 15, 30)
         m.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -3130,14 +3134,14 @@ class TestGlobalMacroDbSaveException:
 class TestShouldUpdate:
     @staticmethod
     def _at(day: int, hour: int, minute: int = 0):
-        return patch(
-            "core.market_time.datetime",
-            **{
-                "now.return_value": datetime(
-                    2026, 6, day, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai")
-                )
-            },
-        )
+        # patch 的属性名带点号，只能走 dict 展开；标注成 Any 是因为
+        # dict[str, datetime] 会让 mypy 按值类型去匹配 patch 的重载而失败
+        mock_now: dict[str, Any] = {
+            "now.return_value": datetime(
+                2026, 6, day, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai")
+            )
+        }
+        return patch("core.market_time.datetime", **mock_now)
 
     def test_weekend(self):
         with self._at(27, 10), patch("daily_pipeline.logger"), \
@@ -3984,7 +3988,7 @@ def test_health_check_db_error():
 # ===========================================================================
 # get_expected_latest_trading_day
 # ===========================================================================
-def test_get_expected_latest_trading_day_weekday():
+def test_get_expected_latest_trading_day_weekday(pinned_trading_calendar):
     from core.calendar import get_expected_latest_trading_day
 
     with patch("core.market_time.datetime") as m:
@@ -3993,13 +3997,14 @@ def test_get_expected_latest_trading_day_weekday():
         assert result == "2026-06-22"  # same day after hours
 
 
-def test_get_expected_latest_trading_day_monday_before_market():
+def test_get_expected_latest_trading_day_monday_before_market(pinned_trading_calendar):
     from core.calendar import get_expected_latest_trading_day
 
     with patch("core.market_time.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         result = get_expected_latest_trading_day()
-        assert result == "2026-06-19"  # previous Friday
+        # 06-19 端午休市，上一交易日是 06-18；周末回退会错给出 06-19
+        assert result == "2026-06-18"
 
 
 # ===========================================================================

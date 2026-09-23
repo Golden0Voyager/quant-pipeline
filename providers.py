@@ -62,8 +62,11 @@ class SmartMoneyDBProvider:
     def _run_versioned_migrations(self) -> None:
         """Run the versioned migration system in-place.
 
-        Replaces the old ``_ensure_tables`` / ``_migrate_phase2_tables``
-        ad-hoc DDL with tracked, versioned migrations from ``migrations/``.
+        ``migrations/`` holds only **incremental** changes: added columns,
+        indexes, and the handful of tables it owns. It does not replace
+        ``_ensure_tables``, whose baseline tables exist nowhere else -- 26 of
+        its 28 tables are created by no migration at all, so removing that
+        method would leave a fresh install missing them.
 
         Any migration failure is treated as a hard failure and propagated,
         so operators cannot mistake a silently-fallback database for a
@@ -127,13 +130,25 @@ class SmartMoneyDBProvider:
             pass
 
     def _ensure_tables(self) -> None:
-        """兜底 DDL：确保管道依赖的表存在。
+        """基线 DDL：管道自有表的唯一来源，而不是「兜底」。
 
-        即使外部 _init_database 因并发/中断未能执行全部 DDL，
-        这里保证 stock_list / fundamentals / chip_distribution 及其变体存在。
+        这里的 28 张表中有 26 张不被 ``migrations/`` 创建，所以本方法承担的是
+        基线职责；``migrations/`` 只在其之上做增量变更（加列/加索引，以及
+        migration 011 为 stock_pledge 补的 source_record_key 唯一索引）。
+        两边都定义的表（cb_quotation / cb_redeem）以先运行的本方法为准，
+        随后由 migration 002 DROP + CREATE 重建成它自己的形态。
+
+        失败即硬失败：旧的「只打 WARNING」会让 provider 在缺表状态下继续
+        运行，把建表失败伪装成空数据；而 ``_run_versioned_migrations`` 早已
+        是硬失败口径，且它就紧随其后执行，所以改为硬失败不会新增失败场景。
+        仅当库目录不存在时静默返回（与 ``_ensure_wal_mode`` 一致）——
+        此时没有可建的库，构造 provider 也不应因此报错。
         """
+        db_path = str(self._db.db_path)
+        if not Path(db_path).parent.exists():
+            return
         try:
-            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
+            with sqlite3.connect(db_path, timeout=5.0) as conn:
                 # chip_distribution_em（原有）
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS chip_distribution_em (
@@ -554,85 +569,12 @@ class SmartMoneyDBProvider:
                     CREATE INDEX IF NOT EXISTS idx_placement_code_date
                     ON placement_announcements(ts_code, issue_date DESC)
                 """)
-        except Exception as e:
-            logger.warning(f"⚠️ _ensure_tables 创建表失败: {e}")
-
-    def _old_migrate_phase2_tables(self) -> None:
-        """独立执行 Phase 2 兼容迁移，避免被其他兜底 DDL 的异常阻断。"""
-        try:
-            with sqlite3.connect(str(self._db.db_path), timeout=5.0) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS stock_repurchase (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT NOT NULL,
-                        stock_code TEXT NOT NULL,
-                        stock_name TEXT,
-                        repurchase_amount REAL,
-                        repurchase_price REAL,
-                        repurchase_price_lower REAL,
-                        repurchase_price_upper REAL,
-                        repurchase_quantity INTEGER,
-                        progress_status TEXT,
-                        source_record_key TEXT NOT NULL UNIQUE
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS institution_survey (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT NOT NULL,
-                        stock_code TEXT NOT NULL,
-                        stock_name TEXT,
-                        survey_org TEXT,
-                        survey_type TEXT,
-                        survey_count INTEGER,
-                        source_record_key TEXT NOT NULL UNIQUE
-                    )
-                """)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS stock_pledge (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_date TEXT NOT NULL,
-                        stock_code TEXT NOT NULL,
-                        stock_name TEXT,
-                        pledger TEXT,
-                        pledge_amount REAL,
-                        pledge_ratio REAL,
-                        pledge_org TEXT,
-                        source_record_key TEXT NOT NULL
-                    )
-                """)
-                conn.commit()
-                existing_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")
-                }
-                for column in ("repurchase_price_lower", "repurchase_price_upper"):
-                    if column not in existing_columns:
-                        conn.execute(f"ALTER TABLE stock_repurchase ADD COLUMN {column} REAL")
-                conn.commit()
-
-                conn.execute("""
-                    DELETE FROM stock_repurchase
-                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
-                       OR stock_code IS NULL OR TRIM(stock_code) = ''
-                """)
-                conn.commit()
-                conn.execute("""
-                    DELETE FROM institution_survey
-                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
-                       OR stock_code IS NULL OR TRIM(stock_code) = ''
-                """)
-                conn.commit()
-                conn.execute("""
-                    DELETE FROM stock_pledge
-                    WHERE trade_date IS NULL OR TRIM(trade_date) = ''
-                       OR stock_code IS NULL OR TRIM(stock_code) = ''
-                """)
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"⚠️ Phase 2 表迁移失败: {e}")
-        # 版本化迁移放在兜底 DDL 的吞异常范围之外：
-        # MigrationError 必须硬失败上抛，不能被当作 Phase 2 兼容问题吞掉
-        self._run_versioned_migrations()
+        except sqlite3.Error as e:
+            # 只捕获 sqlite 层错误；编程错误（属性名写错等）应原样抛出
+            raise RuntimeError(
+                f"基线建表失败（库: {db_path}）: {e}；"
+                "provider 不应在缺表状态下继续运行"
+            ) from e
 
     @property
     def db_path(self) -> str:
@@ -884,7 +826,7 @@ class SmartMoneyDBProvider:
     def save_margin_trading_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_margin_trading_batch(records)
 
-    def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
+    def get_margin_trading(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_margin_trading(symbol, date)
 
     def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> int:
@@ -942,7 +884,7 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 龙虎榜批量保存失败: {e}")
             return 0
 
-    def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
+    def get_dragon_tiger(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
 
     def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
@@ -1112,7 +1054,7 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 大宗交易批量保存失败: {e}")
             return 0
 
-    def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
+    def get_block_trade(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
 
     def save_placement_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1161,7 +1103,7 @@ class SmartMoneyDBProvider:
     def save_sector_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_sector_fund_flow_batch(records)
 
-    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
+    def get_sector_fund_flow(self, sector_name: str, date: str | None = None) -> dict | None:
         return self._db.get_sector_fund_flow(sector_name, date)
 
     def save_historical_valuation(self, symbol: str, trade_date: str, data: dict[str, Any]) -> None:
@@ -1200,10 +1142,10 @@ class SmartMoneyDBProvider:
     def save_sector_industry(self, data: dict[str, Any]) -> None:
         self._db.save_sector_industry(data)
 
-    def get_sector_industry(self, industry_name: str, trade_date: str = None) -> dict | None:
+    def get_sector_industry(self, industry_name: str, trade_date: str | None = None) -> dict | None:
         return self._db.get_sector_industry(industry_name, trade_date)
 
-    def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
+    def get_fundamentals_batch(self, trade_date: str | None = None) -> pd.DataFrame:
         return self._db.get_fundamentals_batch(trade_date)
 
     def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1485,7 +1427,7 @@ class SmartMoneyDBProvider:
     def save_global_assets_bars_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_global_assets_bars_batch(records)
 
-    def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
+    def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
 
     def save_chip_distribution(self, symbol: str, data: dict[str, Any]) -> None:

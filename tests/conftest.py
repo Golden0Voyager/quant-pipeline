@@ -48,6 +48,59 @@ _patcher.start()
 atexit.register(_patcher.stop)
 
 
+@pytest.fixture
+def pinned_trading_calendar(monkeypatch):
+    """将交易日历钉在固定集合上，供 expected 相关用例使用。
+
+    ``get_expected_latest_trading_day`` 优先按交易日历推导，而宿主机是否
+    存在缓存（以及缓存是否覆盖目标日）会让同一个用例在本地与 CI 上走出
+    不同分支。钉住日历后，被测路径固定为「日历 → expected」。
+    日历未覆盖 up_to 时返回 None，以便退化路径可单独测试。
+    """
+    trade_dates = [
+        "2026-06-17",
+        "2026-06-18",  # 06-19~06-21 端午休市
+        "2026-06-22",
+        "2026-07-16",
+        "2026-07-17",  # 07-18/07-19 周末
+        "2026-07-20",
+        "2026-07-21",
+        "2026-07-30",
+        "2026-07-31",
+    ]
+
+    def _covering(up_to: str) -> list[str] | None:
+        return trade_dates if max(trade_dates) >= up_to else None
+
+    import core.calendar as calendar
+
+    monkeypatch.setattr(calendar, "_load_calendar_covering", _covering)
+    return trade_dates
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_lock(monkeypatch):
+    """隔离**真实的 OS 管道锁**，消除跨进程环境依赖。
+
+    ``daily_pipeline.main()`` 的进程锁与全局锁探测直接作用于真实文件
+    ``/tmp/daily_pipeline.pid``（并非 mock）：``ProcessLock.acquire()`` 失败时
+    fail-closed ``sys.exit(1)``，``global_lock_held()`` 为真时单任务路径同样退出。
+    本机若同时有 launchd daemon、TUI 或另一个 agent 在跑 pipeline，main() 会
+    打印“管道已在运行，请勿重复启动”并让测试批**假失败**，与测试内容无关。
+
+    只替换 daily_pipeline 命名空间的入口，因此：
+    - 直接验证锁语义的 tests/test_lock.py（走 core.lock）不受影响；
+    - 显式覆盖该探测的用例（如
+      test_single_task_refused_when_global_lock_held）在测试体内 patch，优先生效；
+    - 断言 _acquire_lock 被调用的用例同理。
+    """
+    import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "_acquire_lock", lambda: None)
+    monkeypatch.setattr(daily_pipeline, "global_lock_held", lambda: False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _offline_gate_bypass(monkeypatch):
     """默认让全量管道离线闸门放行，避免 main() 测试发起真实网络探测。

@@ -377,21 +377,20 @@ class TestConnectionEdgeCases:
         assert provider.get_latest_bar_date("000001.SZ") is None
 
     def test_phase2_schema_migrates_legacy_tables(self, tmp_path):
+        """遗留库跑真实路径（基线 DDL + 版本化迁移）后满足 Phase 2 契约。
+
+        本用例原先直接调用 ``_old_migrate_phase2_tables()``。那是 migration 002
+        取代前的临时 shim，生产路径从不调用它，已删除；现改为只走真实路径。
+
+        注意不要断言 migration 002 的 ``ux_institution_survey_date_code``：
+        002 建完它之后，009 会 ``DROP TABLE`` + ``RENAME`` 重建
+        institution_survey，该索引就被丢掉了（生产库确实也没有），而且现在
+        同 (trade_date, stock_code) 多行共存是保存路径的刻意契约，不能加回。
+        因此这里只断言真正生效的不变量：NULL 键行被清掉，且
+        source_record_key 上存在唯一约束。
+        """
         db_path = tmp_path / "legacy.db"
         with sqlite3.connect(db_path) as conn:
-            conn.execute("""
-                CREATE TABLE stock_repurchase (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_date TEXT,
-                    stock_code TEXT,
-                    stock_name TEXT,
-                    repurchase_amount REAL,
-                    repurchase_price REAL,
-                    repurchase_quantity INTEGER,
-                    progress_status TEXT,
-                    UNIQUE(trade_date, stock_code)
-                )
-            """)
             conn.execute("""
                 CREATE TABLE institution_survey (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,12 +408,20 @@ class TestConnectionEdgeCases:
         migrated = SmartMoneyDBProvider(db_path=str(db_path))
         # conftest 的 DatabaseManager mock 固定使用全局路径，显式绑定本用例数据库。
         migrated._db.db_path = str(db_path)
-        migrated._old_migrate_phase2_tables()
+        # migration 002 会清理 NULL 键行并补 institution_survey 唯一索引
+        migrated._run_versioned_migrations()
         try:
             with sqlite3.connect(db_path) as conn:
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_repurchase)")}
-                assert {"repurchase_price_lower", "repurchase_price_upper"} <= columns
                 assert conn.execute("SELECT COUNT(*) FROM institution_survey").fetchone()[0] == 0
+                # 实际生效的唯一约束在 source_record_key 上（009 重建表时建立）
+                unique_columns = {
+                    tuple(
+                        info[2] for info in conn.execute(f"PRAGMA index_info({row[1]})")
+                    )
+                    for row in conn.execute("PRAGMA index_list(institution_survey)")
+                    if row[2] == 1
+                }
+                assert ("source_record_key",) in unique_columns
 
             record = {
                 "trade_date": "2026-07-21",

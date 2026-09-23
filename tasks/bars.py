@@ -70,7 +70,7 @@ from interface import DatabaseInterface, DataLoaderInterface
 try:
     import akshare as ak  # noqa: F401
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 logger = logging.getLogger(__name__)
 
@@ -487,7 +487,7 @@ def _seed_from_snapshot(
 def update_bars(
     db: DatabaseInterface,
     loader: DataLoaderInterface,
-    limit: int = None,
+    limit: int | None = None,
     resume: bool = False,
     symbols: list[str] | None = None,
     force: bool = False,
@@ -555,7 +555,7 @@ def update_bars(
                         f"✅ 智能探测：全部 {_total_stocks} 只股票数据已是最新"
                         f"（截至 {_latest_bar}），跳过批次扫描"
                     )
-                    result = _bars_result(
+                    payload = _bars_result(
                         success=0,
                         failed=0,
                         skipped=_total_stocks,
@@ -563,8 +563,8 @@ def update_bars(
                         attempted=0,
                         failed_symbols=[],
                     )
-                    result["probe_skipped"] = True
-                    return result
+                    payload["probe_skipped"] = True
+                    return payload
                 logger.info(
                     f"💡 智能探测：数据截至 {_latest_bar}，最新交易日为 {_expected}，继续更新"
                 )
@@ -814,7 +814,7 @@ def update_bars(
                 logger.warning(f"⛔ {abort_msg}")
                 monitor.flush()
                 _save_checkpoint(last_symbol, processed_count)
-                result = _bars_result(
+                payload = _bars_result(
                     success=success_count,
                     failed=failed_count,
                     skipped=skipped_count,
@@ -822,9 +822,9 @@ def update_bars(
                     attempted=success_count + failed_count + skipped_count,
                     failed_symbols=failed_symbols,
                 )
-                result["status"] = "aborted"
-                result["error"] = abort_msg
-                return result
+                payload["status"] = "aborted"
+                payload["error"] = abort_msg
+                return payload
         else:
             for symbol in batch:
                 result = _update_single_bar(
@@ -878,7 +878,7 @@ def update_bars(
                 if should_abort:
                     logger.warning(f"⛔ {abort_msg}")
                     _save_checkpoint(last_symbol, current_processed)
-                    result = _bars_result(
+                    payload = _bars_result(
                         success=success_count,
                         failed=failed_count,
                         skipped=skipped_count,
@@ -886,9 +886,9 @@ def update_bars(
                         attempted=success_count + failed_count + skipped_count,
                         failed_symbols=failed_symbols,
                     )
-                    result["status"] = "aborted"
-                    result["error"] = abort_msg
-                    return result
+                    payload["status"] = "aborted"
+                    payload["error"] = abort_msg
+                    return payload
 
         # 每批次结束也刷新进度
         current_processed = processed_count

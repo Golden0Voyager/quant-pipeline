@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 import pandas as pd
 
@@ -23,7 +24,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _to_float(value: object) -> float | None:
+def _to_float(value: Any) -> float | None:
     """安全转换数值字段。"""
     if value is None:
         return None
