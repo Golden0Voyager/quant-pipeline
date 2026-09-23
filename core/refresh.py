@@ -461,7 +461,8 @@ class RefreshOrchestrator:
             str(last_error),
             source=spec.primary_source,
         )
-        metadata: dict[str, Any] = {"attempts": 2}
+        # 不要在此重复标注类型：本函数上文已绑定同名 metadata（mypy no-redef）
+        metadata = {"attempts": 2}
         if published is None:
             metadata["retained_old_data"] = True
         else:
