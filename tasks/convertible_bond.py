@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
+from core.utils import to_float as _to_float
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -23,19 +23,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _to_float(value: Any) -> float | None:
-    """安全转换数值字段，非数字 / None / 空字符串 返回 None。"""
-    if value is None:
-        return None
-    try:
-        v = float(value)
-        if v != v:  # NaN
-            return None
-        return v
-    except (ValueError, TypeError):
-        return None
 
 
 # ===========================================================================
