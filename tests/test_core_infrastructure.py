@@ -10,6 +10,7 @@ import os
 import subprocess
 from functools import wraps
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -248,7 +249,7 @@ class TestSafeTask:
         db = MagicMock()
 
         def supported(
-            db: object,
+            db: Any,
             _task_run_id: str | None = None,
         ) -> dict[str, int]:
             captured["run_id"] = _task_run_id
@@ -289,7 +290,7 @@ class TestSafeTask:
         observed: dict[str, object] = {}
 
         def supported(
-            db: object,
+            db: Any,
             _task_run_id: str | None = None,
         ) -> dict[str, int]:
             observed["run_id"] = _task_run_id
@@ -316,7 +317,7 @@ class TestSafeTask:
         called = False
 
         def supported(
-            db: object,
+            db: Any,
             _task_run_id: str | None = None,
         ) -> dict[str, int]:
             nonlocal called
