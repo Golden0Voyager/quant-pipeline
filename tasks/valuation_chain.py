@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from datetime import timedelta
+from typing import Any
 
 import pandas as pd  # noqa: F401
 from smartmoney_hunter.market_utils import is_beijing_stock
@@ -30,7 +31,7 @@ from interface import DatabaseInterface, DataLoaderInterface
 try:
     import akshare as ak  # noqa: F401
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def update_fundamentals(
             "data_date": today,
         }
 
-    all_records = []
+    all_records: list[dict[str, Any]] = []
     session = get_default_client().get_session("eastmoney")
     for td in trade_dates:
         if all_records:
@@ -896,7 +897,7 @@ def compute_sector_industry_rows_for_refresh(
         total_market_cap=("market_cap", "sum"),
     ).reset_index()
 
-    def _scalar_or_none(value: object) -> float | None:
+    def _scalar_or_none(value: Any) -> float | None:
         """NaN / None → None（SQLite 不接受 NaN）。"""
         return None if value is None or value != value else float(value)
 
