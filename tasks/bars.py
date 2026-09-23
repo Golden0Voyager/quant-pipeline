@@ -251,6 +251,21 @@ def _has_real_db_path(db: DatabaseInterface) -> bool:
     return is_real_db_path(getattr(db, "db_path", None))
 
 
+def _filter_index_codes(codes: list[str]) -> tuple[list[str], int]:
+    """剔除宽基指数代码，返回 (个股代码, 被剔除数量)。
+
+    daily_bars 语义为个股（ts_code 为 6 位 A 股代码）；指数行情属于 index_daily。
+    历史事故：sh000300/sz399001 经 --symbols 入口写入 daily_bars，其
+    amount=close×volume 使全市场成交额聚合被放大约 400 倍。
+    """
+    allowed = [c for c in codes if not _is_index_code(c)]
+    return allowed, len(codes) - len(allowed)
+
+
+def _is_index_code(code: str) -> bool:
+    return len(code) == 8 and code.startswith(("sh00", "sz39", "sz30", "bj89"))
+
+
 # ===========================================================================
 # 收盘刷新 helpers（Task 6）：不落库的抓取 / 归一化
 # 供 core/refresh_adapters.py 使用；不改变 update_bars 的任何行为。
@@ -510,15 +525,21 @@ def update_bars(
         )
 
     if symbols:
-        stock_codes = [s for s in symbols if not should_skip_beijing(s)]
-        bj_count = len(symbols) - len(stock_codes)
+        raw_codes = list(symbols)
     else:
         stocks = db.get_stock_list()
         if stocks.empty:
             logger.error("❌ 股票列表为空")
             return _bars_no_data_result(reason="stock list is empty")
-        stock_codes = [c for c in stocks["code"].tolist() if not should_skip_beijing(c)]
-        bj_count = len(stocks) - len(stock_codes)
+        raw_codes = stocks["code"].tolist()
+
+    non_bj_codes = [c for c in raw_codes if not should_skip_beijing(c)]
+    bj_count = len(raw_codes) - len(non_bj_codes)
+    stock_codes, index_count = _filter_index_codes(non_bj_codes)
+    if index_count > 0:
+        logger.warning(
+            f"⏭️  已跳过 {index_count} 个指数代码（指数行情应入 index_daily，不写 daily_bars）"
+        )
     if limit:
         stock_codes = stock_codes[:limit]
         logger.info(f"⚠️  测试模式：只更新前 {limit} 只")

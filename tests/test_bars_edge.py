@@ -13,7 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from tasks.bars import _is_suspended_realtime, _normalize_trade_date, _update_single_bar
+from tasks.bars import (
+    _filter_index_codes,
+    _is_index_code,
+    _is_suspended_realtime,
+    _normalize_trade_date,
+    _update_single_bar,
+    update_bars,
+)
 
 # ===========================================================================
 # _normalize_trade_date — 纯函数全分支覆盖
@@ -322,3 +329,62 @@ class TestIsSuspendedRealtime:
             assert _is_suspended_realtime("920685.BJ") is False
         mock_xq.get_batch_quotes.assert_not_called()
         ak.stock_tfp_em.assert_not_called()
+
+
+# ===========================================================================
+# 指数代码过滤 — 回归：指数绝不进入 daily_bars 写入路径
+# ===========================================================================
+
+class TestIndexCodeFilter:
+    """历史事故回归：--symbols 传入的指数代码(sh00/sz39/sz30/bj89)必须被
+    update_bars 剔除，绝不作为个股抓取/落库。
+
+    事故背景：sh000300/sz399001 经该入口写入 daily_bars，其
+    amount=close×volume 使全市场成交额聚合被放大约 400 倍。
+    移除过滤（还原旧实现）会让本类测试变红。
+    """
+
+    def test_is_index_code(self):
+        assert _is_index_code("sh000300")
+        assert _is_index_code("sz399001")
+        assert _is_index_code("sz399006")
+        assert _is_index_code("bj899050")
+        assert not _is_index_code("600000")
+        assert not _is_index_code("000001")
+        assert not _is_index_code("sz000001")
+
+    def test_filter_index_codes(self):
+        kept, dropped = _filter_index_codes(
+            ["sz399001", "sh000300", "600000", "000001", "sh000001"]
+        )
+        assert kept == ["600000", "000001"]
+        assert dropped == 3
+
+    def test_update_bars_excludes_index_symbols(self):
+        db = MagicMock()
+        loader = MagicMock()
+        db.get_daily_bars.return_value = pd.DataFrame()
+        loader.incremental_update.return_value = pd.DataFrame()
+        seen: list[str] = []
+
+        def _fake_single(_db, _loader, symbol, **_kwargs):
+            seen.append(symbol)
+            return "success"
+
+        from tasks.bars import ProgressTracker
+
+        with (
+            patch("tasks.bars._update_single_bar", side_effect=_fake_single),
+            patch("core.utils.is_beijing_stock", return_value=False),
+            patch("tasks.bars.logger"),
+        ):
+            ProgressTracker.clear()
+            r = update_bars(
+                db,
+                loader,
+                symbols=["sz399001", "sh000300", "600000", "000001"],
+            )
+            ProgressTracker.clear()
+
+        assert r["total"] == 2
+        assert set(seen) == {"600000", "000001"}
