@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 from interface import DatabaseInterface
 
@@ -40,8 +41,8 @@ def _fetch_hk_tech_records(latest_date: str | None) -> list[dict]:
     if df is None or df.empty:
         return []
 
-    records = []
-    prev_close = None
+    records: list[dict[str, Any]] = []
+    prev_close: float | None = None
     for _, row in df.iterrows():
         date_str = str(row.get("date", ""))[:10]
         if not date_str:
