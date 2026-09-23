@@ -33,6 +33,7 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
         "sz399001": "深证成指",
         "sz399006": "创业板指",
         "sh000688": "科创50",
+        "sh000300": "沪深300",
     }
     for index_code, index_name in indices.items():
         try:
@@ -549,6 +550,7 @@ _INDEX_DAILY_REFRESH_INDICES = {
     "sz399001": "深证成指",
     "sz399006": "创业板指",
     "sh000688": "科创50",
+    "sh000300": "沪深300",
 }
 
 
