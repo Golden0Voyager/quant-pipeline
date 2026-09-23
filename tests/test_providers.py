@@ -499,14 +499,13 @@ def test_latest_date_getters_log_warning_on_db_error(caplog):
 
     provider = SmartMoneyDBProvider()
     broken = str(provider.db_path) + "/definitely/not/here.db"
-    with caplog.at_level(logging.WARNING, logger="providers"):
-        with patch.object(provider._db, "db_path", broken):
-            assert provider.get_latest_bar_date("000001.SZ") is None
-            assert provider.get_global_assets_latest_date("SPY") is None
-            assert provider.get_hk_tech_latest_date() is None
-            assert provider.get_cftc_cot_latest_date("goods") is None
-            assert provider.get_futures_latest_date("RB0") is None
-            assert provider.get_lithium_spot_latest_date() is None
+    with caplog.at_level(logging.WARNING, logger="providers"), patch.object(provider._db, "db_path", broken):
+        assert provider.get_latest_bar_date("000001.SZ") is None
+        assert provider.get_global_assets_latest_date("SPY") is None
+        assert provider.get_hk_tech_latest_date() is None
+        assert provider.get_cftc_cot_latest_date("goods") is None
+        assert provider.get_futures_latest_date("RB0") is None
+        assert provider.get_lithium_spot_latest_date() is None
     failed = [r for r in caplog.records if "查询失败" in r.message]
     assert len(failed) == 6, f"预期 6 条查询失败告警，实得 {len(failed)}: {caplog.text}"
     for name in (
