@@ -58,9 +58,10 @@
 - `tests/test_interface.py` 用 `MockDatabase` 绕过了真实实现校验 — 这是已知的测试盲区,真正的契约验证靠 mypy 全量跑和手写的 `ProviderFactory` 类型对齐。
 
 ### 5. 测试隔离:不要依赖操作系统锁状态
-- `tests/test_daily_pipeline.py::TestMainMoreTasks` 直接调用 `daily_pipeline.main()`,内部用 `global_lock_held()` 探测 `/tmp/daily_pipeline.pid`。**这个探测是真实的 OS flock**,不是 mock。
-- 多个 agent / 终端 / 守护进程同时跑 pipeline 时,本测试批会因外部持有锁而整批假失败(`SystemExit: 1`)。
-- 修复方向(P2 已识别):给该 fixture 补 `patch("daily_pipeline.global_lock_held", return_value=False)`,让测试在锁隔离环境下确定性通过;或者改用 tmp pidfile。
+- `daily_pipeline.main()` 的进程锁与全局锁探测作用于真实文件 `/tmp/daily_pipeline.pid`(非 mock):`_acquire_lock()` 失败 fail-closed `sys.exit(1)`,`global_lock_held()` 为真时单任务路径同样退出。
+- 根 `tests/conftest.py` 的 autouse fixture `_isolate_pipeline_lock`(PR #110)已同时 patch `daily_pipeline._acquire_lock` 与 `daily_pipeline.global_lock_held`,调用 `main()` 的两个测试模块(`test_daily_pipeline.py`/`test_parallel_pipeline.py`)不再因外部持锁(launchd daemon/TUI/其他 agent)假失败。
+- 约束:该 fixture 只替换 `daily_pipeline` 命名空间入口——验证真实锁语义的 `tests/test_lock.py`(走 `core.lock`)不受影响;测试体内自行覆盖探测的用例(如 `test_single_task_refused_when_global_lock_held`)优先级更高。
+- 历史:漏口曾有两处——旧 fixture 只 patch `_acquire_lock` 漏了 `global_lock_held`,且 `test_parallel_pipeline.py` 完全无隔离,外部持锁时共 6 个测试假失败(`SystemExit: 1`)。新增调 `main()` 的测试模块无需再自行 patch。
 
 ---
 
@@ -74,7 +75,7 @@
 
 ---
 
-## 📐 已知待清理项(按 P0/P1/P2 分级,详见 `docs/todo.md`)
+## 📐 已知待清理项(按 P0/P1/P2 分级,本文件即权威清单;`docs/todo.md` 仅记录数据源 TODO)
 
 | 编号 | 级别 | 现状 |
 |---|---|---|
