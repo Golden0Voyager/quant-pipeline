@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.utils import to_float as _to_float
 from interface import DatabaseInterface
 
 try:
@@ -21,16 +22,6 @@ except ImportError:
     ak = None
 
 logger = logging.getLogger(__name__)
-
-
-def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
 
 
 def _try_get_ak_df(func, **kwargs) -> pd.DataFrame | None:
