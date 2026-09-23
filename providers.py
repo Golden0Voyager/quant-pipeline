@@ -719,7 +719,12 @@ class SmartMoneyDBProvider:
                 )
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            # P2-11：None 必须只代表「表空/无行」；DB 真故障（锁死/IO/SQL错误）
+            # 若静默返回 None，freshness 判定与 health_check 会把它读成「无数据」。
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_latest_bar_date({symbol}) 查询失败: {e}"
+            )
             return None
 
     def get_global_assets_latest_date(self, symbol: str) -> str | None:
@@ -732,7 +737,10 @@ class SmartMoneyDBProvider:
                 )
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_global_assets_latest_date({symbol}) 查询失败: {e}"
+            )
             return None
 
     def save_daily_bars(self, symbol: str, df: pd.DataFrame) -> None:
@@ -1270,7 +1278,10 @@ class SmartMoneyDBProvider:
                 cursor = conn.execute("SELECT MAX(trade_date) FROM hk_tech_index_daily")
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_hk_tech_latest_date() 查询失败: {e}"
+            )
             return None
 
     def save_cftc_cot_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1320,7 +1331,10 @@ class SmartMoneyDBProvider:
                 )
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_cftc_cot_latest_date({market}) 查询失败: {e}"
+            )
             return None
 
     def save_eia_petroleum_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1368,7 +1382,10 @@ class SmartMoneyDBProvider:
                 )
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_futures_latest_date({symbol}) 查询失败: {e}"
+            )
             return None
 
     def save_lithium_spot_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1418,7 +1435,10 @@ class SmartMoneyDBProvider:
                 cursor = conn.execute("SELECT MAX(spot_date) FROM lithium_spot_daily")
                 row = cursor.fetchone()
                 return row[0] if row and row[0] else None
-        except Exception:
+        except (sqlite3.Error, OSError) as e:
+            logging.getLogger(__name__).warning(
+                f"⚠️ get_lithium_spot_latest_date() 查询失败: {e}"
+            )
             return None
 
     def save_futures_daily_batch(self, records: list[dict[str, Any]]) -> int:
