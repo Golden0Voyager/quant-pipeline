@@ -49,7 +49,7 @@ ignore = ["E501"]
 "__init__.py" = ["N999"]
 
 [tool.mypy]
-# 生产代码的 mypy 门禁（CI 里直接跑 `uv run mypy`，由 files 决定范围）。
+# 全仓 mypy 门禁（CI 里直接跑 `uv run mypy`，范围由 files 决定）。
 #
 # explicit_package_bases + mypy_path：providers.py 顶层 import smartmoney_hunter
 # （只装在 quant_hunter venv），项目根必须参与模块名解析，否则 mypy 会以
