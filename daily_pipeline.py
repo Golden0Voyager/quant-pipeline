@@ -587,8 +587,13 @@ def run_all(
             elif ptask is not None:
                 stage2_ptasks.append(ptask)
 
-        # 每个任务同时抓取并写入，且共享同一个 db provider；在任务拆成
-        # “并行抓取 + 单写入器”前，不能把该实例交给多个 SQLite 线程。
+        # stage2 保持串行（max_workers=1）。旧注释称阻碍是「不能把共享 db provider
+        # 交给多个 SQLite 线程」——已被 stage4 反证：stage4 同样共享该 provider 并并发
+        # 3 个任务，其写表两两不相交、有审计与测试钉住（tests/test_stage4_concurrency.py）。
+        # 真正的前置条件是 stage2 这 33 个任务的写表不相交审计，尚未做过。
+        # 另需注意收益上限：耗时占比最高的两个任务（约 75%，日志实测）是纯本地计算，
+        # 内部已各自用线程池并行 + 批量写（tasks/core_chain.py），任务级并发只对
+        # 网络型小任务有收益。
         stage2_ran = run_parallel_tasks(stage2_ptasks, max_workers=1, runner_fn=_safe_task)
         stage2_results.update(stage2_ran)
 

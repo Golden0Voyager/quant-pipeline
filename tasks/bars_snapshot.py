@@ -20,6 +20,7 @@ from typing import Any
 import pandas as pd
 
 from core.market_time import shanghai_today
+from core.utils import to_float as _to_float
 
 try:
     import akshare as ak
@@ -43,16 +44,6 @@ _COLUMN_MAP = {
     "振幅": "amplitude",
 }
 _REQUIRED_COLUMNS = ("代码", "最新价", "今开", "昨收")
-
-
-def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        f = float(val)
-    except (TypeError, ValueError):
-        return None
-    return None if pd.isna(f) else f
 
 
 def fetch_market_snapshot() -> pd.DataFrame:

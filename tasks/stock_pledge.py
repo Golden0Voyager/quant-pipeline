@@ -16,7 +16,7 @@ from core.calendar import get_expected_latest_trading_day, get_recent_trading_da
 from core.data_contract import STOCK_PLEDGE_CONTRACT, validate_records
 from core.source_client import get_default_client
 from core.source_record_key import stock_pledge_source_key
-from core.utils import is_real_db_path
+from core.utils import is_real_db_path, to_float
 from interface import DatabaseInterface
 
 try:
@@ -28,15 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        if isinstance(val, str):
-            val = val.strip().rstrip("%")
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
+    """本模块专用适配器：质押比率接口返回 ``"3.5%"`` 形式字符串。
+
+    与其余模块共用 ``core.utils.to_float`` 的实现，仅此一个开关：剥离 ``%``。
+    这是 13 份历史副本中唯一的语义分叉（P2-10），有测试钉住
+    ``_to_float("12.5%") == 12.5``。
+    """
+    return to_float(val, strip_percent=True)
 
 
 _COLUMN_MAP = {

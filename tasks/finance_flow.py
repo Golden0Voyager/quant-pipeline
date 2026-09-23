@@ -17,10 +17,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
-import pandas as pd
-
 from core.calendar import get_expected_latest_trading_day
 from core.utils import is_real_db_path, warn_if_all_empty
+from core.utils import to_float as _to_float
 from interface import DatabaseInterface
 
 try:
@@ -34,16 +33,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _to_float(val) -> float | None:
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
 
 
 # ===========================================================================

@@ -11,7 +11,9 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,35 @@ def sleep_with_progress(seconds: float, label: str = "等待") -> None:
         print(f"\r  {label}: {i + 1}/{int(seconds)}s", end="", flush=True)
         time.sleep(1)
     print()
+
+
+def to_float(value: Any, *, strip_percent: bool = False) -> float | None:
+    """把接口返回的标量安全转成 ``float``，失败返回 ``None``。
+
+    此前 13 个 ``tasks`` 模块各自复制了一份 ``_to_float``（P2-10），本函数是它们的
+    唯一实现，行为与原副本逐字一致：``None`` → ``None``；``float()`` 抛
+    ``ValueError``/``TypeError`` → ``None``；结果为 NaN（``float("nan")``、pandas
+    缺值）→ ``None``。
+
+    Args:
+        value: 待转换的标量（通常是 DataFrame 单元格或接口字段）。
+        strip_percent: 仅 ``tasks/stock_pledge.py`` 需要——其数据源返回 ``"3.5%"``
+            形式的字符串，需先剥离首尾空白与结尾 ``%``。默认 ``False`` 时
+            ``"3.5%"`` 仍返回 ``None``，与其余模块的历史行为保持一致；不要为
+            「顺手支持」改成默认 True，那会改变已落库字段的取值。
+
+    Returns:
+        转换后的 float，或 ``None``（含 NaN）。
+    """
+    if value is None:
+        return None
+    if strip_percent and isinstance(value, str):
+        value = value.strip().rstrip("%")
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return None
+    return None if pd.isna(v) else v
 
 
 def warn_if_all_empty(

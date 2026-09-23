@@ -10,24 +10,13 @@ import logging
 import uuid
 from typing import Any
 
-import pandas as pd
-
 from core.data_contract import CONCEPT_BOARD_CONTRACT, validate_records
 from core.market_time import shanghai_today
 from core.source_client import get_default_client
+from core.utils import to_float as _to_float
 from interface import DatabaseInterface
 
 logger = logging.getLogger(__name__)
-
-
-def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
 
 
 def _to_int(val: Any) -> int | None:

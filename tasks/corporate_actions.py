@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
-
-import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
+from core.utils import to_float as _to_float
 from core.utils import warn_if_all_empty
 from interface import DatabaseInterface
 
@@ -22,17 +20,6 @@ except ImportError:
     ak = None
 
 logger = logging.getLogger(__name__)
-
-
-def _to_float(value: Any) -> float | None:
-    """安全转换数值字段。"""
-    if value is None:
-        return None
-    try:
-        v = float(value)
-        return None if pd.isna(v) else v
-    except (TypeError, ValueError):
-        return None
 
 
 # ===========================================================================

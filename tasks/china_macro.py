@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.utils import to_float as _to_float
 from interface import DatabaseInterface
 
 try:
@@ -26,17 +27,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-
-
-def _to_float(val: Any) -> float | None:
-    """将值转换为 float，失败返回 None。"""
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
-    except (ValueError, TypeError):
-        return None
 
 
 def _parse_quarter(q_str: str) -> str | None:
