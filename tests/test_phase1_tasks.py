@@ -555,7 +555,7 @@ def test_hkscc_result_collection_does_not_sleep_per_symbol():
 
     with (
         patch.object(hkscc_holder, "_fetch_single_north_hold", return_value=record),
-        patch.object(hkscc_holder.time, "sleep") as sleep,
+        patch("time.sleep") as sleep,
     ):
         result = hkscc_holder.update_hkscc_holder(db)
 
