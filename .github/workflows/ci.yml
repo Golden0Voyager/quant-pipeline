@@ -28,8 +28,10 @@ jobs:
       - name: ruff check
         run: uv run ruff check
 
+      # 不带文件参数：检查范围由 pyproject.toml 的 [tool.mypy] files 决定。
+      # 此前的 `mypy . || true` 永远返回 0，等于没有门禁。
       - name: mypy
-        run: uv run mypy . || true
+        run: uv run mypy
 
       - name: pytest --cov
         run: uv run pytest --cov
