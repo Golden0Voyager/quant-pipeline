@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -188,6 +189,44 @@ class TestGetAkshareData:
                  patch("scripts.reconcile_with_akshare.logger"):
                 df = rwa.get_akshare_data("000001.SZ", "2024-01-01", "2024-01-10")
         assert df.empty
+
+    # --- 北交所东财冷却（2026-09-04 事故：341 只北交所拖垮 4h 对账预算） ---
+
+    def test_beijing_em_failure_sets_cooldown(self):
+        """北交所东财失败后进入冷却，避免后续每只白耗 15s 超时。"""
+        with patch.object(rwa, "ak") as ak:
+            ak.stock_zh_a_hist.side_effect = Exception("timeout")
+            with patch("scripts.reconcile_with_akshare.no_proxy"), \
+                 patch("scripts.reconcile_with_akshare.logger"):
+                rwa._bj_em_dead_until = 0.0
+                df = rwa.get_akshare_data("830799.BJ", "2024-01-01", "2024-01-10")
+        assert df.empty
+        assert rwa._bj_em_dead_until > time.monotonic()
+
+    def test_beijing_skips_em_during_cooldown(self):
+        """冷却期内北交所股票直接快速失败，不再调用东财。"""
+        with patch.object(rwa, "ak") as ak, \
+             patch("scripts.reconcile_with_akshare.logger"):
+            rwa._bj_em_dead_until = time.monotonic() + 1000
+            df = rwa.get_akshare_data("830799.BJ", "2024-01-01", "2024-01-10")
+        assert df.empty
+        ak.stock_zh_a_hist.assert_not_called()
+        rwa._bj_em_dead_until = 0.0
+
+    def test_beijing_em_success_no_cooldown(self):
+        """北交所东财成功时不应进入冷却。"""
+        with patch.object(rwa, "ak") as ak:
+            ak.stock_zh_a_hist.return_value = pd.DataFrame({
+                "日期": ["2024-01-02"], "开盘": [10.0], "收盘": [10.5],
+                "最高": [11.0], "最低": [9.5], "成交量": [1000000],
+                "成交额": [10500000], "换手率": [0.5], "涨跌幅": [2.0],
+                "振幅": [1.5],
+            })
+            with patch("scripts.reconcile_with_akshare.no_proxy"):
+                rwa._bj_em_dead_until = 0.0
+                df = rwa.get_akshare_data("830799.BJ", "2024-01-01", "2024-01-10")
+        assert not df.empty
+        assert rwa._bj_em_dead_until == 0.0
 
 
 # ===========================================================================
@@ -395,7 +434,10 @@ class TestMain:
         conn.execute("CREATE TABLE daily_bars (ts_code TEXT, trade_date TEXT)")
         conn.commit()
         conn.close()
+        # RETRY_FILE 必须指向空文件：否则会读真实失败队列（154 只北交所）
+        # 并真跑网络对账，导致单测挂起
         with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
+             patch.object(rwa, "RETRY_FILE", tmp_path / "empty_retry.txt"), \
              patch("scripts.reconcile_with_akshare.ProcessLock.acquire", return_value=True), \
              patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
              patch("scripts.reconcile_with_akshare.logger"):
@@ -409,6 +451,7 @@ class TestMain:
         conn.commit()
         conn.close()
         with patch.object(sys, "argv", ["reconcile.py", "--retry-failed", "--db-path", str(db_path)]), \
+             patch.object(rwa, "RETRY_FILE", tmp_path / "empty_retry.txt"), \
              patch.dict(os.environ, {"QUANT_PIPELINE_LOCK_HELD": "1"}), \
              patch("scripts.reconcile_with_akshare.ProcessLock.acquire") as mock_acquire, \
              patch("scripts.reconcile_with_akshare.ProcessLock.release"), \
