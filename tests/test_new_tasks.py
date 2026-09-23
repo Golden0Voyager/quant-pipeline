@@ -2117,7 +2117,7 @@ def test_fetch_etf_daily_records_single_target_day():
 
 
 def test_fetch_index_daily_records_all_indices_full_history():
-    """四大指数全历史归一化（供适配器挑选回看分区）；任一指数异常上抛。"""
+    """五大指数全历史归一化（供适配器挑选回看分区）；任一指数异常上抛。"""
     fake_ak = MagicMock()
     fake_ak.stock_zh_index_daily_tx.return_value = pd.DataFrame(
         [
@@ -2130,10 +2130,10 @@ def test_fetch_index_daily_records_all_indices_full_history():
     with patch.object(index_chain, "ak", fake_ak):
         records = index_chain.fetch_index_daily_records()
 
-    assert fake_ak.stock_zh_index_daily_tx.call_count == 4
-    assert len(records) == 8  # 4 指数 × 2 日
+    assert fake_ak.stock_zh_index_daily_tx.call_count == 5
+    assert len(records) == 10  # 5 指数 × 2 日
     codes = {r["index_code"] for r in records}
-    assert codes == {"sh000001", "sz399001", "sz399006", "sh000688"}
+    assert codes == {"sh000001", "sz399001", "sz399006", "sh000688", "sh000300"}
     dates = {r["trade_date"] for r in records}
     assert dates == {"2026-07-24", "2026-07-27"}
     assert all(r["close"] is not None for r in records)
