@@ -78,9 +78,9 @@
 
 | 编号 | 级别 | 现状 |
 |---|---|---|
-| P1-5 mypy CI 空转(`|| true` + 缺 `[tool.mypy]`) | P1 | 未处理 |
-| P1-6 `date: str = None` ×7 协议违规 | P1 | 未处理 |
-| P1-7 `TaskSpec.callable` 全是 None,registry 非单一真相 | P1 | 未处理 |
+| P1-5 mypy CI 空转(`\|\| true` + 缺 `[tool.mypy]`) | P1 | ✅ 已修复 (PR #110):CI 跑无参数 `uv run mypy`,范围由 `[tool.mypy] files` 决定,且已含 `tests/` |
+| P1-6 `date: str = None` ×7 协议违规 | P1 | ✅ 已修复 (PR #110):`SmartMoneyDBProvider` 现已满足 `DatabaseInterface` |
+| P1-7 `TaskSpec.callable` 全是 None,registry 非单一真相 | P1 | ✅ 已修复 (PR #110):字段改为可选,自述"别处会填"的 `pass` 分支换成真实不变量校验 |
 | P2-8 10 个任务被 cadence 永久跳过但仍在 stage4 wiring | P2 | 已知设计取舍 |
 | P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | 未处理 |
 | P2-10 `_to_float` 在 13 个模块重复 | P2 | 未处理,计划抽 `core/ak_utils.py` |
