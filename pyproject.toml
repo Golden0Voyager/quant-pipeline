@@ -48,6 +48,51 @@ ignore = ["E501"]
 "reconcile_with_akshare.py" = ["E402"]
 "__init__.py" = ["N999"]
 
+[tool.mypy]
+# 生产代码的 mypy 门禁（CI 里直接跑 `uv run mypy`，由 files 决定范围）。
+#
+# explicit_package_bases + mypy_path：providers.py 顶层 import smartmoney_hunter
+# （只装在 quant_hunter venv），项目根必须参与模块名解析，否则 mypy 会以
+# "source file found twice under different module names" 直接退出、一行都不检查。
+#
+# files 只列生产代码：tests/ 目前有 28 个错误，全部来自测试夹具的
+# **dict[str, object] 解包与 Mock 属性访问，属测试代码自身的类型问题；
+# 先让生产代码成为硬门禁，测试清理后再加入。
+explicit_package_bases = true
+mypy_path = "."
+warn_unused_ignores = true
+files = [
+    "core",
+    "tasks",
+    "tui",
+    "scripts",
+    "daily_pipeline.py",
+    "interface.py",
+    "providers.py",
+]
+
+# 以下依赖没有 stub / py.typed，对其 import 做检查没有意义。逐个模块豁免，
+# 而不是全局 ignore_missing_imports = true，以免把自有代码的 import 错误一并吞掉。
+# 裸名与 ``.*`` 需分开写：mypy 的 ``pkg.*`` 不匹配 ``pkg`` 自身。
+[[tool.mypy.overrides]]
+module = [
+    "akshare",
+    "akshare.*",
+    "pandas",
+    "pandas.*",
+    "pyarrow",
+    "pyarrow.*",
+    "yfinance",
+    "yfinance.*",
+    "curl_cffi",
+    "curl_cffi.*",
+    "smartmoney_hunter",
+    "smartmoney_hunter.*",
+    "tradingagents",
+    "tradingagents.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
