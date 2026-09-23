@@ -48,6 +48,36 @@ _patcher.start()
 atexit.register(_patcher.stop)
 
 
+@pytest.fixture
+def pinned_trading_calendar(monkeypatch):
+    """将交易日历钉在固定集合上，供 expected 相关用例使用。
+
+    ``get_expected_latest_trading_day`` 优先按交易日历推导，而宿主机是否
+    存在缓存（以及缓存是否覆盖目标日）会让同一个用例在本地与 CI 上走出
+    不同分支。钉住日历后，被测路径固定为「日历 → expected」。
+    日历未覆盖 up_to 时返回 None，以便退化路径可单独测试。
+    """
+    trade_dates = [
+        "2026-06-17",
+        "2026-06-18",  # 06-19~06-21 端午休市
+        "2026-06-22",
+        "2026-07-16",
+        "2026-07-17",  # 07-18/07-19 周末
+        "2026-07-20",
+        "2026-07-21",
+        "2026-07-30",
+        "2026-07-31",
+    ]
+
+    def _covering(up_to: str) -> list[str] | None:
+        return trade_dates if max(trade_dates) >= up_to else None
+
+    import core.calendar as calendar
+
+    monkeypatch.setattr(calendar, "_load_calendar_covering", _covering)
+    return trade_dates
+
+
 @pytest.fixture(autouse=True)
 def _offline_gate_bypass(monkeypatch):
     """默认让全量管道离线闸门放行，避免 main() 测试发起真实网络探测。
