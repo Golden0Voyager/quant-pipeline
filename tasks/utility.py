@@ -27,7 +27,7 @@ from interface import DatabaseInterface, DataLoaderInterface
 try:
     import akshare as ak
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 # 从 core/tasks 模块导入（避免与 daily_pipeline.py 的循环依赖）
 from core.progress import ProgressTracker
@@ -89,7 +89,11 @@ def retry_failed(
     # 有 → 个股缺数说明当日停牌/未交易（K 线不存在，重试无意义，移出队列）；
     # 无 → 源端问题（保留重试资格）。
     expected_latest = _normalize_trade_date(get_expected_latest_trading_day())
-    source_has_day = bool(expected_latest) and _source_has_trading_day(loader, expected_latest)
+    # 用 if 而非 `bool(...) and ...`：mypy 无法穿过 bool() 收窄到 str，
+    # 且这样保留原有的「空串视为无预期日」语义
+    source_has_day = False
+    if expected_latest:
+        source_has_day = _source_has_trading_day(loader, expected_latest)
 
     # 停牌预检：与 update_bars 主流程同源的停牌判定（雪球 status + 东财停复牌名单）。
     # 停牌股源端无新数据，直接跳过（_update_single_bar 返回 "skipped"，不计失败），
@@ -103,16 +107,17 @@ def retry_failed(
     skipped_no_data: list[str] = []
 
     for symbol in symbols:
-        result = _update_single_bar(db, loader, symbol, suspended_symbols=suspended_symbols)
-        if result == "success":
+        # 与返回的 result dict 区分命名：同名会让 mypy 把它并成一个变量
+        outcome = _update_single_bar(db, loader, symbol, suspended_symbols=suspended_symbols)
+        if outcome == "success":
             success += 1
-        elif result == "failed" and source_has_day:
+        elif outcome == "failed" and source_has_day:
             skipped_no_data.append(symbol)
             logger.info(
                 f"  ⏸️ {symbol} 源端无 {expected_latest} 新数据"
                 "（当日停牌/未交易），移出重试队列"
             )
-        elif result != "skipped":
+        elif outcome != "skipped":
             still_failed.append(symbol)
 
     if still_failed:
