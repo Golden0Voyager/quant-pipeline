@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 import pytest
 
@@ -763,7 +764,7 @@ def test_sql_identifier_rejection_never_executes_adapter_text(
     field: str,
     value: object,
 ) -> None:
-    values: dict[str, object] = {
+    values: dict[str, Any] = {
         "table": "quotes",
         "columns": ("ts_code", "trade_date", "close", "source"),
         "rows": (("000001.SZ", "2026-07-27", 10.8, "close"),),
@@ -1161,7 +1162,7 @@ def test_composite_checks_all_coverage_under_write_lock_before_any_delete(
     statements: list[str] = []
     original_connect = sqlite3.connect
 
-    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+    def traced_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         conn = original_connect(*args, **kwargs)
         conn.set_trace_callback(statements.append)
         return conn
