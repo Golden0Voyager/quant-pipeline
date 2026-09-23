@@ -149,7 +149,7 @@ class TestTaskSpecDataclass:
         spec = lookup_task("update_bars")
         assert spec is not None
         with pytest.raises(AttributeError):
-            spec.name = "changed"  # type: ignore[misc]
+            spec.name = "changed"
 
     def test_str_representation(self):
         spec = lookup_task("update_fundamentals")
