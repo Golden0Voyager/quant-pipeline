@@ -24,7 +24,7 @@ from core.market_time import shanghai_today
 try:
     import akshare as ak
 except ImportError:
-    ak = None  # type: ignore[assignment]
+    ak = None
 
 logger = logging.getLogger(__name__)
 
