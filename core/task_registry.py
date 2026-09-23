@@ -10,11 +10,13 @@ Usage
 ─────
     from core.task_registry import TASK_REGISTRY, lookup_task
 
-    for spec in TASK_REGISTRY:
-        result = spec.callable(db, ...)
-
     spec = lookup_task("update_bars")
-    print(spec.tables, spec.cadence)
+    print(spec.tables, spec.cadence, spec.date_columns)
+
+    # 注意：``spec.callable`` 目前**恒为 None**——真正的派发表是
+    # ``daily_pipeline._TASK_CALLABLES``。本模块只描述任务的元数据
+    # （表、cadence、日期列、空结果策略），不持有可调用对象，
+    # 所以不要照着 ``spec.callable(...)`` 去调用。
 """
 
 from __future__ import annotations
@@ -92,8 +94,12 @@ class TaskSpec:
     name:
         CLI / TUI key (e.g. ``"update_bars"``).
     callable:
-        The task function. Signature must be compatible with
-        ``core.runner.safe_task``.
+        Reserved for describing the task function. **Currently always
+        ``None``** in every entry: dispatch lives in
+        ``daily_pipeline._TASK_CALLABLES``, so this field carries no
+        information yet and must not be called. Typed as optional so the
+        declaration matches reality instead of claiming a callable that
+        does not exist.
     tables:
         Names of the database tables this task writes to.
     cadence:
@@ -113,7 +119,7 @@ class TaskSpec:
     """
 
     name: str
-    callable: Callable[..., Any]
+    callable: Callable[..., Any] | None
     tables: tuple[str, ...]
     cadence: Cadence
     date_columns: Mapping[str, str]
@@ -454,7 +460,7 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     # ── Core daily pipeline ────────────────────────────────────────
     TaskSpec(
         name="update_stock_list",
-        callable=None,  # filled after module import
+        callable=None,  # 恒为 None：派发表在 daily_pipeline._TASK_CALLABLES
         tables=("stock_list",),
         cadence=Cadence.MONTHLY,
         date_columns={"stock_list": "updated_at"},
@@ -1283,9 +1289,13 @@ def _validate_registry() -> None:
         if spec.name in seen_names:
             raise ValueError(f"duplicate task name in registry: {spec.name}")
         seen_names.add(spec.name)
-        if not spec.callable and spec.name != "update_stock_list":
-            # callable is None temporarily; daily_pipeline sets it
-            pass
+        # callable 恒为 None 是当前设计（派发表在 daily_pipeline._TASK_CALLABLES），
+        # 对它做断言毫无意义，因此这里只校验真实可验证的元数据不变量。
+        unknown = set(spec.date_columns) - set(spec.tables)
+        if unknown:
+            raise ValueError(
+                f"task {spec.name!r} 的 date_columns 引用了未声明的表: {sorted(unknown)}"
+            )
 
 
 _validate_registry()
