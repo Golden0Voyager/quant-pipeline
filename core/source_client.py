@@ -377,6 +377,9 @@ class SourceClient:
         if policy is None:
             raise ValueError(f"unknown source: {source_name}")
 
+        # curl_cffi 与 requests 的 Session 是两个不同的类，两条分支都合法，
+        # 因此显式声明为 Any（否则 mypy 按 try 分支推断，在 except 分支报错）
+        session: Any
         try:
             from curl_cffi import requests as curl_requests
 
