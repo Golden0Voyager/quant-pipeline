@@ -533,3 +533,28 @@ class TestPipelineConfig:
         with patch.dict(os.environ, {}, clear=True):
             cfg = PipelineConfig()
             assert cfg.ultra_safe is False
+
+    def test_parallel_workers_default_is_three(self):
+        """默认并发为 3（与生产 .env 历史值对齐）；显式 PARALLEL_WORKERS 仍可覆盖。
+
+        还原旧默认(1)会让本测试变红 —— P2-9 的 red-proof。
+        """
+        import core.config as config_mod
+
+        assert config_mod.PARALLEL_WORKERS_VAL == 3
+
+    def test_ultra_safe_pins_workers_to_serial(self, monkeypatch):
+        """ULTRA_SAFE=1 时并发必须钉回 1（全链路减压语义，不被新默认 3 带高）。"""
+        import importlib
+
+        import core.config as config_mod
+
+        monkeypatch.setenv("ULTRA_SAFE", "1")
+        monkeypatch.delenv("PARALLEL_WORKERS", raising=False)
+        importlib.reload(config_mod)
+        try:
+            assert config_mod.PARALLEL_WORKERS_VAL == 1
+        finally:
+            # 还原模块级常量，避免污染后续测试（monkeypatch 恢复 env 后重载一次）
+            monkeypatch.delenv("ULTRA_SAFE", raising=False)
+            importlib.reload(config_mod)

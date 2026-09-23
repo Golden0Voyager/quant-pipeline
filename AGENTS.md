@@ -83,6 +83,6 @@
 | P1-6 `date: str = None` ×7 协议违规 | P1 | ✅ 已修复 (PR #110):`SmartMoneyDBProvider` 现已满足 `DatabaseInterface` |
 | P1-7 `TaskSpec.callable` 全是 None,registry 非单一真相 | P1 | ✅ 已修复 (PR #110):字段改为可选,自述"别处会填"的 `pass` 分支换成真实不变量校验 |
 | P2-8 10 个任务被 cadence 永久跳过但仍在 stage4 wiring | P2 | 已知设计取舍 |
-| P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | 未处理 |
+| P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | ✅ 已修复 (PR #114):代码默认对齐生产生效值 3(`.env` 实测),help 修正为真实作用域(仅 stage4 与 bars 内部池),ULTRA_SAFE 钉回 1 |
 | P2-10 `_to_float` 在 13 个模块重复 | P2 | 未处理,计划抽 `core/ak_utils.py` |
-| P2-11 `get_*_latest_date` 吞 `Exception` | P2 | 未处理 |
+| P2-11 `get_*_latest_date` 吞 `Exception` | P2 | ✅ 已修复 (PR #114):6 处收窄至 `(sqlite3.Error, OSError)` 并 WARNING 告警,`None` 仅代表「表空/无行」 |

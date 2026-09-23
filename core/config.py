@@ -194,7 +194,9 @@ PER_STOCK_MAX_SLEEP_VAL = 1.2
 MAX_RETRY_VAL = 3
 RETRY_DELAY_VAL = 6.0
 PROGRESS_FLUSH_INTERVAL_VAL = 10
-PARALLEL_WORKERS_VAL = int(os.getenv("PARALLEL_WORKERS", "1"))
+# 默认 3：与生产 .env 历史值一致，作用范围仅 stage4（12 任务写表不相交）与
+# bars 内部批次池；stage2/3/5 的串行是编排层硬编码，不随此值变化。
+PARALLEL_WORKERS_VAL = int(os.getenv("PARALLEL_WORKERS", "3"))
 CHIP_BINS_VAL = int(os.getenv("CHIP_BINS", "100"))
 MIN_CHIP_DAYS_VAL = int(os.getenv("MIN_CHIP_DAYS", "60"))
 CHIP_MAX_TURNOVER_VAL = 0.999
@@ -208,6 +210,9 @@ if os.getenv("ULTRA_SAFE") == "1":
     PER_STOCK_MAX_SLEEP_VAL = 2.0
     MAX_RETRY_VAL = 2
     RETRY_DELAY_VAL = 3.0
+    # ULTRA_SAFE 语义是全链路减压：并发度也必须回到最保守值，
+    # 否则默认改为 3 后该模式会被动获得并发。
+    PARALLEL_WORKERS_VAL = 1
 
 
 @dataclass

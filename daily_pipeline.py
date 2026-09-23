@@ -427,7 +427,7 @@ def run_all(
     sequential: bool = False,
     parallel_workers: int | None = None,
 ) -> dict:
-    """运行完整数据管道（DAG 5 阶段编排；stage4 并发，stage2 暂按串行执行）。"""
+    """运行完整数据管道（DAG 5 阶段编排：stage4 并发 min(workers,12)，stage2/3/5 串行）。"""
     start_time = time.time()
     _lower_process_priority()
 
@@ -1007,7 +1007,7 @@ def main():
         "--parallel-workers",
         type=int,
         default=None,
-        help="并发执行线程数 (默认: 4)",
+        help="并发执行线程数 (默认: 3；仅作用于 stage4 与 bars 内部池，stage2/3/5 固定串行)",
     )
     parser.add_argument(
         "--symbols",

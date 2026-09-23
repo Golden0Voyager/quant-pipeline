@@ -484,3 +484,37 @@ def test_event_batch_operational_error_propagates(tmp_path):
             )
     finally:
         provider.close()
+
+
+def test_latest_date_getters_log_warning_on_db_error(caplog):
+    """P2-11：get_*_latest_date 的 None 只能代表「表空/无行」，不能静默吞 DB 故障。
+
+    6 个轻量 getter 在 db_path 不可用时必须各产生一条 WARNING（含方法名），
+    返回值仍为 None（方向不变，freshness 上游语义不受影响）。
+    还原旧的 ``except Exception: return None`` 会让本测试变红 —— red-proof。
+    """
+    import logging
+
+    from providers import SmartMoneyDBProvider
+
+    provider = SmartMoneyDBProvider()
+    broken = str(provider.db_path) + "/definitely/not/here.db"
+    with caplog.at_level(logging.WARNING, logger="providers"), patch.object(provider._db, "db_path", broken):
+        assert provider.get_latest_bar_date("000001.SZ") is None
+        assert provider.get_global_assets_latest_date("SPY") is None
+        assert provider.get_hk_tech_latest_date() is None
+        assert provider.get_cftc_cot_latest_date("goods") is None
+        assert provider.get_futures_latest_date("RB0") is None
+        assert provider.get_lithium_spot_latest_date() is None
+    failed = [r for r in caplog.records if "查询失败" in r.message]
+    assert len(failed) == 6, f"预期 6 条查询失败告警，实得 {len(failed)}: {caplog.text}"
+    for name in (
+        "get_latest_bar_date",
+        "get_global_assets_latest_date",
+        "get_hk_tech_latest_date",
+        "get_cftc_cot_latest_date",
+        "get_futures_latest_date",
+        "get_lithium_spot_latest_date",
+    ):
+        assert name in caplog.text, f"缺少 {name} 的告警"
+    provider.close()
