@@ -206,17 +206,18 @@ def audit_database(
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         all_tables = [row[0] for row in cursor.fetchall()]
 
-        registry_tables = set()
+        registry_tables: set[str] = set()
         for spec in registry.values():
             registry_tables.update(spec.tables)
 
         for table in all_tables:
-            spec = None
+            # 不能复用外层循环的 spec（它已绑定为 TaskSpec，再赋 None 会触发 no-redef）
+            matched: TaskSpec | None = None
             for ts in registry.values():
                 if table in ts.tables:
-                    spec = ts
+                    matched = ts
                     break
-            health = _check_table(table, conn, spec, registry_tables)
+            health = _check_table(table, conn, matched, registry_tables)
             report.tables.append(health)
             if health.status == "healthy":
                 report.healthy_count += 1
