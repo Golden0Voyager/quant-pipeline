@@ -55,7 +55,7 @@ def _get_trade_dates_since(start: datetime, end: datetime) -> list[str]:
 
 def _get_recent_trade_dates(n: int) -> list[str]:
     """返回最近 N 个交易日（从今天往前）。"""
-    dates = []
+    dates: list[str] = []
     d = datetime.now()
     while len(dates) < n:
         if _is_trade_day(d):
@@ -188,7 +188,9 @@ def main() -> int:
     conn.commit()
 
     session = requests.Session()
-    session.proxies = {"http": None, "https": None}
+    # None 表示「该 scheme 不走代理」，是 requests 的既有惯用法；
+    # typeshed 把 proxies 标注为 str，故显式忽略这一条
+    session.proxies = {"http": None, "https": None}  # type: ignore[dict-item]
     session.trust_env = False
 
     total_saved = 0
