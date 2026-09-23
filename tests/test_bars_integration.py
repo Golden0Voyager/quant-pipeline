@@ -12,6 +12,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -211,7 +212,7 @@ class TestBarsResume:
     def test_resume_rejects_scope_restrictions_without_changing_progress(
         self,
         tmp_path: Path,
-        scope_kwargs: dict[str, object],
+        scope_kwargs: dict[str, Any],
     ):
         """resume 与范围限制组合必须显式失败并保留原 checkpoint。"""
         db = MagicMock()
