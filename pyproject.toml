@@ -91,6 +91,15 @@ module = [
     "smartmoney_hunter.*",
     "tradingagents",
     "tradingagents.*",
+    # 平台条件依赖：CI 是 Ubuntu，本地开发机是 macOS，同一条 import 的
+    # 解析结果不同，会让门禁结果随操作系统翻转。
+    # py-mini-racer 是 akshare 的 Linux 专属传递依赖，uv.lock 锁在 0.6.0
+    # （无 py.typed），因此只在 CI 上触发 import-untyped；macOS 侧该 marker
+    # 为假，本地装的是 mini-racer（带 py.typed）而不是它。
+    # 已用「把无 py.typed 的包放进临时 venv 的 site-packages + --python-executable」
+    # 在本地复现过该报错，确认需豁免。
+    "py_mini_racer",
+    "py_mini_racer.*",
 ]
 ignore_missing_imports = true
 
