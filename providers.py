@@ -826,7 +826,7 @@ class SmartMoneyDBProvider:
     def save_margin_trading_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_margin_trading_batch(records)
 
-    def get_margin_trading(self, symbol: str, date: str = None) -> dict | None:
+    def get_margin_trading(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_margin_trading(symbol, date)
 
     def save_dragon_tiger(self, symbol: str, data: dict[str, Any]) -> int:
@@ -884,7 +884,7 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 龙虎榜批量保存失败: {e}")
             return 0
 
-    def get_dragon_tiger(self, symbol: str, date: str = None) -> dict | None:
+    def get_dragon_tiger(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_dragon_tiger(symbol, date)
 
     def save_shareholder_count(self, symbol: str, data: dict[str, Any]) -> None:
@@ -1054,7 +1054,7 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 大宗交易批量保存失败: {e}")
             return 0
 
-    def get_block_trade(self, symbol: str, date: str = None) -> dict | None:
+    def get_block_trade(self, symbol: str, date: str | None = None) -> dict | None:
         return self._db.get_block_trade(symbol, date)
 
     def save_placement_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1103,7 +1103,7 @@ class SmartMoneyDBProvider:
     def save_sector_fund_flow_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_sector_fund_flow_batch(records)
 
-    def get_sector_fund_flow(self, sector_name: str, date: str = None) -> dict | None:
+    def get_sector_fund_flow(self, sector_name: str, date: str | None = None) -> dict | None:
         return self._db.get_sector_fund_flow(sector_name, date)
 
     def save_historical_valuation(self, symbol: str, trade_date: str, data: dict[str, Any]) -> None:
@@ -1142,10 +1142,10 @@ class SmartMoneyDBProvider:
     def save_sector_industry(self, data: dict[str, Any]) -> None:
         self._db.save_sector_industry(data)
 
-    def get_sector_industry(self, industry_name: str, trade_date: str = None) -> dict | None:
+    def get_sector_industry(self, industry_name: str, trade_date: str | None = None) -> dict | None:
         return self._db.get_sector_industry(industry_name, trade_date)
 
-    def get_fundamentals_batch(self, trade_date: str = None) -> pd.DataFrame:
+    def get_fundamentals_batch(self, trade_date: str | None = None) -> pd.DataFrame:
         return self._db.get_fundamentals_batch(trade_date)
 
     def save_north_hold_batch(self, records: list[dict[str, Any]]) -> int:
@@ -1427,7 +1427,7 @@ class SmartMoneyDBProvider:
     def save_global_assets_bars_batch(self, records: list[dict[str, Any]]) -> int:
         return self._db.save_global_assets_bars_batch(records)
 
-    def watchlist_get_all(self, status: str = None) -> pd.DataFrame:
+    def watchlist_get_all(self, status: str | None = None) -> pd.DataFrame:
         return self._db.watchlist_get_all(status)
 
     def save_chip_distribution(self, symbol: str, data: dict[str, Any]) -> None:
