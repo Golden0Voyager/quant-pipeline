@@ -10,6 +10,7 @@ import pandas as pd
 from core.calendar import get_expected_latest_trading_day
 from core.data_contract import OPTION_SENTIMENT_CONTRACT, validate_records
 from core.source_client import get_default_client
+from core.utils import to_float as _to_float
 from interface import DatabaseInterface
 
 try:
@@ -26,16 +27,6 @@ def _to_int(val: Any) -> int | None:
     try:
         v = int(float(val))
         return None if pd.isna(val) else v
-    except (ValueError, TypeError):
-        return None
-
-
-def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        return None if pd.isna(v) else v
     except (ValueError, TypeError):
         return None
 
