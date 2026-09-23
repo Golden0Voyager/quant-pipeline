@@ -55,9 +55,9 @@ ignore = ["E501"]
 # （只装在 quant_hunter venv），项目根必须参与模块名解析，否则 mypy 会以
 # "source file found twice under different module names" 直接退出、一行都不检查。
 #
-# files 只列生产代码：tests/ 目前有 28 个错误，全部来自测试夹具的
-# **dict[str, object] 解包与 Mock 属性访问，属测试代码自身的类型问题；
-# 先让生产代码成为硬门禁，测试清理后再加入。
+# files 覆盖生产代码与 tests/：全仓门禁，任何一处类型错误都会让 CI 变红。
+# （tests/ 曾有 34 个错误，集中在夹具的 **dict[str, object] 解包、Mock 属性访问、
+#   以及测试替身与 Protocol/具体类的签名不兼容，已逐项修完。）
 explicit_package_bases = true
 mypy_path = "."
 warn_unused_ignores = true
@@ -66,6 +66,7 @@ files = [
     "tasks",
     "tui",
     "scripts",
+    "tests",
     "daily_pipeline.py",
     "interface.py",
     "providers.py",
