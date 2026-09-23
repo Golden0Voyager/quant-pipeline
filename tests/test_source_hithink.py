@@ -9,7 +9,7 @@ no real network.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -72,7 +72,8 @@ class _FakeSession:
 
 def _client(payloads: list[dict]) -> tuple[HithinkClient, _FakeSession]:
     session = _FakeSession(payloads)
-    return HithinkClient(api_key="test-key", session=session), session
+    # 测试替身只实现用到的 get()，与 requests.Session 无继承关系，故显式 cast
+    return HithinkClient(api_key="test-key", session=cast(Any, session)), session
 
 
 # ── to_thscode ───────────────────────────────────────────────────────────
@@ -159,7 +160,7 @@ class TestFetchDailyBars:
 
     def test_missing_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
-        client = HithinkClient(session=_FakeSession([]))
+        client = HithinkClient(session=cast(Any, _FakeSession([])))
         assert not client.available
         with pytest.raises(HithinkError, match="未配置"):
             client.fetch_daily_bars("600519")
