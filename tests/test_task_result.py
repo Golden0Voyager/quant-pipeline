@@ -20,11 +20,11 @@ class TestTaskStatusContract:
 
     def test_no_data_without_reason_raises(self):
         with pytest.raises(TypeError):
-            TaskResult.no_data("x")  # type: ignore[call-arg]
+            TaskResult.no_data("x")
 
     def test_failed_requires_error_kind(self):
         with pytest.raises(TypeError):
-            TaskResult.failed("x", "missing date")  # type: ignore[call-arg]
+            TaskResult.failed("x", "missing date")
 
     def test_failed_exit_failure(self):
         result = TaskResult.failed("x", ErrorKind.SCHEMA_DRIFT, "missing date")
@@ -72,7 +72,7 @@ class TestTaskStatusContract:
 
     def test_degraded_requires_error_kind(self):
         with pytest.raises(TypeError):
-            TaskResult.degraded("x", "partial")  # type: ignore[call-arg]
+            TaskResult.degraded("x", "partial")
 
 
 class TestNormalizeTaskResult:
