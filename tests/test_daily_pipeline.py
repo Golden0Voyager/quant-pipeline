@@ -3984,7 +3984,7 @@ def test_health_check_db_error():
 # ===========================================================================
 # get_expected_latest_trading_day
 # ===========================================================================
-def test_get_expected_latest_trading_day_weekday():
+def test_get_expected_latest_trading_day_weekday(pinned_trading_calendar):
     from core.calendar import get_expected_latest_trading_day
 
     with patch("core.market_time.datetime") as m:
@@ -3993,13 +3993,14 @@ def test_get_expected_latest_trading_day_weekday():
         assert result == "2026-06-22"  # same day after hours
 
 
-def test_get_expected_latest_trading_day_monday_before_market():
+def test_get_expected_latest_trading_day_monday_before_market(pinned_trading_calendar):
     from core.calendar import get_expected_latest_trading_day
 
     with patch("core.market_time.datetime") as m:
         m.now.return_value = datetime(2026, 6, 22, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         result = get_expected_latest_trading_day()
-        assert result == "2026-06-19"  # previous Friday
+        # 06-19 端午休市，上一交易日是 06-18；周末回退会错给出 06-19
+        assert result == "2026-06-18"
 
 
 # ===========================================================================
