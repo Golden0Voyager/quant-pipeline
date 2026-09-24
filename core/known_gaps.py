@@ -22,6 +22,46 @@
 
 所以这里是「显式声明」而非「静默豁免」：每条都写明日期、影响范围、成因。
 ``tasks/utility.py::health_check`` 只对**不在册**的空洞告警。
+
+第二种形态：整日缺席（2026-09-24 新增）
+──────────────────────────────────────
+上一种空洞是「某天跑了，但某个字段没写」；还有一种更粗的：**整天什么都没写**。
+以审计期（2026-07-24 起）为例，有 6 个交易日对**全部**探针表都没有任何行：
+``2026-08-03``/``08-19``/``08-21``/``09-02``/``09-14``/``09-16``。逐日查证后
+它们其实是**两种不同的形态**（这是本节的要点，不要合并叙述）：
+
+* **部分运行**（08-03 / 08-19 / 08-21 / 09-02）：当天天管线**启动过**，但只跑了
+  一小部分任务就结束——日志与 ``ingestion_runs`` 都在。例如 08-21 只有 1 条记录
+  （``health_check`` degraded），08-03 只有 2 条，08-19/09-02 各 12–13 条且**不含**
+  任何按交易日写入探针表的任务。这正是 ``core/run_state.py`` 那一类问题的历史版本
+  ——但 ``run_state`` 是 2026-09-24 才加的，这些历史日无标记可查。
+* **完全未启动**（09-14 / 09-16）：既无日志文件、也无任何任务记录。
+
+实测受影响的表：每个交易日都应有行的 10 张表在这 6 天全空
+（``fundamentals``/``historical_valuation``/``fund_flow``/``ah_premium``/``block_trade``/
+``index_daily``/``limit_up_down``/``sector_industry``/``sector_valuation``/
+``sector_fund_flow``，对照日 09-15 分别有 4–5562 行）。
+
+为何不会自愈：这些任务的作用域固定在 ``get_expected_latest_trading_day()``
+（实测 11 个写入方**签名都不接受日期参数**），因此那天一旦过去就再也不会被回访
+——与上一种空洞同一机理。仓库里已有的自愈先例是 ``update_margin_trading``：它回看
+最近 3 个交易日、逐日尝试直到成功（实测后果：``margin_trading`` 在 09-14 有 4105 行，
+而 09-15/09-16 反为空——回看只在当日源端尚未发布时才会落到前一日）。把这个模式
+推广到其余任务，是**独立工作项**。
+
+回补判定（2026-09-24 逐一查证）：
+
+* **不可回补**：``fundamentals``/``historical_valuation``（雪球接口与
+  ``stock_zh_ah_spot_em`` 都只给**实时**值，历史日期拿不到）、``ah_premium`` 的
+  A/H 部分同理。
+* **抓取层可回补、但任务层缺入口**：``block_trade``（``stock_dzjy_mrmx`` 带
+  ``start_date``/``end_date``）、``limit_up_down``（``stock_lhb_detail_em`` 同理）、
+  ``index_daily``（``stock_zh_index_daily_tx`` 返回全历史）、``sector_*``
+  （``stock_board_industry_hist_em`` 带 ``start_date``/``end_date``）。这些接口能
+  按历史日期取数，但任务函数不接日期参数，所以回补同样要等到「给任务加日期入口」。
+
+因此这里也是「已声明」而不是「装作无事」：漏跑的那几天，数据确实少了，
+而且其中一部分可能永远补不回来。
 """
 
 from __future__ import annotations
@@ -99,6 +139,70 @@ KNOWN_GAPS: tuple[KnownGap, ...] = (
         "且当日 health_check 亦未运行，故无人发现",
     ),
 )
+
+
+@dataclass(frozen=True)
+class MissingDay:
+    """一个**整日缺席**的交易日：当天对所有按交易日应有的表都没有写入任何行。
+
+    Attributes
+    ----------
+    date:
+        缺席的交易日（``YYYY-MM-DD``）。
+    cause:
+        已核实的成因。整日缺席的成因几乎都是「当天天管线未被触发」——本管线靠
+        手动触发（见模块 docstring），所以成因要写明具体证据，不能只写「没跑」。
+    """
+
+    date: str
+    cause: str
+
+
+# 每条都可在生产库 + 日志目录里复核：
+#   SELECT task_name, status FROM ingestion_runs WHERE started_at LIKE '<date>%';
+#   ls ~/Code/quant_data/logs/smartmoney_<date 去横线>.log
+#   SELECT COUNT(*) FROM fundamentals WHERE trade_date = '<date>';  -- 应为 0，而对照日非 0
+KNOWN_MISSING_DAYS: tuple[MissingDay, ...] = (
+    MissingDay(
+        "2026-08-03",
+        "部分运行后被终止：仅 2 条任务记录（update_chip_distribution_em failed、"
+        "health_check degraded），日志末行为 `daily_pipeline.py --task all --force exited with code 143`",
+    ),
+    MissingDay(
+        "2026-08-19",
+        "部分运行：13 条任务记录（update_bars/update_futures/retry/health_check 等），"
+        "不含任何按交易日写入探针表的任务",
+    ),
+    MissingDay(
+        "2026-08-21",
+        "只跑了 health_check（1 条记录，degraded），无任何数据任务",
+    ),
+    MissingDay(
+        "2026-09-02",
+        "部分运行：12 条任务记录（update_bars degraded 等），不含 fundamentals/"
+        "historical_valuation/fund_flow 等写入方",
+    ),
+    MissingDay("2026-09-14", "既无日志文件也无任务记录 ⇒ 当天天管线未被启动"),
+    MissingDay("2026-09-16", "既无日志文件也无任务记录 ⇒ 当天天管线未被启动"),
+)
+
+
+def declared_missing_days() -> frozenset[str]:
+    """全部已声明的整日缺席日期。"""
+    return frozenset(day.date for day in KNOWN_MISSING_DAYS)
+
+
+def is_known_missing_day(date: str) -> bool:
+    """该交易日的整日缺席是否已声明。"""
+    return date in declared_missing_days()
+
+
+def describe_missing_day(date: str) -> str | None:
+    """返回该整日缺席的已核实成因；未登记时返回 ``None``。"""
+    for day in KNOWN_MISSING_DAYS:
+        if day.date == date:
+            return day.cause
+    return None
 
 
 def known_gap_dates(table: str, column: str) -> frozenset[str]:
