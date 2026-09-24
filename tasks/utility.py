@@ -19,7 +19,9 @@ import pandas as pd  # noqa: F401
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import DB_PATH, SHARED_DATA_DIR  # noqa: F401
+from core.known_gaps import AUDIT_ERA_START, describe_known_gap, is_known_gap
 from core.monitor import AkShareMonitor  # noqa: F401
+from core.run_state import describe_run_state, read_run_state
 from core.utils import is_real_db_path, should_skip_beijing, should_update  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
 
@@ -322,6 +324,61 @@ def health_check(db: DatabaseInterface, fast: bool = False) -> dict:
                 issues.append(f"fundamentals.dividend_yield 当日非空率过低: {dy_pct:.1f}% (< 40%)")
     except sqlite3.OperationalError as exc:
         report_lines.append(f"  字段级质量断言跳过（表/列缺失）: {exc}")
+
+    # ── 历史日期空洞巡检（2026-09-24 新增） ──
+    # 上面那条断言只看 MAX(trade_date)，所以旧日期的空洞一旦不再是最新日期就
+    # 永久不可见；而 update_market_snapshot 的作用域就是 MAX(trade_date)，那些
+    # 空洞也不会自愈。这里扫描审计期内的全部日期，区分「已声明空洞」
+    # （core/known_gaps.py，已核实不可回补）与「新增空洞」，只对后者告警：
+    # 否则每次巡检都会重报同一批旧噪音，人就会开始无视它（2026-08 连续 8 次
+    # 告警无人处理正是如此），真正的新空洞也就淹没了。
+    try:
+        gap_rows = cursor.execute(
+            "SELECT trade_date, COUNT(*) AS total,"
+            " SUM(CASE WHEN dividend_yield IS NOT NULL THEN 1 ELSE 0 END) AS filled"
+            " FROM fundamentals WHERE trade_date >= ?"
+            " GROUP BY trade_date ORDER BY trade_date",
+            (AUDIT_ERA_START,),
+        ).fetchall()
+        known_hits: list[tuple[str, float]] = []
+        new_holes: list[tuple[str, float]] = []
+        for gap_date, gap_total, gap_filled in gap_rows:
+            if not gap_total:
+                continue
+            hole_pct = 100 * (gap_filled or 0) / gap_total
+            if hole_pct >= 40:
+                continue
+            target = known_hits if is_known_gap("fundamentals", "dividend_yield", gap_date) else new_holes
+            target.append((gap_date, hole_pct))
+
+        report_lines.append(
+            f"\n  股息率空洞巡检（{AUDIT_ERA_START} 起）: "
+            f"已声明 {len(known_hits)} 个，新增 {len(new_holes)} 个"
+        )
+        for gap_date, hole_pct in known_hits:
+            cause = describe_known_gap("fundamentals", "dividend_yield", gap_date)
+            report_lines.append(f"    {gap_date} ({hole_pct:.1f}%) 已声明：{cause}")
+        for gap_date, hole_pct in new_holes:
+            issues.append(
+                f"新增股息率空洞: {gap_date} 非空率 {hole_pct:.1f}% 且未登记在 core/known_gaps.py"
+            )
+    except sqlite3.OperationalError as exc:
+        report_lines.append(f"  股息率空洞巡检跳过（表/列缺失）: {exc}")
+
+    # ── 运行完整性（2026-09-24 新增） ──
+    # 部分运行的危害见 core/run_state.py：任务全 success、无告警，只留下数据空洞。
+    # run_all 会在下一轮开始时主动告警；这里是第二道防线——针对那些不经过
+    # run_all 的调用（如 --task 单任务）期间遗留的 in-progress 标记。
+    try:
+        run_state = read_run_state(db)
+        report_lines.append(f"\n  上一轮管道状态: {describe_run_state(db)}")
+        if run_state is not None and run_state[0] == "in-progress" and run_state[1] != today:
+            issues.append(
+                f"上一轮管道未完整结束: {run_state[1]} 开始后没有完成记录，该轮数据可能不完整"
+            )
+    except Exception as exc:  # noqa: BLE001 - 巡检不应因标记读取失败而整体失败
+        report_lines.append(f"  运行状态标记读取失败: {exc}")
+
     # ── 碎片空间检查 ──
     try:
         cursor.execute("PRAGMA page_count")
