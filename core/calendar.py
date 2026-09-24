@@ -168,6 +168,21 @@ def get_expected_latest_trading_day(now: datetime | None = None) -> str:
     return _expected_from_weekday(now)
 
 
+def trading_days_between(start: str, end: str) -> list[str]:
+    """返回 ``[start, end]`` 区间内的交易日（含两端），按旧到新排列。
+
+    只读本地缓存、**不触发网络**（与 ``get_expected_latest_trading_day`` 同一理由：
+    巡检会在一次运行里反复调用它）。日历缓存缺失或未覆盖 ``end`` 时返回**空列表**
+    —— 调用方应据此跳过判断，而不是把每个工作日都当成交易日（那会造出一批假空洞）。
+    """
+    if start > end:
+        return []
+    trade_dates = _load_calendar_covering(end)
+    if trade_dates is None:
+        return []
+    return [d for d in trade_dates if start <= d <= end]
+
+
 def get_recent_trading_days(end_date: str, count: int) -> list[str]:
     """返回不晚于 end_date 的最近若干交易日，按新到旧排列。"""
     if count <= 0:
