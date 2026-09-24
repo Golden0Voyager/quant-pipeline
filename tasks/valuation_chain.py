@@ -9,6 +9,7 @@ from __future__ import annotations
 import json  # noqa: F401
 import logging
 import os
+import sqlite3
 import time
 from datetime import timedelta
 from typing import Any
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 # 当 fundamentals 表某日记录数达到该阈值时，视为已完成并跳过
 MIN_FUNDAMENTALS_STOCK_COUNT = 5000
+
+# dividend_yield 当日非空率达到该比例即视为已补充（雪球对全市场的覆盖率约 60-70%）。
+# 同一个阈值同时用于「跳过判定」与「本轮是否算成功」——两处若不一致，就会出现
+# 「跳过判定认为没做完、成功判定认为做完了」的错配。
+DIVIDEND_YIELD_MIN_RATIO = 0.4
 
 
 # ===========================================================================
@@ -350,6 +356,28 @@ def fetch_market_snapshot_quotes(
 # ===========================================================================
 
 
+def _dividend_yield_coverage(db_path: str, trade_date: str) -> tuple[int, int]:
+    """返回 ``(总行数, dividend_yield 非空行数)``；表/列缺失时返回 ``(0, 0)``。
+
+    用数据实态而非「写了多少行」判定成败：``cursor.rowcount`` 受
+    ``dividend_yield IS NULL OR dividend_yield = 0`` 这个 WHERE 条件影响，
+    而覆盖率才是本任务真正要达成的目标。
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*),"
+            " SUM(CASE WHEN dividend_yield IS NOT NULL THEN 1 ELSE 0 END)"
+            " FROM fundamentals WHERE trade_date = ?",
+            (trade_date,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return (0, 0)
+    finally:
+        conn.close()
+    return (int(row[0] or 0), int(row[1] or 0))
+
+
 def update_market_snapshot(db: DatabaseInterface) -> dict:
     """
     通过雪球 batch/quote API 批量获取全市场实时行情指标，
@@ -399,7 +427,7 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
         ).fetchone()
         filled = filled or 0
         # 非空率 >= 40% 视为已补充（雪球对全市场的覆盖率约 60-70%）
-        min_filled = max(1, int((total_rows or 0) * 0.4))
+        min_filled = max(1, int((total_rows or 0) * DIVIDEND_YIELD_MIN_RATIO))
     except sqlite3.OperationalError:
         # 旧库/测试 fixture 可能缺 dividend_yield 列，退回旧行为（视为已补充）
         filled = min_filled = 0
@@ -480,28 +508,76 @@ def update_market_snapshot(db: DatabaseInterface) -> dict:
 
     # 3. 写回数据库 — 只补充 dividend_yield (不覆盖现有 pe_ttm/pb/market_cap)
     updated = 0
+    missing_field = 0
     if all_quotes:
         conn = sqlite3.connect(str(db.db_path))
         cursor = conn.cursor()
         for q in all_quotes:
             div_yield = q.get("dividend_yield")
-            if div_yield is not None:
-                cursor.execute(
-                    """UPDATE fundamentals SET dividend_yield = ?
-                       WHERE ts_code = ? AND trade_date = ?
-                       AND (dividend_yield IS NULL OR dividend_yield = 0)""",
-                    (div_yield, q["code"], target_date),
-                )
-                if cursor.rowcount:
-                    updated += 1
+            if div_yield is None:
+                # 源未返回该字段（接口改版/该股未覆盖）：单独计数，好让下面的
+                # 失败信息能区分「源没给」与「日期对不上」
+                missing_field += 1
+                continue
+            cursor.execute(
+                """UPDATE fundamentals SET dividend_yield = ?
+                   WHERE ts_code = ? AND trade_date = ?
+                   AND (dividend_yield IS NULL OR dividend_yield = 0)""",
+                (div_yield, q["code"], target_date),
+            )
+            if cursor.rowcount:
+                updated += 1
         conn.commit()
         conn.close()
-        logger.info(f"✅ dividend_yield 补充完成: {updated} 只")
-        db.record_task_run("update_market_snapshot", target_date)
-    else:
-        logger.warning("⚠️  雪球行情未获取到数据")
 
-    return {"status": "success", "saved": len(all_quotes), "total": total, "updated": updated}
+    # ── 成败以数据实态判定，而不是以「抓了多少条」判定 ──
+    # 旧版返回 {"status": "success", "saved": len(all_quotes)}：saved 记的是抓取数，
+    # 于是 2026-08-12 在「抓到 5203 条、实际写入 0 行」的情况下，ingestion_runs
+    # 记下 saved_rows=5203 且 status=success，而 fundamentals 当日整列为 NULL；
+    # core/task_result.py 的 saved>0 → SUCCESS 规则又把这份绿色固化下来。
+    # 又因为作用域是 MAX(trade_date)，该日期此后永不被回访 → 静默永久空洞。
+    if not all_quotes:
+        logger.warning("⚠️  雪球行情未获取到数据")
+        return {
+            "status": "failed",
+            "error_kind": "network",
+            "error": f"雪球行情未返回任何报价（target_date={target_date}），股息率未补充",
+            "saved": 0,
+            "total": total,
+            "updated": 0,
+        }
+
+    filled_after, total_rows_after = _dividend_yield_coverage(str(db.db_path), target_date)
+    if total_rows_after == 0:
+        # 当日无行或列缺失：不做覆盖率判定，退回「有写入即成功」
+        reached = updated > 0
+    else:
+        reached = filled_after >= max(1, int(total_rows_after * DIVIDEND_YIELD_MIN_RATIO))
+
+    if not reached:
+        logger.error(
+            f"❌ dividend_yield 未达达标线: 当日非空 {filled_after}/{total_rows_after}"
+            f"；抓取 {len(all_quotes)} 条、其中 {missing_field} 条无该字段、实际写入 {updated} 行"
+        )
+        return {
+            "status": "failed",
+            "error_kind": "data_quality",
+            "error": (
+                f"股息率未达达标线（target_date={target_date}）：非空 {filled_after}/{total_rows_after}"
+                f"；抓取 {len(all_quotes)} 条，{missing_field} 条无 dividend_yield 字段，写入 {updated} 行"
+            ),
+            "saved": 0,
+            "total": total,
+            "updated": updated,
+        }
+
+    # 只有真正达标才落「已完成」标记：否则 task_runs 会让下一轮的跳过判定
+    # 误以为该日已补充完毕（2026-08-25 即如此被标记为完成）。
+    db.record_task_run("update_market_snapshot", target_date)
+    logger.info(
+        f"✅ dividend_yield 补充完成: 更新 {updated} 行，当日非空 {filled_after}/{total_rows_after}"
+    )
+    return {"status": "success", "saved": updated, "total": total, "updated": updated}
 
 
 # ===========================================================================

@@ -66,6 +66,40 @@
 
 ---
 
+## 🔔 无人值守运行的三条已核实事实
+
+夜跑无人值守且次日 09:30 才需要用数据，因此下面三条直接决定「出问题时你能否知道」。
+
+### 1. 通知默认**不外发**，必须显式配置
+- `core/notifications.py` 的 `NOTIFICATION_TYPE` 默认 `"console"` —— **只写日志，不推送**。
+  要真正收到通知：`.env` 里设 `NOTIFICATION_TYPE=bark`（可多通道，逗号分隔 `webhook,bark`）
+  并填 `BARK_DEVICE_KEY`；`webhook` 通道另需 `NOTIFICATION_WEBHOOK_URL`（飞书/钉钉/企业微信通用文本格式）。
+- `NOTIFICATION_LEVEL` 默认 `error`，会抑制 `warning`（保留旧数据）与 `info`（全部完成）。
+- Bark 推送**失败时仍返回 HTTP 200**，成败看响应体 `code` —— 通道实现已处理，不要改回只看 HTTP 状态。
+- `.env` 由 `core.config` 在导入时加载，而本模块在**导入时**读常量，故 `core/notifications.py`
+  自行保证 `.env` 已加载（那行 import 不要删，否则入口导入顺序会静默让配置读成空值）。
+
+### 2. 空洞必须登记，否则告警会失去意义
+- `core/known_gaps.py` 是**已声明、已接受、且经核实不可回补**的空洞登记册；
+  `health_check` 只对**不在册**的空洞告警。
+- 增删条目要过 `tests/test_known_gaps.py`（钉住 6 个股息率空洞）——为了让报告变绿而删条目会直接红。
+- 已登记的 6 个 `fundamentals.dividend_yield` 空洞为何回补不了：雪球接口只给实时值、
+  `historical_valuation` 是 `fundamentals` 的副本（同样为空）、`dividend_summary` 无 `trade_date`。
+
+### 3. 「这一轮没跑完」是可编程信号
+- `core/run_state.py` 在 `task_runs` 写 `in-progress:<date>` / `complete:<date>`；
+  `run_all` 下一轮开始时发现遗留 `in-progress` 即告警，`health_check` 是第二道防线。
+- 造洞机制正是部分运行：09-17 只跑 31 个任务（有 `update_fundamentals`、无 `update_market_snapshot`），
+  而这 31 个任务**全部 success**，所以当时没有任何告警。不要把它当成「看一眼日志就好」。
+
+### 4. 写路径必须区分「抓到」与「写入」
+- `update_market_snapshot` 的 `saved` 是**真实写入行数**，且抓到报价但 `updated == 0` 时返回
+  `failed/data_quality`。旧版返回 `saved=len(all_quotes)` + 硬写 `success`，于是
+  `ingestion_runs` 记下 `saved_rows=5203` 而表里整列为 NULL（2026-08-12），且因作用域是
+  `MAX(trade_date)`，该日期此后永不被回访 → 静默永久空洞。新增写库任务请沿用同一原则。
+
+---
+
 ## 🧪 回归测试规范(red-proof)
 
 每项 P0/P1 修复必须附带**会因旧代码变红**的测试(不能只在"新状态"下断言绿):
@@ -90,3 +124,7 @@
 | P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | ✅ 已修复 (PR #114):代码默认对齐生产生效值 3(`.env` 实测),help 修正为真实作用域(仅 stage4 与 bars 内部池),ULTRA_SAFE 钉回 1 |
 | P2-10 `_to_float` 在 13 个模块重复 | P2 | ✅ 已修复 (PR #115):抽到 `core/utils.py` 的 `to_float`(非新建 `ak_utils.py`);`strip_percent` 开关只给 `stock_pledge`(其接口返回 `"3.5%"`),其余 12 个模块行为逐字不变(其中 `tasks/hkscc_holder.py` 已于 PR #117 删除;现存 12 个 `tasks/` 模块复用该实现,含 `stock_pledge` 的适配器) |
 | P2-11 `get_*_latest_date` 吞 `Exception` | P2 | ✅ 已修复 (PR #114):6 处收窄至 `(sqlite3.Error, OSError)` 并 WARNING 告警,`None` 仅代表「表空/无行」 |
+| P2-12 `update_market_snapshot` 静默空写:`saved` 记的是抓取数且硬写 `success` | P2 | ✅ 已修复 (PR #121):`saved` 改为真实写入行数,抓取非空但 `updated == 0` 时返回 `failed/data_quality`,`error` 里区分「源没给字段」与「日期对不上」;仅真正达标才落「已完成」标记。红证:还原旧实现会让 `tests/test_valuation_chain_integration.py::TestUpdateMarketSnapshotWithToken` 三个用例变红(含 `assert 2 == 1`) |
+| P2-12b 上条造成的 6 个不可回补空洞 + 缺检测/修复环节 | P2 | ✅ 已处理 (PR #121):新增空洞登记册 `core/known_gaps.py`(6 个日期,已核实不可回补),`health_check` 改为扫描审计期全部日期并只对**新增**空洞告警;登记册条目被删会红(`tests/test_known_gaps.py`) |
+| P2-12c 部分运行无告警、无自愈(09-17 只跑 31 个任务且全 success) | P2 | ✅ 已修复 (PR #121):新增 `core/run_state.py` 运行完整性标记,`run_all` 下一轮开始即检测上一轮遗留的 `in-progress` 并告警,`health_check` 作第二道防线 |
+| P2-13 「无人值守告警」实际只写日志(`NOTIFICATION_TYPE` 默认 `console`) | P2 | ✅ 已修复 (PR #121):新增 Bark 通道(按响应体 `code` 判成败,不只看 HTTP 200)、`NOTIFICATION_TYPE` 支持逗号分隔多通道、缺凭据明确告警;`.env` 加载顺序隐患一并消除 |
