@@ -23,16 +23,16 @@ import pandas as pd
 # （2026-08-01 事故：单只股票的静默连接卡住整个回补 27+ 分钟）
 socket.setdefaulttimeout(20)
 
-_CODE_DIR = str(Path("~/Code").expanduser())
-if _CODE_DIR not in sys.path:
-    sys.path.insert(0, _CODE_DIR)
-# 仓库根目录：fetch_xueqiu_turnover 需要 import core.stock_cyq_em
+# 仓库根目录必须就地注入：本脚本以 `python scripts/repair_turnover.py` 直接执行，
+# 此时 `sys.path[0]` 是 scripts/，还 import 不到 core。注入之后，兄弟仓库
+# （`smartmoney_hunter`）的路径交给 `core._bootstrap` 统一处理。
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-_HUNTER_SRC = str(Path("~/Code/quant_hunter/src").expanduser())
-if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
-    sys.path.insert(0, _HUNTER_SRC)
+
+from core._bootstrap import ensure_sibling_paths  # noqa: E402
+
+ensure_sibling_paths()
 
 from smartmoney_hunter.market_utils import is_beijing_stock  # noqa: E402
 

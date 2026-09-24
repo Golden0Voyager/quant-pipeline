@@ -3,15 +3,11 @@
 ─────────────
 从 daily_pipeline.py 提取出的 update_bars 和 _update_single_bar。
 """
-# ruff: noqa: E402  -- sys.path setup must happen before package imports
-
 from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import random
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,14 +17,8 @@ from typing import Any
 
 import pandas as pd  # noqa: F401  # DataFrame types used via db/loader returns
 
-# ── 路径设置（与 daily_pipeline.py 一致，使 smartmoney_hunter 可导入）──
-_CODE_DIR = os.path.expanduser("~/Code")
-if _CODE_DIR not in sys.path:
-    sys.path.insert(0, _CODE_DIR)
-_HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
-if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
-    sys.path.insert(0, _HUNTER_SRC)
-
+# 兄弟仓库（`smartmoney_hunter`）的路径由 `tasks/__init__.py` 的包级 choke point 注入
+# （见 `core/_bootstrap.py`），因此这里不再内联 `sys.path` 操作。
 from smartmoney_hunter.market_utils import is_beijing_stock
 
 from core.calendar import get_expected_latest_trading_day, get_recent_trading_days

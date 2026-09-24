@@ -12,11 +12,19 @@ import sqlite3
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 
-from core.task_registry import TASK_REGISTRY, Cadence, TaskSpec
+# 仓库根必须就地注入：以 `python scripts/audit_data_contracts.py ...` 直接执行时
+# `sys.path[0]` 是 scripts/，此时 import 不到 core。而 `tasks/utility.py` 正是把
+# 这条命令打印给运维的，缺了这一句连 `--help` 都跑不起来（实测 ModuleNotFoundError）。
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from core.task_registry import TASK_REGISTRY, Cadence, TaskSpec  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

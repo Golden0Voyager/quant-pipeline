@@ -19,11 +19,19 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from smartmoney_hunter.data_loader import DataLoader
-from smartmoney_hunter.database import DatabaseManager
-from smartmoney_hunter.indicators import IndicatorCalculator
 
-from core.source_record_key import (
+# 兄弟仓库的路径必须在下面几行**之前**注入：`smartmoney_hunter` 不在声明依赖里，
+# 只存在于 `~/Code/quant_hunter/src`。本文件是顶层模块（`import providers`），
+# 没有包级 choke point 可用，所以显式调一次而不是指望调用方先导入过 core。
+from core._bootstrap import ensure_sibling_paths
+
+ensure_sibling_paths()
+
+from smartmoney_hunter.data_loader import DataLoader  # noqa: E402
+from smartmoney_hunter.database import DatabaseManager  # noqa: E402
+from smartmoney_hunter.indicators import IndicatorCalculator  # noqa: E402
+
+from core.source_record_key import (  # noqa: E402
     INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
     STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
     block_trade_source_key,
