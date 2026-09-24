@@ -115,6 +115,39 @@ def test_status_for_table_newly_paneled_periodic_tables():
     assert status_for_table("index_member_history", "2026-07-29", "2026-07-31", None) == "按周更新"
 
 
+def test_non_daily_task_tables_must_be_classified_as_non_daily():
+    """非日频任务写的表必须落在非日频集合里，否则会被按交易日误判。
+
+    这是一条**规则**，而不是例子清单（上面那个测试只盖了当时注意到的三张表）：
+    ``status_for_table`` 的周/月/季分支都以「表在集合里」为前提，一旦某张周期表漏进
+    集合，判定就会 fallthrough 成按日频比较，在完整度面板上永久显示「滞后」且永不自愈。
+    ``fund_holdings`` 与 ``top10_shareholders`` 就是这样漏掉的——它们当时分别因为
+    「表是空的」和「report_date 恰好是未来季末」而没暴露出来。
+
+    只对**有 date_columns 的表**断言：没有日期列的表不进 ``table_date_columns()``，
+    也就不参与任何新鲜度判定，不存在 fallthrough 风险。
+    """
+    from core.freshness import MONTHLY_TABLES, QUARTERLY_TABLES, WEEKLY_TABLES
+    from core.task_registry import TASK_REGISTRY, Cadence
+
+    non_daily_cadences = {Cadence.WEEKLY, Cadence.MONTHLY, Cadence.QUARTERLY}
+    classified = WEEKLY_TABLES | MONTHLY_TABLES | QUARTERLY_TABLES
+    date_columns = table_date_columns()
+    misclassified = sorted(
+        (spec.name, spec.cadence.name, table)
+        for spec in TASK_REGISTRY
+        if spec.cadence in non_daily_cadences
+        for table in spec.tables
+        if table in date_columns and table not in classified
+    )
+    assert not misclassified, (
+        "以下非日频表不在 freshness 的非日频集合里，会被按交易日判定为永久「滞后」：\n"
+        + "\n".join(f"  {task} ({cadence}) -> {table}" for task, cadence, table in misclassified)
+        + "\n请补进 core/freshness.py 的 WEEKLY_TABLES / MONTHLY_TABLES / QUARTERLY_TABLES；"
+        "若该表并非周期发布，而是当日发布较晚，则 DELAYED_PUBLISH_TABLES 才是对应规则。"
+    )
+
+
 def test_get_daily_bars_coverage(tmp_path):
     from core.freshness import get_daily_bars_coverage
     db_file = tmp_path / "test.db"
