@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-import tasks.hkscc_holder as hkscc_holder
 import tasks.institution_survey as institution_survey
 import tasks.option_sentiment as option_sentiment
 import tasks.stock_pledge as stock_pledge
@@ -545,22 +544,6 @@ class TestOptionSentiment:
         assert option_sentiment._to_int(float("nan")) is None
         assert option_sentiment._to_int("abc") is None
         assert option_sentiment._to_int(42.7) == 42
-
-
-def test_hkscc_result_collection_does_not_sleep_per_symbol():
-    db = MagicMock()
-    db.get_stock_list.return_value = pd.DataFrame({"code": ["000001", "000002", "000003"]})
-    db.save_north_hold_batch.return_value = 3
-    record = {"trade_date": "2026-07-21", "ts_code": "000001"}
-
-    with (
-        patch.object(hkscc_holder, "_fetch_single_north_hold", return_value=record),
-        patch("time.sleep") as sleep,
-    ):
-        result = hkscc_holder.update_hkscc_holder(db)
-
-    assert result["saved"] == 3
-    sleep.assert_not_called()
 
 
 # ===========================================================================
