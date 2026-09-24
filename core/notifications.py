@@ -4,8 +4,8 @@
 提供抽象通知通道和 Console/Webhook/Bark 实现。
 Webhook 通道支持飞书/钉钉/企业微信通用文本格式；Bark 通道推送 iOS 通知。
 
-配置（环境变量，需在进程启动前设置）
-────────────────────────────────────
+配置（环境变量，**每次调用时读取**，可在运行期改动）
+────────────────────────────────────────────────────
 ``NOTIFICATION_TYPE``
     逗号分隔的通道列表，取值 ``console`` / ``webhook`` / ``bark``。
     默认 ``console``——**只写日志，不外发**。夜跑无人值守时要真正收到通知，
@@ -31,22 +31,30 @@ import os
 from abc import ABC, abstractmethod
 from urllib.request import Request, urlopen
 
-# 本模块在**导入时**读取下列环境变量常量，而 .env 是在 core.config 导入时加载的。
-# 若某个入口先导入本模块再导入 core.config，配置就会静默读成空值——那正是
-# 「配了却收不到通知」最难查的一类故障。因此这里主动保证 .env 已加载。
+# .env 是在 core.config 导入时加载的。本模块**调用时**读配置，因此需要保证
+# 那一步已经发生——否则 getenv 会静默读成默认值，正是「配了却收不到通知」
+# 最难查的一类故障。这里主动触发 .env 加载。
 # （core.config 只依赖标准库，不存在循环导入。）
 from core.config import load_env_file as _load_env_file  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# 环境变量配置
-NOTIFICATION_WEBHOOK_URL = os.getenv("NOTIFICATION_WEBHOOK_URL", "")
-NOTIFICATION_LEVEL = os.getenv("NOTIFICATION_LEVEL", "error")  # error, warning, info
-NOTIFICATION_TYPE = os.getenv("NOTIFICATION_TYPE", "console")  # console, webhook, bark（可逗号分隔）
+# 配置项的默认值。**不要把这些值缓存成模块常量**：曾经它们就是导入期常量，
+# 后果是所有在导入之后设置的环境变量都被静默忽略——测试里的 monkeypatch.delenv
+# 清不掉它，于是本机配了凭据后，「缺凭据」用例静默变成「有凭据」，测试红而 CI 绿。
+_CONFIG_DEFAULTS = {
+    "NOTIFICATION_LEVEL": "error",  # error, warning, info
+    "NOTIFICATION_TYPE": "console",  # console, webhook, bark（可逗号分隔）
+    "NOTIFICATION_WEBHOOK_URL": "",
+    "BARK_DEVICE_KEY": "",
+    "BARK_SERVER_URL": "https://api.day.app",
+    "BARK_GROUP": "quant_pipeline",
+}
 
-BARK_DEVICE_KEY = os.getenv("BARK_DEVICE_KEY", "")
-BARK_SERVER_URL = os.getenv("BARK_SERVER_URL", "https://api.day.app")
-BARK_GROUP = os.getenv("BARK_GROUP", "quant_pipeline")
+
+def _env(name: str) -> str:
+    """读取一项通知配置（调用时读，缺省见 ``_CONFIG_DEFAULTS``）。"""
+    return os.getenv(name, _CONFIG_DEFAULTS[name])
 
 # Bark 的 level 取值：critical / active / timeSensitive / passive。
 # error 用 timeSensitive 而非 critical：critical 需在 App 内单独授权，且会绕过
@@ -78,7 +86,7 @@ class WebhookChannel(NotificationChannel):
     """Webhook 通知通道：发送到飞书/钉钉通用 Webhook。"""
 
     def __init__(self, webhook_url: str = ""):
-        self.webhook_url = webhook_url or NOTIFICATION_WEBHOOK_URL
+        self.webhook_url = webhook_url or _env("NOTIFICATION_WEBHOOK_URL")
 
     def send(self, level: str, title: str, message: str) -> None:
         if not self.webhook_url:
@@ -127,9 +135,9 @@ class BarkChannel(NotificationChannel):
         server_url: str = "",
         group: str = "",
     ) -> None:
-        self.device_key = device_key or os.getenv("BARK_DEVICE_KEY", BARK_DEVICE_KEY)
-        self.server_url = (server_url or os.getenv("BARK_SERVER_URL", BARK_SERVER_URL)).rstrip("/")
-        self.group = group or os.getenv("BARK_GROUP", BARK_GROUP)
+        self.device_key = device_key or _env("BARK_DEVICE_KEY")
+        self.server_url = (server_url or _env("BARK_SERVER_URL")).rstrip("/")
+        self.group = group or _env("BARK_GROUP")
 
     def send(self, level: str, title: str, message: str) -> None:
         if not self.device_key:
@@ -167,7 +175,7 @@ class BarkChannel(NotificationChannel):
 
 def _configured_types() -> list[str]:
     """``NOTIFICATION_TYPE`` 支持逗号分隔（如 ``webhook,bark``）。"""
-    raw = os.getenv("NOTIFICATION_TYPE", NOTIFICATION_TYPE)
+    raw = _env("NOTIFICATION_TYPE")
     return [part.strip().lower() for part in raw.split(",") if part.strip()]
 
 
@@ -181,14 +189,14 @@ def _get_channels() -> list[NotificationChannel]:
     types = _configured_types()
 
     if "webhook" in types:
-        url = os.getenv("NOTIFICATION_WEBHOOK_URL", NOTIFICATION_WEBHOOK_URL)
+        url = _env("NOTIFICATION_WEBHOOK_URL")
         if url:
             channels.append(WebhookChannel(url))
         else:
             logger.warning("NOTIFICATION_TYPE 含 webhook 但 NOTIFICATION_WEBHOOK_URL 未配置，跳过")
 
     if "bark" in types:
-        key = os.getenv("BARK_DEVICE_KEY", BARK_DEVICE_KEY)
+        key = _env("BARK_DEVICE_KEY")
         if key:
             channels.append(BarkChannel())
         else:
@@ -207,7 +215,7 @@ def notify_all(level: str, title: str, message: str = "") -> None:
         message: 通知正文
     """
     level_order = {"error": 0, "warning": 1, "info": 2}
-    config_level = NOTIFICATION_LEVEL
+    config_level = _env("NOTIFICATION_LEVEL")
     # level_order 越小越严重：仅当通知级别 >= 配置级别（数值 <=）时才发送
     if level_order.get(level, 2) > level_order.get(config_level, 2):
         return  # 低于配置级别，不发送
