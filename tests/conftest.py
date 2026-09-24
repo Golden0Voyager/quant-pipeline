@@ -115,6 +115,38 @@ def _offline_gate_bypass(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _block_external_notifications(monkeypatch):
+    """阻断真实外发通知，使测试套件 hermetic。
+
+    通知就挂在真实故障路径上（``core.runner.safe_task`` 异常终止、``tasks.bars``
+    熔断中止、``daily_pipeline`` 整轮汇总），而测试刻意覆盖这些失败分支。因此只要
+    本机 ``.env`` 里配好了通道（``NOTIFICATION_TYPE=bark`` + 凭据），一次全量
+    ``pytest`` 就会真的发出十余条推送；内容是夹具名（``crash`` / ``write_test``）
+    与假失败，对收件人毫无意义。
+
+    更麻烦的是这层副作用**只存在于配了通道的机器上**：CI 没有 ``.env``，所以门禁
+    会在本地变红、在 CI 保持绿色——门禁说的不是同一件事。这里把本模块唯一的出网
+    点 ``core.notifications.urlopen`` 换成记录后拒绝调用的桩，测试结果从此与本机
+    是否配了通知无关。
+
+    直接断言外发载荷的用例自行 patch ``notifications.urlopen``（测试体内优先级更高）；
+    想反证「确实尝试过外发但被拦下」的用例可直接请求本 fixture，拿到被拦截的请求。
+    """
+    import core.notifications as notifications
+
+    blocked: list[object] = []
+
+    def _blocked_urlopen(request, *args, **kwargs):
+        blocked.append(request)
+        raise AssertionError(
+            "测试中不允许真实外发通知（见 conftest._block_external_notifications）"
+        )
+
+    monkeypatch.setattr(notifications, "urlopen", _blocked_urlopen)
+    return blocked
+
+
+@pytest.fixture(autouse=True)
 def _fast_default_source_client(monkeypatch):
     """Keep mock-only tests isolated from production source throttling."""
     import core.source_client as source_client
