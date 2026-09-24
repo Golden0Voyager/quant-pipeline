@@ -599,18 +599,41 @@ class SmartMoneyDBProvider:
         return self._db.get_last_task_run(task_name)
 
     def record_ingestion_run(self, result: dict[str, Any]) -> None:
-        """把 ``TaskResult.to_dict()`` 写入 ``ingestion_runs`` 审计表。"""
+        """把 ``TaskResult.to_dict()`` 写入 ``ingestion_runs`` 审计表。
+
+        字段映射：``attempts`` 列 ← ``metadata["attempts"]``（重试次数），
+        ``fetched_rows`` / ``accepted_rows`` / ``rejected_rows`` / ``saved_rows``
+        ← 同名字段；``TaskResult.attempted``（本轮检查的记录条数）在本表没有
+        对应列，并入 ``metadata_json``。
+        """
         if not result:
             return
         metadata = result.get("metadata") or {}
+        # safe_task 把 run_id/started_at/finished_at 放在 metadata 中，
+        # 同时兼容顶层 key 的调用方。
+        meta = metadata if isinstance(metadata, dict) else {}
+
+        # ``TaskResult.attempted`` 是「本轮检查了多少条记录」，而
+        # ``ingestion_runs`` 没有承载它的列——它历史上被误写进 ``attempts``，
+        # 后者的真实语义是重试次数（见 core.refresh 写入的
+        # ``metadata["attempts"]``）。两个仓库共享该表的 canonical 契约
+        # （quant_hunter 的 db_schema.py 有逐字相同的 DDL），因此不改列名、
+        # 只修正写入方；记录条数并入 ``metadata_json``，不静默丢弃。
+        attempted_records = result.get("attempted")
+        if (
+            isinstance(metadata, dict)
+            and isinstance(attempted_records, int)
+            and attempted_records > 0
+            and "attempted" not in metadata
+        ):
+            metadata = {**metadata, "attempted": attempted_records}
+            meta = metadata
+
         if isinstance(metadata, dict):
             metadata_json = json.dumps(metadata, ensure_ascii=False, default=str)
         else:
             metadata_json = str(metadata)
 
-        # safe_task 把 run_id/started_at/finished_at 放在 metadata 中，
-        # 同时兼容顶层 key 的调用方。
-        meta = metadata if isinstance(metadata, dict) else {}
         run_id = result.get("run_id") or meta.get("run_id") or str(uuid.uuid4())
         finished_at = (
             result.get("finished_at")
@@ -644,6 +667,13 @@ class SmartMoneyDBProvider:
                     error_message = excluded.error_message,
                     metadata_json = excluded.metadata_json
                 """
+        # ``attempts`` 列的真实语义是重试次数：core.refresh 把它放进
+        # ``metadata["attempts"]``（0/1/2，重试耗尽时为 2）。未跟踪重试的任务
+        # 写 0，与列默认值一致。此前写入的是 ``result["attempted"]``（记录条数），
+        # 那正是 update_bars=5565 / update_index_membership=3850 的来源。
+        reported_attempts = meta.get("attempts", 0)
+        attempts_value = reported_attempts if isinstance(reported_attempts, int) else 0
+
         values = (
                     run_id,
                     result.get("task_name", ""),
@@ -653,7 +683,7 @@ class SmartMoneyDBProvider:
                     finished_at,
                     None,
                     result.get("data_date"),
-                    result.get("attempted", 0),
+                    attempts_value,
                     result.get("fetched", 0),
                     result.get("accepted", 0),
                     result.get("rejected", 0),
