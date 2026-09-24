@@ -919,7 +919,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     TaskSpec(
         name="update_money_market",
         callable=None,
-        tables=("money_market",),
+        # 本任务同时写 central_bank_balance（央行资产负债表，月频）——见
+        # tasks/money_market.py 的 save_central_bank_balance_batch。此前漏声明，
+        # 导致 table_owners / 完整度面板归属漏掉该表；由 stage2 写表审计发现
+        # （tests/test_stage2_write_disjointness.py 的注册表一致性断言）。
+        # 刻意不进 date_columns：该表是月频，按日频纳入新鲜度面板会持续报「滞后」，
+        # 属于假告警（同类先例见 update_industry：声明表但不声明日期列）。
+        tables=("money_market", "central_bank_balance"),
         cadence=Cadence.DAILY,
         date_columns={"money_market": "date"},
         empty_policy=EmptyPolicy.ALLOW,
