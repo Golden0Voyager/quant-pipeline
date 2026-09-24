@@ -58,6 +58,7 @@ from tasks.finance_flow import (
     fetch_etf_daily_records,
     fetch_south_flow_records,
 )
+from tasks.hot_rank import fetch_hot_rank_records
 from tasks.index_chain import (
     _INDEX_DAILY_REFRESH_INDICES,
     fetch_chip_em_record_for_refresh,
@@ -81,10 +82,9 @@ from tasks.sector_derivatives import (
     fetch_sector_daily_records,
     fetch_sector_valuation_records,
 )
+from tasks.stock_comment import fetch_stock_comment_records
 from tasks.stock_pledge import fetch_stock_pledge_records
 from tasks.stock_repurchase import fetch_stock_repurchase_records
-from tasks.hot_rank import fetch_hot_rank_records
-from tasks.stock_comment import fetch_stock_comment_records
 from tasks.valuation_chain import (
     compute_sector_industry_rows_for_refresh,
     fetch_fundamentals_snapshot,

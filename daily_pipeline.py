@@ -139,6 +139,7 @@ from tasks.fund_holdings import update_fund_holdings
 from tasks.futures import update_futures
 from tasks.global_assets import update_global_assets
 from tasks.hk_tech_index import update_hk_tech_index
+from tasks.hot_rank import update_hot_rank
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
@@ -169,10 +170,9 @@ from tasks.money_market import update_money_market
 from tasks.option_sentiment import update_option_sentiment
 from tasks.placement import update_placement_announcements
 from tasks.sector_derivatives import update_sector_derivatives
+from tasks.stock_comment import update_stock_comment
 from tasks.stock_pledge import update_stock_pledge
 from tasks.stock_repurchase import update_stock_repurchase
-from tasks.stock_comment import update_stock_comment
-from tasks.hot_rank import update_hot_rank
 from tasks.top10_shareholders import update_top10_shareholders
 from tasks.us_macro import update_us_macro
 from tasks.utility import health_check, retry_failed
