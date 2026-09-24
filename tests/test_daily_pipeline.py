@@ -1046,6 +1046,52 @@ class TestHealthCheck:
 
         assert "已声明 0 个，新增 0 个" in r["report"]
 
+    # ── 整日缺席巡检（已声明 vs 新增）──
+
+    def _health_check_with_missing_days(self, health_db: str, days: list[str]) -> dict:
+        """钉住巡检窗口与缺席日，使结果与宿主机日历缓存无关。
+
+        这里只验证 health_check 的**接线**：窗口怎么算、已声明与新增怎么分流。
+        检测器本身的判定规则由 tests/test_day_coverage.py 覆盖（用内存库，同样不依赖
+        宿主机日历）。
+        """
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"), \
+             patch("tasks.utility.scan_window", return_value=("2026-08-03", "2026-09-16")), \
+             patch("tasks.utility.missing_trading_days", return_value=days):
+            return daily_pipeline.health_check(db)
+
+    def test_declared_missing_day_is_reported_but_not_alerted(self, health_db: str):
+        """已登记的整日缺席只出现在报告里，不进 issues。"""
+        r = self._health_check_with_missing_days(health_db, ["2026-08-03", "2026-09-16"])
+
+        assert not any("整日缺席" in i for i in r["issues"])
+        assert "已声明 2 天，新增 0 天" in r["report"]
+        assert "2026-08-03" in r["report"]
+
+    def test_undeclared_missing_day_is_alerted(self, health_db: str):
+        """未登记的整日缺席必须告警——这是这条巡检存在的理由。"""
+        r = self._health_check_with_missing_days(health_db, ["2026-09-16", "2026-09-18"])
+
+        assert any("整日缺席" in i and "2026-09-18" in i for i in r["issues"])
+        assert any("core/known_gaps.py" in i for i in r["issues"])
+        assert "已声明 1 天，新增 1 天" in r["report"]
+
+    def test_missing_day_scan_skips_when_window_is_unavailable(self, health_db: str):
+        """窗口不足两个交易日（或日历不可用）时明确跳过。
+
+        猜一个窗口会把大批工作日报成空洞——假空洞比漏报更糟，它会让整条巡检失去意义。
+        """
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"), \
+             patch("tasks.utility.scan_window", return_value=None):
+            r = daily_pipeline.health_check(db)
+
+        assert "整日缺席巡检跳过" in r["report"]
+        assert not any("整日缺席" in i for i in r["issues"])
+
     # ── 运行完整性 ──
 
     def test_unfinished_previous_run_is_alerted(self, health_db: str):
