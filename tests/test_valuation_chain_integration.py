@@ -906,13 +906,18 @@ class TestUpdateMarketSnapshotWithToken:
         db.record_task_run.assert_called_once_with("update_market_snapshot", "2026-07-17")
 
     def test_with_valid_token_empty_quotes(self, tmp_path: Path):
-        """有效 Token 但 API 返回空 → 记录 0。"""
+        """有效 Token 但 API 返回空 → failed(network)，不得报 success。
+
+        旧版在此返回 success（saved=0），使「一条都没抓到」在 ingestion_runs
+        里与「补充完成」不可区分。
+        """
         db_path = str(tmp_path / "test.db")
         _create_fundamentals_db(db_path)
 
         db = MagicMock()
         db.db_path = db_path
         db.get_last_task_run.return_value = None
+        db.record_task_run.return_value = None
 
         with patch("smartmoney_hunter.xueqiu._get_token", return_value="fake_token"), \
              patch("smartmoney_hunter.xueqiu.get_batch_quotes", return_value=[]), \
@@ -920,8 +925,82 @@ class TestUpdateMarketSnapshotWithToken:
              patch("tasks.valuation_chain.time.sleep"):
             r = update_market_snapshot(db)
 
+        assert r["status"] == "failed"
+        assert r["error_kind"] == "network"
         assert r["updated"] == 0
         assert r["total"] == 2
+        db.record_task_run.assert_not_called()
+
+    def test_quotes_without_dividend_yield_is_failed_not_success(self, tmp_path: Path):
+        """回归（2026-08-12 静默空洞）：抓到报价但一条都写不进 → 必须 failed。
+
+        当日审计行是 saved_rows=5203 + status=success，而 fundamentals 整列为
+        NULL；因为作用域是 MAX(trade_date)，该日期此后永不被回访。
+        """
+        db_path = str(tmp_path / "test.db")
+        _create_fundamentals_db(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE fundamentals SET dividend_yield = NULL")
+        conn.commit()
+        conn.close()
+
+        db = MagicMock()
+        db.db_path = db_path
+        db.get_last_task_run.return_value = None
+        db.record_task_run.return_value = None
+
+        quotes = [
+            {"code": "000001", "dividend_yield": None},
+            {"code": "600000", "dividend_yield": None},
+        ]
+        with patch("smartmoney_hunter.xueqiu._get_token", return_value="fake_token"), \
+             patch("smartmoney_hunter.xueqiu.get_batch_quotes", return_value=quotes), \
+             patch("tasks.valuation_chain.logger"), \
+             patch("tasks.valuation_chain.time.sleep"):
+            r = update_market_snapshot(db)
+
+        assert r["status"] == "failed"
+        assert r["error_kind"] == "data_quality"
+        assert r["saved"] == 0
+        assert r["updated"] == 0
+        # 失败信息必须能区分「源没给字段」，否则下次仍无从定位
+        assert "无 dividend_yield 字段" in r["error"]
+        # 未达标不得落「已完成」标记，否则下一轮的跳过判定会误以为该日已补充
+        db.record_task_run.assert_not_called()
+
+    def test_saved_counts_written_rows_not_fetched_rows(self, tmp_path: Path):
+        """saved 是真实写入行数：抓到 2 条、只有 1 条可写 → saved == 1。
+
+        旧版 saved = len(all_quotes)，故此处会是 2，审计表无法区分
+        「抓到多少」与「写了多少」。
+        """
+        db_path = str(tmp_path / "test.db")
+        _create_fundamentals_db(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE fundamentals SET dividend_yield = NULL")
+        conn.commit()
+        conn.close()
+
+        db = MagicMock()
+        db.db_path = db_path
+        db.get_last_task_run.return_value = None
+        db.record_task_run.return_value = None
+
+        quotes = [
+            {"code": "000001", "dividend_yield": 3.5},
+            {"code": "600000", "dividend_yield": None},
+        ]
+        with patch("smartmoney_hunter.xueqiu._get_token", return_value="fake_token"), \
+             patch("smartmoney_hunter.xueqiu.get_batch_quotes", return_value=quotes), \
+             patch("tasks.valuation_chain.logger"), \
+             patch("tasks.valuation_chain.time.sleep"):
+            r = update_market_snapshot(db)
+
+        assert r["status"] == "success"
+        assert r["saved"] == 1
+        assert r["updated"] == 1
+        assert r["total"] == 2
+        db.record_task_run.assert_called_once_with("update_market_snapshot", "2026-07-17")
 
 
 # ===========================================================================
