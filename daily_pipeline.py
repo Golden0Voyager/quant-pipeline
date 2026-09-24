@@ -82,6 +82,7 @@ from core.refresh_adapters import build_all_refresh_adapters
 from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
 from core.refresh_store import SQLiteRefreshStore
+from core.run_state import mark_run_completed, mark_run_started
 from core.runner import safe_task
 from core.task_registry import TASK_REGISTRY, Cadence, lookup_task, refreshable_trading_tasks
 from core.task_result import TaskResult, normalize_task_result
@@ -481,6 +482,20 @@ def run_all(
         db.close()
         return {"status": "skipped", "reason": "非交易日"}
 
+    # 运行完整性：本轮开始时检查上一轮是否留下未完成的标记。
+    # 只靠日志里缺少「🏁 数据管道全部完成」发现中断是无效的（没人读日志），
+    # 2026-09-17 的 31 任务部分运行就是这样溜过去的——39 个任务全 success、
+    # 无任何告警，只留下至今仍在的数据空洞。详见 core/run_state.py。
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    abandoned_run = mark_run_started(db, today_str)
+    if abandoned_run:
+        logger.error("⛔ 上一轮管道未完整结束: %s 开始后没有完成记录", abandoned_run)
+        notify_all(
+            "error",
+            "上一轮管道未完整结束",
+            f"{abandoned_run} 的管道开始后没有完成记录（可能被中断），该轮数据可能不完整",
+        )
+
     results: dict[str, Any] = {}
 
     # ── 第一阶段：核心行情链（bars 收盘后走快照播种，必须最先完成）──
@@ -704,6 +719,9 @@ def run_all(
             "update_chip_distribution_em", update_chip_distribution_em, db
         )
         results["health"] = _run_task("health_check", health_check, db, fast=True)
+
+    # 走到这里即整条任务链已跑完（两条分支在此汇合），落完成标记供下一轮校验。
+    mark_run_completed(db, today_str)
 
     db.close()
     elapsed = time.time() - start_time
