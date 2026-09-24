@@ -66,7 +66,7 @@
 
 ---
 
-## 🔔 无人值守运行的三条已核实事实
+## 🔔 无人值守运行的已核实事实
 
 夜跑无人值守且次日 09:30 才需要用数据，因此下面三条直接决定「出问题时你能否知道」。
 
@@ -76,8 +76,11 @@
   并填 `BARK_DEVICE_KEY`；`webhook` 通道另需 `NOTIFICATION_WEBHOOK_URL`（飞书/钉钉/企业微信通用文本格式）。
 - `NOTIFICATION_LEVEL` 默认 `error`，会抑制 `warning`（保留旧数据）与 `info`（全部完成）。
 - Bark 推送**失败时仍返回 HTTP 200**，成败看响应体 `code` —— 通道实现已处理，不要改回只看 HTTP 状态。
-- `.env` 由 `core.config` 在导入时加载，而本模块在**导入时**读常量，故 `core/notifications.py`
-  自行保证 `.env` 已加载（那行 import 不要删，否则入口导入顺序会静默让配置读成空值）。
+- 配置项一律**调用时**读环境变量（`_env()`），**不要改回导入期模块常量**：那样导入之后的一切改动
+  （运行期切换配置、测试的 `monkeypatch`）都被静默忽略，`monkeypatch.delenv` 也清不掉它，于是
+  本机配了凭据就会让「缺凭据」用例假红、而 CI 假绿。
+- `.env` 由 `core.config` 在导入时加载，故 `core/notifications.py` 主动保证它已加载
+  （那行 import 不要删，否则入口导入顺序会静默让配置读成空值）。
 
 ### 2. 空洞必须登记，否则告警会失去意义
 - `core/known_gaps.py` 是**已声明、已接受、且经核实不可回补**的空洞登记册；
@@ -97,6 +100,18 @@
   `failed/data_quality`。旧版返回 `saved=len(all_quotes)` + 硬写 `success`，于是
   `ingestion_runs` 记下 `saved_rows=5203` 而表里整列为 NULL（2026-08-12），且因作用域是
   `MAX(trade_date)`，该日期此后永不被回访 → 静默永久空洞。新增写库任务请沿用同一原则。
+
+### 5. 测试必须 hermetic：不允许真实外发通知
+- `tests/conftest.py::_block_external_notifications`（autouse）把 `core.notifications.urlopen`
+  换成记录后拒绝调用的桩。通知就挂在真实故障路径上（`safe_task` 异常终止、AkShare 熔断中止、
+  整轮汇总），而测试刻意覆盖这些分支——**实测：本机配好通道后跑一次全量 `pytest`，守卫共拦下
+  14 次外发尝试（其中 13 次来自那些覆盖失败路径的用例，另 1 次来自守卫用例自身），全部指向
+  `api.day.app/push`，内容是夹具名与假失败**。
+- 这层副作用**只存在于配了通道的机器上**：CI 没有 `.env`，所以门禁会在本地红、在 CI 绿。
+  守卫把测试结果与「本机是否配了通知」彻底解耦。
+- 断言真实外发行为的用例自行 patch `notifications.urlopen`（测试体内优先级更高）；反证
+  「确实尝试外发但被拦下」的用例直接请求该 fixture 拿拦截列表，见
+  `tests/test_notifications.py::test_external_notification_is_blocked_in_tests`。
 
 ---
 
@@ -128,4 +143,5 @@
 | P2-12b 上条造成的 6 个不可回补空洞 + 缺检测/修复环节 | P2 | ✅ 已处理 (PR #121):新增空洞登记册 `core/known_gaps.py`(6 个日期,已核实不可回补),`health_check` 改为扫描审计期全部日期并只对**新增**空洞告警;登记册条目被删会红(`tests/test_known_gaps.py`) |
 | P2-12c 部分运行无告警、无自愈(09-17 只跑 31 个任务且全 success) | P2 | ✅ 已修复 (PR #121):新增 `core/run_state.py` 运行完整性标记,`run_all` 下一轮开始即检测上一轮遗留的 `in-progress` 并告警,`health_check` 作第二道防线 |
 | P2-13 「无人值守告警」实际只写日志(`NOTIFICATION_TYPE` 默认 `console`) | P2 | ✅ 已修复 (PR #121):新增 Bark 通道(按响应体 `code` 判成败,不只看 HTTP 200)、`NOTIFICATION_TYPE` 支持逗号分隔多通道、缺凭据明确告警;`.env` 加载顺序隐患一并消除 |
+| P2-15 测试套件不 hermetic:配好通知通道后跑测试会真的外发推送,且该副作用只在本地存在(CI 无 `.env` 故恒绿) | P2 | ✅ 已修复 (PR #123):`core/notifications.py` 的配置由导入期常量改为**调用时**读环境变量(常量会让 `monkeypatch.delenv` 失效,本机配了凭据时「缺凭据」用例静默变成「有凭据」);新增 autouse 守卫 `tests/conftest.py::_block_external_notifications`,把模块唯一出网点 `urlopen` 换成记录后拒绝调用的桩。红证:还原旧实现会让 `tests/test_notifications.py::test_level_is_read_at_call_time_not_cached_at_import` 与 `::test_channel_credentials_are_read_at_call_time` 变红,且在配好通道的条件下 `::test_bark_channel_without_device_key_skips_network`/`::test_channels_warn_when_type_requested_without_credentials` 一并变红(正是本机实测的两个失败);把守卫生效行改为空操作则 `::test_external_notification_is_blocked_in_tests` 变红(`assert 0 == 1`,日志里出现真实 `HTTP Error 400`——请求确已离开本机) |
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
