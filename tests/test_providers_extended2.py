@@ -12,6 +12,7 @@ Strategy
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,76 @@ def test_record_ingestion_run_does_not_retry_non_lock_error(provider):
     with patch.object(provider, "_connect_for_audit", return_value=audit_context), \
          pytest.raises(sqlite3.OperationalError, match="no such table"):
         provider.record_ingestion_run(_audit_payload("schema-run", "success", 1))
+
+
+def test_attempts_column_records_retry_count_not_record_count(provider):
+    """``attempts`` 列必须表示重试次数，不得再混入记录条数。
+
+    回归：``update_bars`` 曾把全市场只数（5565）写进这一列，
+    ``update_index_membership`` 同理（3850），使任何按重试语义读取的人读错。
+    """
+    payload = _audit_payload("retry-run", "success", 5203)
+    payload["attempted"] = 5565
+    payload["metadata"]["attempts"] = 2
+    provider.record_ingestion_run(payload)
+
+    with sqlite3.connect(provider.db_path) as conn:
+        row = conn.execute(
+            "SELECT attempts, metadata_json FROM ingestion_runs WHERE run_id = ?",
+            ("retry-run",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == 2
+    # 记录条数没有对应列，必须留在 metadata_json 里，不能被静默丢弃
+    assert json.loads(row[1])["attempted"] == 5565
+
+
+def test_attempts_column_zero_when_retry_count_not_reported(provider):
+    """未跟踪重试的任务写 0，而不是把记录条数顶上去。"""
+    payload = _audit_payload("no-retry-run", "success", 10)
+    payload["attempted"] = 5565
+    provider.record_ingestion_run(payload)
+
+    with sqlite3.connect(provider.db_path) as conn:
+        attempts, metadata_json = conn.execute(
+            "SELECT attempts, metadata_json FROM ingestion_runs WHERE run_id = ?",
+            ("no-retry-run",),
+        ).fetchone()
+
+    assert attempts == 0
+    assert json.loads(metadata_json)["attempted"] == 5565
+
+
+def test_attempts_column_ignores_non_integer_retry_count(provider):
+    """``metadata["attempts"]`` 非整数时不得把非整数写进 INTEGER 列。"""
+    payload = _audit_payload("bad-retry-run", "success", 1)
+    payload["metadata"]["attempts"] = "2"
+    provider.record_ingestion_run(payload)
+
+    with sqlite3.connect(provider.db_path) as conn:
+        row = conn.execute(
+            "SELECT attempts, typeof(attempts) FROM ingestion_runs WHERE run_id = ?",
+            ("bad-retry-run",),
+        ).fetchone()
+
+    assert row == (0, "integer")
+
+
+def test_metadata_json_keeps_existing_attempted_key(provider):
+    """metadata 里已有的 ``attempted`` 原样保留，不被顶层同名值覆盖。"""
+    payload = _audit_payload("keeper-run", "success", 1)
+    payload["attempted"] = 5565
+    payload["metadata"]["attempted"] = 7
+    provider.record_ingestion_run(payload)
+
+    with sqlite3.connect(provider.db_path) as conn:
+        metadata_json = conn.execute(
+            "SELECT metadata_json FROM ingestion_runs WHERE run_id = ?",
+            ("keeper-run",),
+        ).fetchone()[0]
+
+    assert json.loads(metadata_json)["attempted"] == 7
 
 
 def test_shared_write_connection_enables_foreign_keys(provider):
