@@ -52,7 +52,9 @@ from typing import Any
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-sys.path.insert(0, os.path.expanduser("~/Code"))
+# 这里曾额外注入 `~/Code`，注释说是给 quant_lab/Trading_Agents 用。实测本仓库不 import
+# 该目录下任何一级名字（`Trading_Agents` 甚至不存在），故删除；兄弟仓库路径由
+# `core._bootstrap` 负责。
 
 import pandas as pd
 
