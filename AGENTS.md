@@ -2,18 +2,19 @@
 
 ## ⚠️ 环境约束（强制）
 
-- **包管理器**：`uv pip install <pkg>`（仅限 `uv`，禁止 `pip`）
+- **包管理器**：只用 `uv`（禁止 `pip`）。新增依赖用 `uv add <pkg>` —— 它同时写入 `pyproject.toml` 与 `uv.lock`；`uv pip install <pkg>` 只能用于一次性试验，**不能**当作依赖的记录方式（它不改锁定文件，于是 CI 的 `uv sync --extra dev` 与其他 checkout 都不会有该依赖）。
 - **运行脚本**：`uv run python <script>.py`
+- **worktree 里跑门禁**：先 `uv sync --extra dev`，否则缺 dev 依赖会让 `mypy`/`pytest` 报出与代码无关的假红。
 
 ---
 
 ## 🛠️ Key Conventions
 
-- **数据库路径**: `~/Code/quant_data/quant_core.db` (SQLite)
-- **数据源优先级**: AkShare > 静默（写操作禁用 yfinance fallback）
-- **市场前缀规则**: `6`/`9` → sh, `0`/`2`/`3` → sz, `4`/`8`/`920` → bj
-- **质量保障**: ruff + mypy + pytest CI 校验
-- **三层次入口**: `--task daily`（=`all`）每日层；`weekly_backfill`/`monthly_repair` 每周/每月层仅手动触发（CLI 或 TUI W/M 键）
+- **数据库路径**: `~/Code/quant_data/quant_core.db` (SQLite)，默认值在 `core/config.py:DEFAULT_DB_PATH`；可用环境变量 `QUANT_DB_PATH` 覆盖（测试与临时运行靠它隔离，避免误写生产库）
+- **数据源优先级**: AkShare 是唯一的**写库**来源；yfinance 仅作运行时临时 fallback，其来源的行一律拒绝落库（`tasks/bars.py` 的拒绝规则）——库内不应出现 `data_source='yfinance'`
+- **市场前缀规则**: 权威实现是 `core/utils.py:infer_market`：`688`→`star`，`4`/`8`/`920`→`bj`，`6`/`90`→`sh`，`300`/`301`→`gem`，`002`/`003`→`sme`，`000`/`001`/其余→`sz`。**顺序敏感：`920` 必须先于 `9`→`sh` 判断**（920 是北交所新号段），`core/source_hithink.py` 有同名注释
+- **质量保障**: CI 四道门禁 —— `ruff check`、`mypy`（全仓，范围由 `[tool.mypy] files` 决定，**已含 `tests/`**）、`pytest --cov`、`coverage report`（阈值 `fail_under = 85`，覆盖率不达标同样会红）
+- **三层次入口**: `--task daily`（=`all`）每日层；`weekly_backfill`/`monthly_repair` 每周/每月层仅手动触发（CLI 或 TUI W/M 键）。后两层都是**注册表驱动**（遍历 `TASK_REGISTRY` 按 cadence 取任务），不是手写清单
 
 ---
 
@@ -25,7 +26,7 @@
 
 - **多 agent 协作**: 仓库可能同时由 Codebuff / OpenCode / 其他 agent 编辑。
   - 每个 agent 各自在自己的 `feat/*`/`fix/*` 分支开发;
-  - 本地 `main` 只用于 `git fetch --prune origin/main` + merge/rebase 上游变更,不写业务代码;
+  - 本地 `main` 只用于同步上游(`git fetch --prune origin` 后 `git merge --ff-only origin/main`)与建分支,不写业务代码;
   - 合入必须经 PR + CI 绿,之后删远端分支。
   - 若某次提交因工具差异误落 main,应尽快 cherry-pick 到对应分支并回退 main,避免分叉长期存在。
 
@@ -33,10 +34,10 @@
 
 ## 🔒 不可违反的硬规则(来自历史审计)
 
-以下规则有真实生产事故证据,**违反会引入数据损坏或静默失败**,不允许以"为了方便"为由绕过:
+以下规则有真实事故或踩坑证据,**违反会引入数据损坏、静默失败或假失败**,不允许以"为了方便"为由绕过:
 
 ### 1. schema DDL 的真相在 `_ensure_tables`
-- `providers.py:SmartMoneyDBProvider._ensure_tables` 创建 **28 张基线表**,其中 **26 张不被任何 `migrations/` 文件创建** — migration 目录只负责增量(加列/索引)。
+- `providers.py:SmartMoneyDBProvider._ensure_tables` 创建 **28 张基线表**,其中 **26 张不被任何 `migrations/` 文件创建**（两边都定义的是 `cb_quotation`/`cb_redeem`,由 migration 002 重建）。注意 `migrations/` **本身也建表**（如 `fund_holdings`/`top10_shareholders`/`refresh_runs` 等新表由 migration 创建）——不要把它理解成「只加列/索引」。
 - **禁止**删除 `_ensure_tables` 或假设 migration 能替代它:全新安装会缺表,生产库保持空数据但测试变绿。
 - `_ensure_tables` 失败必须 `raise`(当前已是 hard fail);仅当 `Path(db_path).parent` 不存在时静默返回(与 `_ensure_wal_mode` 一致)。
 - `_old_migrate_phase2_tables` 是已删除的死代码,引用它的测试已移走 — 不要让它复活。
@@ -59,9 +60,9 @@
 
 ### 5. 测试隔离:不要依赖操作系统锁状态
 - `daily_pipeline.main()` 的进程锁与全局锁探测作用于真实文件 `/tmp/daily_pipeline.pid`(非 mock):`_acquire_lock()` 失败 fail-closed `sys.exit(1)`,`global_lock_held()` 为真时单任务路径同样退出。
-- 根 `tests/conftest.py` 的 autouse fixture `_isolate_pipeline_lock`(PR #110)已同时 patch `daily_pipeline._acquire_lock` 与 `daily_pipeline.global_lock_held`,调用 `main()` 的两个测试模块(`test_daily_pipeline.py`/`test_parallel_pipeline.py`)不再因外部持锁(launchd daemon/TUI/其他 agent)假失败。
-- 约束:该 fixture 只替换 `daily_pipeline` 命名空间入口——验证真实锁语义的 `tests/test_lock.py`(走 `core.lock`)不受影响;测试体内自行覆盖探测的用例(如 `test_single_task_refused_when_global_lock_held`)优先级更高。
-- 历史:漏口曾有两处——旧 fixture 只 patch `_acquire_lock` 漏了 `global_lock_held`,且 `test_parallel_pipeline.py` 完全无隔离,外部持锁时共 6 个测试假失败(`SystemExit: 1`)。新增调 `main()` 的测试模块无需再自行 patch。
+- 根 `tests/conftest.py` 的 autouse fixture `_isolate_pipeline_lock`(PR #110)已同时 patch `daily_pipeline._acquire_lock` 与 `daily_pipeline.global_lock_held`,调用 `main()` 的两个测试模块(`tests/test_daily_pipeline.py`/`tests/test_parallel_pipeline.py`)不再因外部持锁(launchd daemon/TUI/其他 agent)假失败。
+- 约束:该 fixture 只替换 `daily_pipeline` 命名空间入口——验证真实锁语义的 `tests/test_lock.py`(走 `core/lock.py`)不受影响;测试体内自行覆盖探测的用例(如 `tests/test_daily_pipeline.py::test_single_task_refused_when_global_lock_held`)优先级更高。
+- 历史:漏口曾有两处——旧 fixture 只 patch `_acquire_lock` 漏了 `global_lock_held`,且 `tests/test_parallel_pipeline.py` 完全无隔离,外部持锁时共 6 个测试假失败(`SystemExit: 1`)。新增调 `main()` 的测试模块无需再自行 patch。
 
 ---
 
@@ -69,21 +70,23 @@
 
 每项 P0/P1 修复必须附带**会因旧代码变红**的测试(不能只在"新状态"下断言绿):
 
-- 例:P0-2 锁 unlink 修复 → `test_release_keeps_lockfile_with_empty_pid` 断言旧实现会丢失文件。
-- 例:P0-3 schema 硬失败 → `test_schema_baseline.py::TestBaselineDDL` 断言 28 表存在 + DDL 失败抛异常。
+- 例:P0-2 锁 unlink 修复 → `tests/test_lock.py::test_release_keeps_lockfile_with_empty_pid` 断言旧实现会丢失文件。
+- 例:P0-3 schema 硬失败 → `tests/test_schema_baseline.py::test_baseline_tables_all_created`(断言 28 张基线表都存在)与 `tests/test_schema_baseline.py::test_ensure_tables_fails_closed_on_ddl_error`(断言 DDL 失败抛异常,而非只打 WARNING)。
 - 提交时 commit message 写明"还原旧实现会让 X 测试全红" → 审计方据此反证钉住。
 
 ---
 
-## 📐 已知待清理项(按 P0/P1/P2 分级,本文件即权威清单;`docs/todo.md` 仅记录数据源 TODO)
+## 📐 历次审计发现与修复记录(已全部闭环)
+
+编号沿用原始审计报告,因此**不连续**:本文件只登记 P1-5 起的条目,更早的 P0/P1 项未在此重列。下表是状态与理由存档,不是待办清单;`docs/todo.md` 另记数据源 TODO。
 
 | 编号 | 级别 | 现状 |
 |---|---|---|
 | P1-5 mypy CI 空转(`\|\| true` + 缺 `[tool.mypy]`) | P1 | ✅ 已修复 (PR #110):CI 跑无参数 `uv run mypy`,范围由 `[tool.mypy] files` 决定,且已含 `tests/` |
 | P1-6 `date: str = None` ×7 协议违规 | P1 | ✅ 已修复 (PR #110):`SmartMoneyDBProvider` 现已满足 `DatabaseInterface` |
 | P1-7 `TaskSpec.callable` 全是 None,registry 非单一真相 | P1 | ✅ 已修复 (PR #110):字段改为可选,自述"别处会填"的 `pass` 分支换成真实不变量校验 |
-| P2-8 非日频任务仍在 `run_all` wiring（原述：「10 个任务被 cadence 永久跳过但仍在 stage4 wiring」） | P2 | ✅ 已核实证伪 (PR #118)：**不是缺陷**——10 个是**全 `run_all` wiring** 的计数（stage4 8 个 + stage1 `update_stock_list` + stage2 `update_china_macro`）；它们各自的 cadence 都在 weekly/monthly 层执行（那两层是注册表驱动，日志实测 weekly 跑过 10 次），全注册表「三层入口都覆盖不到的 cadence」= **0 个**；唯一代价是每次 daily 10 行跳过日志，无告警、无假 `task_runs`。**未删 wiring**：删掉会失去「改 cadence 即生效」这个单一生效点，且会让 daily `results` 里的键从 `{"status":"skipped"}` 变为缺失 |
-| P2-8b 排查时新发现：`core/freshness.py` 的非日频表集合与注册表分叉，且 `update_industry` 声明了一张不存在的表 | P2 | ✅ 已修复 (PR #118)：`fund_holdings`/`top10_shareholders` 漏出 `QUARTERLY_TABLES`（一旦落进过去的报告期就会在面板上永久「滞后」）已补入，并加规则型门禁 `tests/test_freshness.py::test_non_daily_task_tables_must_be_classified_as_non_daily`；`update_industry` 的 `tables` 由幻影表 `industry` 改为它真正写的 `stock_list` |
+| P2-8 非日频任务仍在 `run_all` wiring（原述:「10 个任务被 cadence 永久跳过但仍在 stage4 wiring」） | P2 | ✅ 已核实为**不实观察** (PR #118):10 个是整个 `run_all` wiring 的计数(stage4 占 8 个,另两个是 stage1 `update_stock_list` 与 stage2 `update_china_macro`),且各自都在 weekly/monthly 层执行——全注册表没有落在三层之外的 cadence。wiring 保留:它是「改 cadence 即生效」的单一生效点 |
+| P2-8b 上述排查中发现：`core/freshness.py` 的非日频表集合漏 2 张表；`update_industry` 声明了不存在的表 `industry` | P2 | ✅ 已修复 (PR #118):补 `fund_holdings`/`top10_shareholders` 进 `QUARTERLY_TABLES`(漏掉会在面板上永久显示「滞后」),并加规则型门禁 `tests/test_freshness.py::test_non_daily_task_tables_must_be_classified_as_non_daily`;`update_industry` 的 `tables` 改为它真正写的 `stock_list` |
 | P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | ✅ 已修复 (PR #114):代码默认对齐生产生效值 3(`.env` 实测),help 修正为真实作用域(仅 stage4 与 bars 内部池),ULTRA_SAFE 钉回 1 |
-| P2-10 `_to_float` 在 13 个模块重复 | P2 | ✅ 已修复 (PR #115):抽到 `core/utils.py` 的 `to_float`(非新建 `ak_utils.py`);`strip_percent` 开关只给 `stock_pledge`(其接口返回 `"3.5%"`),其余 12 个模块行为逐字不变 |
+| P2-10 `_to_float` 在 13 个模块重复 | P2 | ✅ 已修复 (PR #115):抽到 `core/utils.py` 的 `to_float`(非新建 `ak_utils.py`);`strip_percent` 开关只给 `stock_pledge`(其接口返回 `"3.5%"`),其余 12 个模块行为逐字不变(其中 `tasks/hkscc_holder.py` 已于 PR #117 删除;现存 12 个 `tasks/` 模块复用该实现,含 `stock_pledge` 的适配器) |
 | P2-11 `get_*_latest_date` 吞 `Exception` | P2 | ✅ 已修复 (PR #114):6 处收窄至 `(sqlite3.Error, OSError)` 并 WARNING 告警,`None` 仅代表「表空/无行」 |
