@@ -84,11 +84,21 @@
   （那行 import 不要删，否则入口导入顺序会静默让配置读成空值）。
 
 ### 2. 空洞必须登记，否则告警会失去意义
-- `core/known_gaps.py` 是**已声明、已接受、且经核实不可回补**的空洞登记册；
-  `health_check` 只对**不在册**的空洞告警。
-- 增删条目要过 `tests/test_known_gaps.py`（钉住 6 个股息率空洞）——为了让报告变绿而删条目会直接红。
-- 已登记的 6 个 `fundamentals.dividend_yield` 空洞为何回补不了：雪球接口只给实时值、
+- `core/known_gaps.py` 是**已声明、已接受**的空洞登记册，含**两种形态**：
+  ① **字段级**（`fundamentals.dividend_yield`，6 个日期）；② **整日缺席**（6 个交易日，
+  当天对所有按交易日应有的表都没写）。`health_check` 只对**不在册**的空洞告警。
+- 增删条目要过 `tests/test_known_gaps.py`（两组日期都被钉住）——为了让报告变绿而删条目会直接红。
+- 字段级那组的 6 个 `dividend_yield` 空洞为何回补不了：雪球接口只给实时值、
   `historical_valuation` 是 `fundamentals` 的副本（同样为空）、`dividend_summary` 无 `trade_date`。
+- 整日缺席由 `core/day_coverage.py` 检测：探针表是「每个交易日都该有行」的 10 张表，
+  门禁 `tests/test_day_coverage.py` 要求它们都来自 `TRADING_DAY` 任务（探针集不得与注册表分叉）；
+  判定取「**全部**探针表皆空」——部分表有行是部分运行的形态，归 `core/run_state.py`。
+  巡检窗口**不含**最新交易日（那天归新鲜度巡检；含进来就会在当天未跑完时连日报假空洞）。
+- 整日缺席分两种成因（登记册里逐日写明）：**部分运行**（启动过但只跑了一小部分就结束，
+  如 09-02 只 12 条记录）与**完全未启动**（无日志、无记录，如 09-14/09-16）。
+  回补判定：`fundamentals`/`historical_valuation`/`ah_premium` 的源只给实时值 → **不可回补**；
+  其余表抓取层支持历史日期（`stock_dzjy_mrmx`/`stock_lhb_detail_em`/`stock_board_industry_hist_em`
+  都带 start/end 参数），但 11 个写入方**签名都不接受日期参数**，回补需先给任务加日期入口。
 
 ### 3. 「这一轮没跑完」是可编程信号
 - `core/run_state.py` 在 `task_runs` 写 `in-progress:<date>` / `complete:<date>`；
@@ -144,6 +154,7 @@
 | P2-12b 上条造成的 6 个不可回补空洞 + 缺检测/修复环节 | P2 | ✅ 已处理 (PR #121):新增空洞登记册 `core/known_gaps.py`(6 个日期,已核实不可回补),`health_check` 改为扫描审计期全部日期并只对**新增**空洞告警;登记册条目被删会红(`tests/test_known_gaps.py`) |
 | P2-12c 部分运行无告警、无自愈(09-17 只跑 31 个任务且全 success) | P2 | ✅ 已修复 (PR #121):新增 `core/run_state.py` 运行完整性标记,`run_all` 下一轮开始即检测上一轮遗留的 `in-progress` 并告警,`health_check` 作第二道防线 |
 | P2-13 「无人值守告警」实际只写日志(`NOTIFICATION_TYPE` 默认 `console`) | P2 | ✅ 已修复 (PR #121):新增 Bark 通道(按响应体 `code` 判成败,不只看 HTTP 200)、`NOTIFICATION_TYPE` 支持逗号分隔多通道、缺凭据明确告警;`.env` 加载顺序隐患一并消除 |
+| P2-17 整日缺席无人可见:6 个交易日对所有按交易日应有的表都没写,而字段级断言只看 `MAX(trade_date)`、写入方作用域也固定在最新交易日 → 既不告警也不自愈 | P2 | ✅ 已修复 (PR #125):新增 `core/day_coverage.py`(10 张探针表、判定「全部皆空」、窗口不含最新交易日) + `core/calendar.trading_days_between`(只读缓存不触发网络);`known_gaps` 增设第二种形态「整日缺席」并逐日写明成因(实测与猜测相反:4 天是**部分运行**、2 天是**完全未启动**,不是「都未触发」);`health_check` 新增巡检段,只对未登记的日子告警。生产库验收(只读):窗口 `2026-07-24 ~ 2026-09-23` 检出 **6 天、全部命中登记册、新增 0**。红证:还原 `tasks/utility.py`+`core/known_gaps.py` 会让 `tests/test_known_gaps.py` 收集期即报错、`tests/test_daily_pipeline.py::TestHealthCheck` 的 3 个新用例全红 |
 | P2-16 跨仓库路径注入在 4 处各抄一遍(`core/config.py`/`daily_pipeline.py`/`tasks/bars.py`/顶层 `__init__.py`),而 `core/utils.py`/`providers.py`/`tasks/valuation_chain.py` 有模块级跨仓库 import 却完全不注入 | P2 | ✅ 已修复 (PR #124):注入收敛到 `core/_bootstrap.py`,包级 choke point 置于 `core/__init__.py`/`tasks/__init__.py`,顶层模块各显式调一次。排查中修掉另外两处真缺陷:①顶层 `__init__.py` 只注入 `~/Code`——它不是仓库根也不是 `smartmoney_hunter` 的所在,故以包身份导入一直是「import 得进、子模块用不了」(`cd ~/Code && import quant_pipeline.providers` 实测 ModuleNotFoundError);②`scripts/audit_data_contracts.py` 缺仓库根注入,`uv run python scripts/audit_data_contracts.py --db <path> --json` 连 `--help` 都跑不起来——而 `tasks/utility.py` 正是把这条命令打印给运维的。顺带删除 `~/Code` 注入(两项独立证据表明无消费者:本仓库不 import 该目录下任何一级名字,`smartmoney_hunter` 自身只 import 标准库与第三方;`Trading_Agents` 甚至不存在),并加门禁阻止它回来。红证:还原旧实现会让 `tests/test_sys_path_bootstrap.py` 5 个用例变红(`core.utils`/`providers`/`tasks.valuation_chain` 的独立导入、包身份导入、`audit_data_contracts.py` 的脚本规则) |
 | P2-15 测试套件不 hermetic:配好通知通道后跑测试会真的外发推送,且该副作用只在本地存在(CI 无 `.env` 故恒绿) | P2 | ✅ 已修复 (PR #123):`core/notifications.py` 的配置由导入期常量改为**调用时**读环境变量(常量会让 `monkeypatch.delenv` 失效,本机配了凭据时「缺凭据」用例静默变成「有凭据」);新增 autouse 守卫 `tests/conftest.py::_block_external_notifications`,把模块唯一出网点 `urlopen` 换成记录后拒绝调用的桩。红证:还原旧实现会让 `tests/test_notifications.py::test_level_is_read_at_call_time_not_cached_at_import` 与 `::test_channel_credentials_are_read_at_call_time` 变红,且在配好通道的条件下 `::test_bark_channel_without_device_key_skips_network`/`::test_channels_warn_when_type_requested_without_credentials` 一并变红(正是本机实测的两个失败);把守卫生效行改为空操作则 `::test_external_notification_is_blocked_in_tests` 变红(`assert 0 == 1`,日志里出现真实 `HTTP Error 400`——请求确已离开本机) |
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
