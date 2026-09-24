@@ -973,6 +973,107 @@ class TestHealthCheck:
         assert "估算" not in exact["report"]
         assert "日线数据" in exact["report"]
 
+    # ── 历史日期空洞巡检（已声明 vs 新增）──
+
+    def _db_with_dividend_yield(
+        self, health_db: str, rows: list[tuple[str, str, float | None]]
+    ) -> MagicMock:
+        """在 health_db 基础上补出 dividend_yield 列并写入指定行。"""
+        conn = sqlite3.connect(health_db)
+        conn.execute("ALTER TABLE fundamentals ADD COLUMN dividend_yield REAL")
+        conn.executemany(
+            "INSERT INTO fundamentals (ts_code, trade_date, dividend_yield) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+        return _mock_db_path(health_db)
+
+    def _run_health_check(self, db: MagicMock) -> dict:
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            return daily_pipeline.health_check(db)
+
+    def test_declared_dividend_yield_gap_is_reported_but_not_alerted(self, health_db: str):
+        """已登记的空洞只出现在报告里，不进 issues。
+
+        若不这样区分，每次巡检都会重报同一批不可回补的旧洞（2026-08 连续 8 次
+        告警无人处理），真正的新洞就淹没了。
+        """
+        db = self._db_with_dividend_yield(
+            health_db,
+            [("000001", "2026-09-17", None), ("600000", "2026-09-17", None)],
+        )
+        r = self._run_health_check(db)
+
+        assert not any("新增股息率空洞" in i for i in r["issues"])
+        assert "已声明 1 个，新增 0 个" in r["report"]
+        assert "2026-09-17" in r["report"]
+
+    def test_undeclared_dividend_yield_gap_is_alerted(self, health_db: str):
+        """未登记的空洞必须告警——这是本次改动的存在理由。"""
+        db = self._db_with_dividend_yield(
+            health_db,
+            [("000001", "2026-09-22", None), ("600000", "2026-09-22", None)],
+        )
+        r = self._run_health_check(db)
+
+        assert any("新增股息率空洞" in i and "2026-09-22" in i for i in r["issues"])
+        assert any("core/known_gaps.py" in i for i in r["issues"])
+
+    def test_partially_filled_date_is_not_a_gap(self, health_db: str):
+        """非空率达标（雪球覆盖约 60-70%）的日期不算空洞。"""
+        db = self._db_with_dividend_yield(
+            health_db,
+            [
+                ("000001", "2026-09-22", 3.1),
+                ("000002", "2026-09-22", 2.2),
+                ("600000", "2026-09-22", 1.4),
+                ("600001", "2026-09-22", None),
+            ],
+        )
+        r = self._run_health_check(db)
+
+        assert "已声明 0 个，新增 0 个" in r["report"]
+
+    def test_gaps_before_the_audit_era_are_out_of_scope(self, health_db: str):
+        """审计期之前（无逐任务轨迹、无法归因）的旧回填日期不进巡检。"""
+        db = self._db_with_dividend_yield(
+            health_db,
+            [("000001", "2026-06-30", None), ("600000", "2026-06-30", None)],
+        )
+        r = self._run_health_check(db)
+
+        assert "已声明 0 个，新增 0 个" in r["report"]
+
+    # ── 运行完整性 ──
+
+    def test_unfinished_previous_run_is_alerted(self, health_db: str):
+        """回归（2026-09-17）：上一轮开始后没有完成记录 → 必须告警。"""
+        db = _mock_db_path(health_db)
+        db.get_last_task_run.return_value = "in-progress:2026-09-17"
+
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"), \
+             patch("tasks.utility.datetime") as m:
+            m.now.return_value = datetime(2026, 9, 18)
+            m.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            r = daily_pipeline.health_check(db)
+
+        assert any("未完整结束" in i and "2026-09-17" in i for i in r["issues"])
+        assert "进行中" in r["report"]
+
+    def test_completed_run_is_not_alerted(self, health_db: str):
+        db = _mock_db_path(health_db)
+        db.get_last_task_run.return_value = "complete:2026-09-17"
+
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db)
+
+        assert not any("未完整结束" in i for i in r["issues"])
+        assert "已完整结束" in r["report"]
+
 
 # ===========================================================================
 # run_all
