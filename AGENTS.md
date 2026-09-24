@@ -82,7 +82,8 @@
 | P1-5 mypy CI 空转(`\|\| true` + 缺 `[tool.mypy]`) | P1 | ✅ 已修复 (PR #110):CI 跑无参数 `uv run mypy`,范围由 `[tool.mypy] files` 决定,且已含 `tests/` |
 | P1-6 `date: str = None` ×7 协议违规 | P1 | ✅ 已修复 (PR #110):`SmartMoneyDBProvider` 现已满足 `DatabaseInterface` |
 | P1-7 `TaskSpec.callable` 全是 None,registry 非单一真相 | P1 | ✅ 已修复 (PR #110):字段改为可选,自述"别处会填"的 `pass` 分支换成真实不变量校验 |
-| P2-8 10 个任务被 cadence 永久跳过但仍在 stage4 wiring | P2 | 已知设计取舍 |
+| P2-8 非日频任务仍在 `run_all` wiring（原述：「10 个任务被 cadence 永久跳过但仍在 stage4 wiring」） | P2 | ✅ 已核实证伪 (PR #118)：**不是缺陷**——10 个是**全 `run_all` wiring** 的计数（stage4 8 个 + stage1 `update_stock_list` + stage2 `update_china_macro`）；它们各自的 cadence 都在 weekly/monthly 层执行（那两层是注册表驱动，日志实测 weekly 跑过 10 次），全注册表「三层入口都覆盖不到的 cadence」= **0 个**；唯一代价是每次 daily 10 行跳过日志，无告警、无假 `task_runs`。**未删 wiring**：删掉会失去「改 cadence 即生效」这个单一生效点，且会让 daily `results` 里的键从 `{"status":"skipped"}` 变为缺失 |
+| P2-8b 排查时新发现：`core/freshness.py` 的非日频表集合与注册表分叉，且 `update_industry` 声明了一张不存在的表 | P2 | ✅ 已修复 (PR #118)：`fund_holdings`/`top10_shareholders` 漏出 `QUARTERLY_TABLES`（一旦落进过去的报告期就会在面板上永久「滞后」）已补入，并加规则型门禁 `tests/test_freshness.py::test_non_daily_task_tables_must_be_classified_as_non_daily`；`update_industry` 的 `tables` 由幻影表 `industry` 改为它真正写的 `stock_list` |
 | P2-9 `PARALLEL_WORKERS` 默认 1 vs help 写 4 | P2 | ✅ 已修复 (PR #114):代码默认对齐生产生效值 3(`.env` 实测),help 修正为真实作用域(仅 stage4 与 bars 内部池),ULTRA_SAFE 钉回 1 |
 | P2-10 `_to_float` 在 13 个模块重复 | P2 | ✅ 已修复 (PR #115):抽到 `core/utils.py` 的 `to_float`(非新建 `ak_utils.py`);`strip_percent` 开关只给 `stock_pledge`(其接口返回 `"3.5%"`),其余 12 个模块行为逐字不变 |
 | P2-11 `get_*_latest_date` 吞 `Exception` | P2 | ✅ 已修复 (PR #114):6 处收窄至 `(sqlite3.Error, OSError)` 并 WARNING 告警,`None` 仅代表「表空/无行」 |

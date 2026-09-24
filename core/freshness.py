@@ -36,6 +36,15 @@ def clear_freshness_cache() -> None:
         _LATEST_DATES_CACHE.clear()
         _COVERAGE_CACHE.clear()
 
+# 非日频表集合（数据源发布频率不是交易日频率，因此不按交易日衡量新鲜度）。
+#
+# 注意：这三组集合编码的是「**数据源发布频率**」，与 TaskSpec.cadence（**任务运行
+# 频率**）不是同一个事实，因此不能由 cadence 机械派生：stock_pledge 是日频任务、
+# 数据源每周发布；macro_quarterly 是月频任务、数据却是季频。
+#
+# 新增任何非日频表都必须同步到这里，否则 status_for_table 会 fallthrough 成按日频
+# 判定，在完整度面板上永久显示「滞后」且永不自愈（该断言见 tests/test_freshness.py）。
+
 # 按周度更新的表（数据源每周发布一次，不按交易日衡量新鲜度）
 WEEKLY_TABLES: set[str] = {
     "stock_pledge",  # 中登公司每周五更新质押比例
@@ -58,6 +67,8 @@ QUARTERLY_TABLES: set[str] = {
     "macro_quarterly",
     "north_hold",
     "earnings_forecast",
+    "top10_shareholders",  # 十大流通股东：随季报披露（report_date）
+    "fund_holdings",  # 基金持股：随季报披露（report_date）
 }
 
 # T+1 更新的表（数据源当日尚未公布，取最近已发布日期，不按交易日衡量新鲜度）
