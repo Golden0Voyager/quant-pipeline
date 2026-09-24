@@ -16,13 +16,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-# 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
-_CODE_DIR = os.path.expanduser("~/Code")
-if _CODE_DIR not in sys.path:
-    sys.path.insert(0, _CODE_DIR)
-_HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
-if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
-    sys.path.insert(0, _HUNTER_SRC)
+# 兄弟仓库（`smartmoney_hunter`）的路径由 `core/_bootstrap.py` 统一注入，并挂在
+# `core/__init__.py` 上——所以 `import core.config` 时它已经就位。不要再在这里内联
+# `sys.path` 操作：那样只覆盖「恰好先导入本模块」的调用方。
 
 logger = logging.getLogger(__name__)
 
