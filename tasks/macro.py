@@ -145,69 +145,6 @@ def update_north_hold(db: DatabaseInterface) -> dict:
 
 
 # ===========================================================================
-# 指数日线
-# ===========================================================================
-
-
-def _fetch_index_daily(trade_date: str) -> list[dict]:
-    """获取主要指数日线行情（上证、深证、创业板、科创50）。"""
-    if ak is None:
-        return []
-    records = []
-    indices = {
-        "sh000001": "上证指数",
-        "sz399001": "深证成指",
-        "sz399006": "创业板指",
-        "sh000688": "科创50",
-    }
-    for index_code, index_name in indices.items():
-        try:
-            df = ak.stock_zh_index_daily_tx(symbol=index_code)
-            if df is not None and not df.empty:
-                latest = df.iloc[-1]
-                records.append(
-                    {
-                        "index_code": index_code,
-                        "index_name": index_name,
-                        "trade_date": str(latest.get("date", trade_date))[:10],
-                        "open": float(latest.get("open", 0)),
-                        "high": float(latest.get("high", 0)),
-                        "low": float(latest.get("low", 0)),
-                        "close": float(latest.get("close", 0)),
-                        "volume": float(latest.get("volume", 0)),
-                        "data_source": "akshare",
-                    }
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ 指数 {index_name}({index_code}) 获取失败: {e}")
-    return records
-
-
-def update_index_daily(db: DatabaseInterface) -> dict:
-    """获取主要指数日线行情并保存。"""
-    logger.info("\n" + "=" * 60)
-    logger.info("📊 任务: 更新指数日线行情")
-    logger.info("=" * 60)
-
-    if ak is None:
-        logger.error("❌ akshare 未安装")
-        return {"saved": 0, "error": "akshare not installed"}
-
-    try:
-        records = _fetch_index_daily(get_expected_latest_trading_day())
-        if not records:
-            logger.warning("⚠️ 指数日线无数据")
-            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
-            return {"saved": 0, "total": 0}
-        saved = db.save_index_daily_batch(records)
-        logger.info(f"✅ 指数日线保存完成: {saved} 条")
-        return {"saved": saved, "total": len(records)}
-    except Exception as e:
-        logger.error(f"❌ 指数日线更新失败: {e}")
-        return {"saved": 0, "error": str(e), "error_kind": "network"}
-
-
-# ===========================================================================
 # 涨停跌停统计
 # ===========================================================================
 

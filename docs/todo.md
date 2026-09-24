@@ -83,7 +83,7 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | **实际任务** | `update_north_hold`（`tasks/macro.py`） |
 | **数据源** | 东财数据中心分页 API `RPT_MUTUAL_HOLDSTOCKNORTH_STA`（季度快照，全市场 ~3900 只） |
 | **表** | `north_hold`（ts_code, trade_date, hold_shares, hold_market_cap, hold_shares_ratio, …） |
-| **说明** | HKEX 自 2024-08-19 停止每日个股北向披露，故为**季度快照**（非日频）。`tasks/hkscc_holder.py` 是旧的逐股轮询方案（遍历 5500 只），**已废弃，勿注册** |
+| **说明** | HKEX 自 2024-08-19 停止每日个股北向披露，故为**季度快照**（非日频）。旧方案 `tasks/hkscc_holder.py`（逐股轮询 5500 只）已于 2026-09-24 删除：它写同一张 `north_hold` 表，但机制与数据源已被本任务整体取代，且 `26c081e` 早已将其 de-wire（同类处置先例：`insider_trading` 的孤儿文件删除 `bb097ec`） |
 
 ### 3.2 股东增减持 — 未做
 
