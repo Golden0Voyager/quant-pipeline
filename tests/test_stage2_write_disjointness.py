@@ -2,7 +2,7 @@
 
 审计结论
 --------
-stage2 的 32 个任务（``daily_pipeline.run_all`` 里的 ``stage2_raw_tasks``）落在 34 个 db
+stage2 的 34 个任务（``daily_pipeline.run_all`` 里的 ``stage2_raw_tasks``）落在 36 个 db
 写方法上，这 34 个方法各自只写一张互不相同的表，**写表两两不相交成立**。因此「写表相交」
 不是 stage2 维持串行的理由；``run_all`` 里旧注释声称的阻碍（共享 db provider 不能交给多个
 SQLite 线程）也已被 stage4 反证——stage4 同样共享该 provider 并并发 3 个任务。是否启用并发
@@ -71,6 +71,8 @@ _STAGE2_TASK_NAMES: frozenset[str] = frozenset(
         "update_dragon_tiger",
         "update_block_trade",
         "update_limit_up_down",
+        "update_stock_comment",
+        "update_hot_rank",
         "update_index_daily",
         "update_market_valuation",
         "update_south_flow",

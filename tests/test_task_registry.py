@@ -162,9 +162,11 @@ class TestRefreshPolicies:
 
     def test_all_trading_day_tasks_have_refresh_policy(self):
         specs = tuple(s for s in TASK_REGISTRY if s.cadence is Cadence.TRADING_DAY)
-        # 29：update_north_flow 已下线（北向日度流向 2024-08 起停止披露），
-        # update_placement_announcements 为定增公告台账（2026-09 接入）
-        assert len(specs) == 29
+        # 30：update_north_flow 已下线（北向日度流向 2024-08 起停止披露），
+        # update_placement_announcements 为定增公告台账（2026-09 接入），
+        # update_stock_comment 为千股千评全市场快照（2026-09 接入），
+        # update_hot_rank 为东财人气榜 Top-100 快照（2026-09 接入）
+        assert len(specs) == 31
         assert all(s.refresh_policy is not None for s in specs)
         assert {s.name for s in refreshable_trading_tasks()} == {
             s.name for s in specs
@@ -289,6 +291,8 @@ class TestRefreshPolicies:
             "update_cb_index": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK),
             "update_limit_up_down": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
             "update_concept_board": (RefreshKind.REMOTE_RUN_SNAPSHOT, DateStrategy.RUN_SNAPSHOT),
+            "update_stock_comment": (RefreshKind.REMOTE_RUN_SNAPSHOT, DateStrategy.RUN_SNAPSHOT),
+            "update_hot_rank": (RefreshKind.REMOTE_RUN_SNAPSHOT, DateStrategy.RUN_SNAPSHOT),
             "update_market_valuation": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.LATEST_AVAILABLE_WITHIN_LOOKBACK),
             "update_sector_derivatives": (RefreshKind.COMPOSITE_ATOMIC, DateStrategy.EXACT_TARGET),
             "update_option_sentiment": (RefreshKind.REMOTE_DATE_SNAPSHOT, DateStrategy.EXACT_TARGET),
