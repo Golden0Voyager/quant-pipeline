@@ -695,7 +695,13 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
     TaskSpec(
         name="update_industry",
         callable=None,
-        tables=("industry",),
+        # 本任务写的是 stock_list 的一个**列**（tasks/financials.py 用
+        # `UPDATE stock_list SET industry=...` 回填行业分类），并没有独立的 industry
+        # 表：生产库里 `no such table: industry`，migrations 也从未建过。此前声明成
+        # tables=("industry",) 会让 table_owners 返回一张幻影表，而它真正改动的
+        # stock_list 被欠声明；这类幻影又抓不到——scripts/audit_data_contracts.py
+        # 遍历的是 sqlite_master 里的真实表，幻影表不在它视野内。
+        tables=("stock_list",),
         cadence=Cadence.MONTHLY,
         date_columns={},
         empty_policy=EmptyPolicy.ALLOW,
