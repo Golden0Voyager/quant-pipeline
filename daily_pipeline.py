@@ -35,13 +35,11 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-# 将 ~/Code 加入 Python 路径（使 pipeline 能 import smartmoney_hunter）
-_CODE_DIR = os.path.expanduser("~/Code")
-if _CODE_DIR not in sys.path:
-    sys.path.insert(0, _CODE_DIR)
-_HUNTER_SRC = os.path.expanduser("~/Code/quant_hunter/src")
-if _HUNTER_SRC not in sys.path and os.path.isdir(_HUNTER_SRC):
-    sys.path.insert(0, _HUNTER_SRC)
+# 兄弟仓库（`smartmoney_hunter`）的路径由 `core._bootstrap` 统一注入。本文件后面有
+# 模块级 `from smartmoney_hunter ...`，作为入口这里显式调一次，不依赖「core 先被导入」。
+from core._bootstrap import ensure_sibling_paths
+
+ensure_sibling_paths()
 
 # ── Core module re-exports ──
 from core.calendar import get_expected_latest_trading_day
