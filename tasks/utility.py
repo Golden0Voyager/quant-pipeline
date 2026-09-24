@@ -19,7 +19,14 @@ import pandas as pd  # noqa: F401
 
 from core.calendar import get_expected_latest_trading_day
 from core.config import DB_PATH, SHARED_DATA_DIR  # noqa: F401
-from core.known_gaps import AUDIT_ERA_START, describe_known_gap, is_known_gap
+from core.day_coverage import missing_trading_days, scan_window
+from core.known_gaps import (
+    AUDIT_ERA_START,
+    describe_known_gap,
+    describe_missing_day,
+    is_known_gap,
+    is_known_missing_day,
+)
 from core.monitor import AkShareMonitor  # noqa: F401
 from core.run_state import describe_run_state, read_run_state
 from core.utils import is_real_db_path, should_skip_beijing, should_update  # noqa: F401
@@ -364,6 +371,29 @@ def health_check(db: DatabaseInterface, fast: bool = False) -> dict:
             )
     except sqlite3.OperationalError as exc:
         report_lines.append(f"  股息率空洞巡检跳过（表/列缺失）: {exc}")
+
+    # ── 整日缺席巡检（2026-09-24 新增） ──
+    # 比股息率空洞更粗的一种：整天什么都没写。它不是「某个字段没写」，而是当天
+    # 管线只跑了一部分（或根本没启动）——两种形态的逐日证据见 core/known_gaps.py。
+    # 上一条巡检扫的是「存在于 fundamentals 的日期」，所以**缺席的日子不会出现在
+    # 它结果里**；这里才是那个观察点。同样只对**不在册**的告警。
+    window = scan_window(AUDIT_ERA_START, get_expected_latest_trading_day())
+    if window is None:
+        report_lines.append("\n  整日缺席巡检跳过（窗口内交易日不足或日历不可用）")
+    else:
+        absent = missing_trading_days(cursor, start=window[0], end=window[1])
+        declared_absent = [d for d in absent if is_known_missing_day(d)]
+        new_absent = [d for d in absent if not is_known_missing_day(d)]
+        report_lines.append(
+            f"\n  整日缺席巡检（{window[0]} ~ {window[1]}）: "
+            f"已声明 {len(declared_absent)} 天，新增 {len(new_absent)} 天"
+        )
+        for day in declared_absent:
+            report_lines.append(f"    {day} 已声明：{describe_missing_day(day)}")
+        for day in new_absent:
+            issues.append(
+                f"整日缺席: {day} 无任何写入且未登记在 core/known_gaps.py"
+            )
 
     # ── 运行完整性（2026-09-24 新增） ──
     # 部分运行的危害见 core/run_state.py：任务全 success、无告警，只留下数据空洞。
