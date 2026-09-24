@@ -139,6 +139,7 @@ from tasks.fund_holdings import update_fund_holdings
 from tasks.futures import update_futures
 from tasks.global_assets import update_global_assets
 from tasks.hk_tech_index import update_hk_tech_index
+from tasks.hot_rank import update_hot_rank
 from tasks.index_chain import (
     update_chip_distribution_em,
     update_chip_distribution_em_fullmarket,
@@ -169,6 +170,7 @@ from tasks.money_market import update_money_market
 from tasks.option_sentiment import update_option_sentiment
 from tasks.placement import update_placement_announcements
 from tasks.sector_derivatives import update_sector_derivatives
+from tasks.stock_comment import update_stock_comment
 from tasks.stock_pledge import update_stock_pledge
 from tasks.stock_repurchase import update_stock_repurchase
 from tasks.top10_shareholders import update_top10_shareholders
@@ -232,6 +234,8 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_restricted_share": update_restricted_share,
     "update_earnings_forecast": update_earnings_forecast,
     "update_limit_up_down": update_limit_up_down,
+    "update_stock_comment": update_stock_comment,
+    "update_hot_rank": update_hot_rank,
     "update_dividend_summary": update_dividend_summary,
     "update_china_macro": update_china_macro,
     "update_money_market": update_money_market,
@@ -498,6 +502,8 @@ def run_all(
         results["dragon_tiger"] = _run_task("update_dragon_tiger", update_dragon_tiger, db)
         results["block_trade"] = _run_task("update_block_trade", update_block_trade, db)
         results["limit_up_down"] = _run_task("update_limit_up_down", update_limit_up_down, db)
+        results["stock_comment"] = _run_task("update_stock_comment", update_stock_comment, db)
+        results["hot_rank"] = _run_task("update_hot_rank", update_hot_rank, db)
         results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
         results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
         results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
@@ -564,6 +570,8 @@ def run_all(
             ("update_dragon_tiger", update_dragon_tiger, (db,), {}),
             ("update_block_trade", update_block_trade, (db,), {}),
             ("update_limit_up_down", update_limit_up_down, (db,), {}),
+            ("update_stock_comment", update_stock_comment, (db,), {}),
+            ("update_hot_rank", update_hot_rank, (db,), {}),
             ("update_index_daily", update_index_daily, (db,), {}),
             ("update_market_valuation", update_market_valuation, (db,), {}),
             ("update_south_flow", update_south_flow, (db,), {}),
@@ -592,7 +600,7 @@ def run_all(
         # 3 个任务，其写表两两不相交、有审计与测试钉住（tests/test_stage4_concurrency.py）。
         #
         # 写表不相交审计已于 2026-09-24 完成（tests/test_stage2_write_disjointness.py）：
-        # 这 32 个任务落在 34 个 db 写方法上，方法各自只写一张互不相同的表，写表两两不
+        # 这 34 个任务落在 36 个 db 写方法上，方法各自只写一张互不相同的表，写表两两不
         # 相交成立；其中 11 个方法委托 smartmoney_hunter 写，该路径已由 stage4 的生产
         # 并发与并发压测覆盖。也就是说「写表相交」不再是保持串行的理由。
         #
@@ -622,6 +630,8 @@ def run_all(
         results["dragon_tiger"] = stage2_results.get("update_dragon_tiger", {})
         results["block_trade"] = stage2_results.get("update_block_trade", {})
         results["limit_up_down"] = stage2_results.get("update_limit_up_down", {})
+        results["stock_comment"] = stage2_results.get("update_stock_comment", {})
+        results["hot_rank"] = stage2_results.get("update_hot_rank", {})
         results["index_daily"] = stage2_results.get("update_index_daily", {})
         results["market_valuation"] = stage2_results.get("update_market_valuation", {})
         results["south_flow"] = stage2_results.get("update_south_flow", {})

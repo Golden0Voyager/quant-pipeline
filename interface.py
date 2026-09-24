@@ -237,6 +237,14 @@ class DatabaseInterface(Protocol):
         """批量保存恒生科技指数日线，返回实际保存条数。"""
         ...
 
+    def save_stock_comment_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存千股千评全市场快照，返回实际保存条数。"""
+        ...
+
+    def save_stock_hot_rank_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存东财人气榜 Top-100 快照，返回实际保存条数。"""
+        ...
+
     def get_hk_tech_latest_date(self) -> str | None:
         """轻量查询：hk_tech_index_daily 中的最新 trade_date。"""
         ...

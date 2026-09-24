@@ -362,6 +362,45 @@ STOCK_REPURCHASE_CONTRACT = DataContract(
     min_rows=1,
 )
 
+STOCK_COMMENT_CONTRACT = DataContract(
+    name="stock_comment",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("code", required=True, nullable=False),
+        FieldRule("name"),
+        FieldRule("close_price"),
+        FieldRule("change_pct"),
+        FieldRule("turnover"),
+        FieldRule("pe_dynamic"),
+        FieldRule("prime_cost"),
+        FieldRule("org_participation"),
+        FieldRule("composite_score"),
+        FieldRule("rank_up"),
+        FieldRule("rank"),
+        FieldRule("focus_index"),
+        FieldRule("data_source", nullable=False),
+    ),
+    unique_by=("trade_date", "code"),
+    min_rows=1000,
+)
+
+STOCK_HOT_RANK_CONTRACT = DataContract(
+    name="stock_hot_rank",
+    fields=(
+        FieldRule("trade_date", required=True, nullable=False),
+        FieldRule("code", required=True, nullable=False),
+        FieldRule("name"),
+        FieldRule("rank", required=True, nullable=False),
+        FieldRule("rank_change"),
+        FieldRule("prev_rank"),
+        FieldRule("close_price"),
+        FieldRule("change_pct"),
+        FieldRule("data_source", nullable=False),
+    ),
+    unique_by=("trade_date", "code"),
+    min_rows=90,
+)
+
 INSTITUTION_SURVEY_CONTRACT = DataContract(
     name="institution_survey",
     fields=(

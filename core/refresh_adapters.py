@@ -58,6 +58,7 @@ from tasks.finance_flow import (
     fetch_etf_daily_records,
     fetch_south_flow_records,
 )
+from tasks.hot_rank import fetch_hot_rank_records
 from tasks.index_chain import (
     _INDEX_DAILY_REFRESH_INDICES,
     fetch_chip_em_record_for_refresh,
@@ -81,6 +82,7 @@ from tasks.sector_derivatives import (
     fetch_sector_daily_records,
     fetch_sector_valuation_records,
 )
+from tasks.stock_comment import fetch_stock_comment_records
 from tasks.stock_pledge import fetch_stock_pledge_records
 from tasks.stock_repurchase import fetch_stock_repurchase_records
 from tasks.valuation_chain import (
@@ -2104,6 +2106,137 @@ class ConceptBoardRefreshAdapter:
 
 
 # ===========================================================================
+# update_stock_comment / update_hot_rank（运行快照 → 目标日分区替换）
+# ===========================================================================
+
+_STOCK_COMMENT_COLUMNS = (
+    "trade_date",
+    "code",
+    "name",
+    "close_price",
+    "change_pct",
+    "turnover",
+    "pe_dynamic",
+    "prime_cost",
+    "org_participation",
+    "composite_score",
+    "rank_up",
+    "rank",
+    "focus_index",
+    "data_source",
+)
+
+
+@dataclass
+class StockCommentRefreshAdapter:
+    """千股千评：目标日分区替换清盘中残留，历史分区不动。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_stock_comment_records)
+
+    task_name = "update_stock_comment"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+        if not records:
+            raise RefreshValidationError("stock comment snapshot is empty")
+
+        rows = _snapshot_rows(
+            [{**record, "trade_date": target} for record in records],
+            _STOCK_COMMENT_COLUMNS,
+            ("trade_date", "code"),
+        )
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="stock_comment",
+                columns=_STOCK_COMMENT_COLUMNS,
+                rows=_as_store_rows(rows, _STOCK_COMMENT_COLUMNS),
+                date_column="trade_date",
+                date_value=target,
+                natural_keys=("trade_date", "code"),
+                required_fields=("code",),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"run_id": context.run_id},
+        )
+
+
+_STOCK_HOT_RANK_COLUMNS = (
+    "trade_date",
+    "code",
+    "name",
+    "rank",
+    "rank_change",
+    "prev_rank",
+    "close_price",
+    "change_pct",
+    "data_source",
+)
+
+
+@dataclass
+class HotRankRefreshAdapter:
+    """东财人气榜 Top-100：目标日分区替换清盘中残留，历史分区不动。"""
+
+    store: SQLiteRefreshStore
+    fetch_records: Callable[[str], list[dict]] = field(default=fetch_hot_rank_records)
+
+    task_name = "update_hot_rank"
+
+    def refresh(self, context: RefreshContext) -> RefreshAdapterResult:
+        if context.symbols == ():
+            return _noop_result(self.task_name, context)
+        target = context.target_date
+
+        records = self.fetch_records(target)
+        if not records:
+            raise RefreshValidationError("hot rank snapshot is empty")
+
+        rows = _snapshot_rows(
+            [{**record, "trade_date": target} for record in records],
+            _STOCK_HOT_RANK_COLUMNS,
+            ("trade_date", "code"),
+        )
+        self.store.replace_date_snapshot(
+            DateSnapshotReplacement(
+                table="stock_hot_rank",
+                columns=_STOCK_HOT_RANK_COLUMNS,
+                rows=_as_store_rows(rows, _STOCK_HOT_RANK_COLUMNS),
+                date_column="trade_date",
+                date_value=target,
+                natural_keys=("trade_date", "code"),
+                required_fields=("code", "rank"),
+            )
+        )
+
+        return RefreshAdapterResult(
+            task_name=self.task_name,
+            as_of_date=target,
+            fetched=len(records),
+            validated=len(rows),
+            replaced=len(rows),
+            retained=0,
+            failed_symbols=(),
+            changed_symbols=(),
+            metadata={"run_id": context.run_id},
+        )
+
+
+# ===========================================================================
 # update_cb_quotation（运行快照，表即快照 → 整表替换）
 # ===========================================================================
 
@@ -2494,6 +2627,8 @@ REFRESH_ADAPTERS: dict[str, type] = {
     "update_sector_fund_flow": SectorFundFlowRefreshAdapter,
     "update_ah_premium": AhPremiumRefreshAdapter,
     "update_concept_board": ConceptBoardRefreshAdapter,
+    "update_stock_comment": StockCommentRefreshAdapter,
+    "update_hot_rank": HotRankRefreshAdapter,
     "update_cb_quotation": CbQuotationRefreshAdapter,
     "update_cb_redeem": CbRedeemRefreshAdapter,
     "update_stock_repurchase": StockRepurchaseRefreshAdapter,
@@ -2538,6 +2673,8 @@ def build_all_refresh_adapters(
         "update_sector_fund_flow": SectorFundFlowRefreshAdapter(store=store),
         "update_ah_premium": AhPremiumRefreshAdapter(store=store),
         "update_concept_board": ConceptBoardRefreshAdapter(store=store),
+        "update_stock_comment": StockCommentRefreshAdapter(store=store),
+        "update_hot_rank": HotRankRefreshAdapter(store=store),
         "update_cb_quotation": CbQuotationRefreshAdapter(store=store),
         "update_cb_redeem": CbRedeemRefreshAdapter(store=store),
         "update_stock_repurchase": StockRepurchaseRefreshAdapter(store=store),

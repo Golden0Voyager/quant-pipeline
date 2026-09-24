@@ -1271,6 +1271,93 @@ class SmartMoneyDBProvider:
             logging.getLogger(__name__).warning(f"⚠️ 恒生科技指数批量保存失败: {e}")
             return 0
 
+    def save_stock_comment_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存千股千评全市场快照到 stock_comment 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/024_stock_comment.sql 创建。同一 (trade_date, code)
+        重复抓取时覆盖旧行（源为整表快照，幂等重跑安全）。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO stock_comment (
+                        trade_date, code, name, close_price, change_pct,
+                        turnover, pe_dynamic, prime_cost, org_participation,
+                        composite_score, rank_up, rank, focus_index,
+                        data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r["code"],
+                            r.get("name"),
+                            r.get("close_price"),
+                            r.get("change_pct"),
+                            r.get("turnover"),
+                            r.get("pe_dynamic"),
+                            r.get("prime_cost"),
+                            r.get("org_participation"),
+                            r.get("composite_score"),
+                            r.get("rank_up"),
+                            r.get("rank"),
+                            r.get("focus_index"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ 千股千评批量保存失败: {e}")
+            return 0
+
+    def save_stock_hot_rank_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存东财人气榜 Top-100 快照到 stock_hot_rank 表。
+
+        使用原始 SQL 因 DatabaseManager（外部包）无该方法；表由
+        migrations/025_stock_hot_rank.sql 创建。同一 (trade_date, code)
+        重复抓取时覆盖旧行（源为整表快照，幂等重跑安全）。
+        """
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO stock_hot_rank (
+                        trade_date, code, name, rank, rank_change, prev_rank,
+                        close_price, change_pct, data_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["trade_date"],
+                            r["code"],
+                            r.get("name"),
+                            r.get("rank"),
+                            r.get("rank_change"),
+                            r.get("prev_rank"),
+                            r.get("close_price"),
+                            r.get("change_pct"),
+                            r.get("data_source"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️ 人气榜批量保存失败: {e}")
+            return 0
+
     def get_hk_tech_latest_date(self) -> str | None:
         """轻量查询：直接 SQL 取 hk_tech_index_daily 的 MAX(trade_date)。"""
         try:
