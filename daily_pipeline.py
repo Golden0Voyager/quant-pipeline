@@ -590,10 +590,16 @@ def run_all(
         # stage2 保持串行（max_workers=1）。旧注释称阻碍是「不能把共享 db provider
         # 交给多个 SQLite 线程」——已被 stage4 反证：stage4 同样共享该 provider 并并发
         # 3 个任务，其写表两两不相交、有审计与测试钉住（tests/test_stage4_concurrency.py）。
-        # 真正的前置条件是 stage2 这 33 个任务的写表不相交审计，尚未做过。
-        # 另需注意收益上限：耗时占比最高的两个任务（约 75%，日志实测）是纯本地计算，
-        # 内部已各自用线程池并行 + 批量写（tasks/core_chain.py），任务级并发只对
-        # 网络型小任务有收益。
+        #
+        # 写表不相交审计已于 2026-09-24 完成（tests/test_stage2_write_disjointness.py）：
+        # 这 32 个任务落在 34 个 db 写方法上，方法各自只写一张互不相同的表，写表两两不
+        # 相交成立；其中 11 个方法委托 smartmoney_hunter 写，该路径已由 stage4 的生产
+        # 并发与并发压测覆盖。也就是说「写表相交」不再是保持串行的理由。
+        #
+        # 仍然串行的理由是收益上限而非正确性：耗时占比最高的两个任务（实测约占 75%）
+        # 是纯本地计算且内部已用线程池并行 + 批量写（tasks/core_chain.py），任务级并发
+        # 只对网络型小任务有收益。若要提速，应做「计算道 + 网络道」双车道，而不是把
+        # 全体任务按 N 路均分；那是一次独立的行为变更。
         stage2_ran = run_parallel_tasks(stage2_ptasks, max_workers=1, runner_fn=_safe_task)
         stage2_results.update(stage2_ran)
 
