@@ -152,6 +152,33 @@ if _REPO_ROOT not in sys.path:
   退出码非 0。生产库验收（只读）：改动前 `health_check` 对生产库返回 `success` / 0 问题，
   改动后返回 `degraded` 且只命中 `update_concept_board`。
 
+### 7. WAL 文件只涨不缩：上限**不是**持久设置，收尾必须显式回收
+- WAL 文件是**高水位线**：单个大事务把它撑到事务大小，之后即使 checkpoint 早已完成、帧被
+  反复复用，文件也不会缩小。实测：310 MB 的单个事务提交后 WAL 停在 310 MB，**再多的写入都不缩**；
+  `PRAGMA wal_autocheckpoint`（默认 1000 帧 ≈ 4 MB）只把帧写回主库，**不缩文件**。
+- 生产库现场（2026-09-25 只读复核）：`quant_core.db-wal` = **2.39 GiB**，而同一时刻活跃日志只有
+  **22,350 帧（87 MB）**，`PRAGMA wal_checkpoint(PASSIVE)` 返回 `busy=0`（没有任何读者在阻塞
+  checkpoint）—— 96% 的文件是活跃日志之外的死区，纯占磁盘。
+- **曾经的怀疑已证伪**：8/2 遗留的 multiprocessing 孤儿 worker（4 个，含 `resource_tracker`／
+  `spawn_main`）抓着 WAL 读快照、导致无法 checkpoint —— 清掉它们之后文件**纹丝不动**。
+  后续实验进一步排除「批量写入太多」：短命写连接 + 常驻读连接写 8 万行的复现里，文件稳定在
+  9.3 MB；成因就是**单个巨型事务**。
+- `journal_size_limit` 是**每连接**设置、**不写进库头**（实测：设完关闭连接，新连接读回默认 `-1`），
+  所以「找一处设一次」在架构上不成立，**每个写连接都必须自己设** —— 与 P2-15「配置要在调用时
+  读取」是同一类陷阱。
+- 两个手段互补，不是二选一：
+  - `journal_size_limit` 在「超大 WAL 代被 reset 后的**第一次写入**」把文件缩回上限（实测
+    limit=8 MiB 时 310 MB 残留 → 8.4 MB，**不是提交那一刻**）；而批量回填的典型形态是「巨型
+    事务之后本轮就结束了」，那一次写入可能永远不会来，所以要等下一次运行才生效。
+  - `PRAGMA wal_checkpoint(TRUNCATE)` **立即**截到 0，且在其他连接（TUI、正在跑的分批写入）
+    持有连接时同样成功（生产库 2.39 GiB → 0，5.5 s；主库只增加原本只存在于 WAL 里的那 27 页）。
+- 唯一出处 `core/db_pragmas.py`：`apply_write_pragmas`（WAL + 上限，默认 64 MiB，
+  `QUANT_WAL_SIZE_LIMIT_MB` 可覆盖）、`truncate_wal`（尽力而为、绝不抛异常）。
+  `daily_pipeline` 收尾与 `scripts/reconcile_with_akshare.py` 收尾各回收一次。
+- 门禁 `tests/test_db_pragmas.py`：`PRAGMA journal_mode` 全仓只准出现在该模块 —— 散在 7 处时
+  「漏一处」就等于**没有上限**，而漏掉的那一处照样「工作正常」（WAL 生效、读写都对），只是
+  悄悄把磁盘吃光。
+
 ---
 
 ## 🧪 回归测试规范(red-proof)
@@ -188,3 +215,4 @@ if _REPO_ROOT not in sys.path:
 | P2-15 测试套件不 hermetic:配好通知通道后跑测试会真的外发推送,且该副作用只在本地存在(CI 无 `.env` 故恒绿) | P2 | ✅ 已修复 (PR #123):`core/notifications.py` 的配置由导入期常量改为**调用时**读环境变量(常量会让 `monkeypatch.delenv` 失效,本机配了凭据时「缺凭据」用例静默变成「有凭据」);新增 autouse 守卫 `tests/conftest.py::_block_external_notifications`,把模块唯一出网点 `urlopen` 换成记录后拒绝调用的桩。红证:还原旧实现会让 `tests/test_notifications.py::test_level_is_read_at_call_time_not_cached_at_import` 与 `::test_channel_credentials_are_read_at_call_time` 变红,且在配好通道的条件下 `::test_bark_channel_without_device_key_skips_network`/`::test_channels_warn_when_type_requested_without_credentials` 一并变红(正是本机实测的两个失败);把守卫生效行改为空操作则 `::test_external_notification_is_blocked_in_tests` 变红(`assert 0 == 1`,日志里出现真实 `HTTP Error 400`——请求确已离开本机) |
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
 | P2-18 连续 `retained` 静默退化:`retained` 以 0 退出、只记 `warning`,而 `NOTIFICATION_LEVEL` 默认 `error` 恰好压掉它 → 任务连续多日「数据完全没更新」而整轮仍报「全部完成」 | P2 | ✅ 已修复 (PR #126):新增 `core/retained_streak.py` —— 同一任务**连续 3 个运行日**裁定均为 `retained` 即命中;一天只认最后一次**有结论**的运行(排除残留的 `status='running'` 父行)、按**上海运行日**聚合(`finished_at` 按 UTC 落库,UTC 16:00 后属上海次日)、没有运行的日子跳过而不打断、只报**仍在持续**的(恢复即清零,避免旧噪音天天重报)。刻意**不设豁免名单**:`known_gaps` 登记的是不可回补的历史空洞,连续 retained 是**正在发生、可修复**的退化,声明掉等于让它继续静默。`tasks/utility.py::health_check` 新增巡检段,命中进 `issues` → 本轮 `degraded` → `daily_pipeline` 收尾通知升为 **error 级**、退出码非 0(且 `ingestion_runs` 缺失时跳过并在报告里写明)。生产库验收(只读):改动前 `health_check` 对生产库返回 `success`/0 问题,改动后返回 `degraded` 且只命中 `update_concept_board`(连续 5 天 09-21~09-25;`update_fund_flow` 连续 3 天后已于 09-24 恢复故不报)。红证:还原 `tasks/utility.py` 会让 `tests/test_daily_pipeline.py::TestHealthCheck` 的 4 个新用例变红;去掉 `_run_day` 的时区折算 → 2 个用例红;把「只数最近连续段」改成「数全部 retained 日」→ 2 个用例红 |
+| P2-19 WAL 文件被单个巨型事务撑成**只涨不缩**的高水位线(生产库长期占着 2.39 GiB,而活跃日志只有 87 MB),且 `journal_size_limit` 不持久 → 上限必须每个写连接各设一次,内联写法散在 7 处 | P2 | ✅ 已修复 (PR #129):新增 `core/db_pragmas.py` 作为 WAL 与体积上限的**唯一出处**(`apply_write_pragmas` 默认 64 MiB、`QUANT_WAL_SIZE_LIMIT_MB` 可覆盖;`truncate_wal` 尽力而为、绝不抛异常),原 7 处内联写法全部收敛(`providers` ×2 / `core/migrations` / `scripts` ×3),`daily_pipeline` 收尾与 `scripts/reconcile_with_akshare.py` 收尾各回收一次。顺带修掉真缺陷:`scripts/backfill_historical_valuation.py` 此前**根本没有仓库根注入**(它只 import 第三方,还没 import 过仓库模块),接入后按 P2-16b 规则补上统一引导,并把该脚本纳入「外部 cwd 跑 `--help`」探针。生产库验收:`2.39 GiB → 0`(5.5 s,当时 TUI 与正在跑的 pipeline 都持有连接)、其后 `PRAGMA quick_check` = ok(289 s)、`page_count × page_size` 与文件字节精确一致、`freelist_count` = 0。红证:去掉 `journal_size_limit` → 3 个用例红;`providers._get_write_conn` 退回内联写法 → 2 个用例红(含「唯一出处」门禁);`daily_pipeline` 收尾去掉回收 → 1 个用例红(合计 6 个) |
