@@ -134,6 +134,25 @@ async def test_widgets_present():
 
 
 @pytest.mark.asyncio
+async def test_startup_auto_focus_lands_on_status_dashboard():
+    """启动自动聚焦必须落在状态看板上(窄屏滚动红证)。
+
+    窄屏下 #main-grid 可滚动(overflow-y: auto)。AUTO_FOCUS="*" 按 DOM 顺序取
+    第一个可聚焦控件,若落到其后的 LogsWidget,Screen.focus 的 scroll_to_center
+    会把网格滚到上限,Dashboard 的边框标题("Dashboard")滚出视口 ——
+    CI tests/test_tui_tmux.py::test_copy_panel_opens_and_closes 第 80 行因此
+    等不到 "Dashboard"。还原 DashboardWidget 的 can_focus=True 会让本用例
+    focused 变回 live-logs 而变红。
+    """
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        app = PipelineApp()
+        async with app.run_test():
+            focused = app.screen.focused
+            assert focused is not None
+            assert focused.id == "status-dashboard"
+
+
+@pytest.mark.asyncio
 async def test_dashboard_widget_caches_stock_count():
     from tui import DashboardWidget
     app = PipelineApp()
