@@ -21,8 +21,23 @@
 ────────────────────────
 - ``core/__init__.py`` / ``tasks/__init__.py``：包级 choke point，覆盖该包下所有子模块；
 - ``daily_pipeline.py`` / ``providers.py``：顶层模块，没有包级 choke point，各显式调一次；
-- ``scripts/*.py``：先内联注入仓库根（直接执行时 ``sys.path[0]`` 是 ``scripts/``，
-  此刻还 import 不到本模块），再调用本函数接管兄弟仓库路径。
+- ``scripts/*.py``：直接执行入口（``sys.path[0]`` 是 ``scripts/``），**此刻还 import 不到本模块**
+  —— 所以「注入仓库根」这一句只能就地写，抽不成函数（语言层面的先后顺序）。
+
+  共用的写法只有一种，由 ``tests/test_sys_path_bootstrap.py`` 逐字卡住（此前 9 个脚本里有
+  4 种写法，且 3 个用无条件的 ``sys.path.insert`` 把仓库根顶到最前，可能遮蔽已安装包）::
+
+      _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+      if _REPO_ROOT not in sys.path:
+          sys.path.insert(0, _REPO_ROOT)
+
+  兄弟仓库路径**不需要**脚本显式调用本函数：只 import ``core.*`` / ``tasks.*`` 的脚本已被上面两个
+  包级 choke point 覆盖；只有**直接** import ``smartmoney_hunter``（今天的唯一一例是
+  ``scripts/repair_turnover.py``）或顶层 ``providers`` 的脚本才要显式调一次。这条也由门禁派生检查
+  （「有模块级跨仓库 import ⇒ 必须在本模块级调用 ``ensure_sibling_paths()``」），不靠人记。
+
+  脚本也不得再硬编码仓库位置（``~/Code/quant_pipeline`` 之类）：``scripts/parallel_backfill.py``
+  曾把它写死，于是从另一个 checkout 运行时 worker 会被指向**另一个**仓库副本。
 
 一处已核实并删除的历史声明
 ──────────────────────────
