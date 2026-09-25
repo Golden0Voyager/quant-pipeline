@@ -35,6 +35,15 @@ for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# 仓库根目录必须就地注入：本脚本以 `python scripts/backfill_historical_valuation.py`
+# 直接执行，此时 `sys.path[0]` 是 scripts/，还 import 不到 core。注入之后，兄弟仓库的
+# 路径交给 `core._bootstrap` 统一处理。
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from core.db_pragmas import apply_write_pragmas  # noqa: E402
+
 DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 
 
@@ -169,7 +178,8 @@ def main() -> int:
 
     # 连接数据库
     conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
+    # 原本只开 WAL；其余 PRAGMA 保持脚本原有行为（synchronous=None 表示不动）
+    apply_write_pragmas(conn, synchronous=None)
     cur = conn.cursor()
 
     # 确保表存在
