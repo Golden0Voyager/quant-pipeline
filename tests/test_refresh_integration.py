@@ -29,6 +29,7 @@ from core.refresh_store import (
     DateSnapshotReplacement,
     KeyedUpsertReplacement,
     SQLiteRefreshStore,
+    load_interrupted_refresh,
 )
 from core.task_registry import (
     DateStrategy,
@@ -634,3 +635,81 @@ def test_degraded_run_yields_nonzero_exit_semantics(
     assert audits["update_fund_flow"]["status"] == "degraded"
     assert audits["update_fund_flow"]["failed"] == 1
     assert _run_rows(db_path)[0][2] == "degraded"
+
+
+# ── acceptance: resume an interrupted run without redoing settled work ──
+
+
+def _task_rows_for(db_path: Path, run_id: str) -> dict[str, dict[str, Any]]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return {
+            row["task_name"]: dict(row)
+            for row in conn.execute(
+                "SELECT * FROM refresh_task_runs WHERE run_id = ?", (run_id,)
+            )
+        }
+
+
+def test_resume_carries_settled_tasks_into_a_new_run(
+    db_path: Path, store: SQLiteRefreshStore
+) -> None:
+    """端到端：中断运行 → load_interrupted_refresh → 续跑不重做已落定任务。
+
+    中断运行留下了一个停在 ``running`` 的 run（模拟 SIGKILL）与一行已成功的
+    ``update_bars``。续跑必须沿用该任务（适配器零调用），并把完整的每任务
+    审计落到新 run 上，同时不改写旧 run 的历史。
+    """
+    specs = refreshable_trading_tasks()
+    store.start_run(
+        run_id="interrupted",
+        target_date=_TARGET,
+        started_at="2026-07-27T08:05:00+00:00",
+    )
+    store.record_task_result(
+        run_id="interrupted",
+        task_name="update_bars",
+        policy_kind="remote_keyed_upsert",
+        requested_date=_TARGET,
+        as_of_date=_TARGET,
+        status="success",
+        fetched=5,
+        validated=5,
+        replaced=5,
+        retained=0,
+        failed=0,
+    )
+
+    found = load_interrupted_refresh(db_path, target_date=_TARGET)
+    assert found is not None
+    parent_run_id, outcomes = found
+    assert parent_run_id == "interrupted"
+    assert [outcome.task_name for outcome in outcomes] == ["update_bars"]
+    assert outcomes[0].replaced == 5
+
+    adapters = _build_adapters(specs)
+    orchestrator = RefreshOrchestrator(
+        specs=specs,
+        adapters=adapters,
+        store=store,
+        clock=lambda: datetime(2026, 7, 27, 9, 0, tzinfo=UTC),
+    )
+
+    result = orchestrator.run(_context(run_id="resumed"), resume_from=outcomes)
+
+    assert result.status is TaskStatus.SUCCESS
+    bars = adapters["update_bars"]
+    assert isinstance(bars, GenericAdapter)
+    assert bars.contexts == []  # 已完成的任务绝不重跑
+
+    rows = _task_rows_for(db_path, "resumed")
+    assert set(rows) == {spec.name for spec in specs}
+    assert json.loads(rows["update_bars"]["metadata_json"])["resumed"] is True
+    assert rows["update_bars"]["replaced"] == 5
+
+    # 旧 run 保持原样：仍是 running，没有被续跑改写
+    with sqlite3.connect(db_path) as conn:
+        parent = conn.execute(
+            "SELECT status, finished_at FROM refresh_runs WHERE run_id = 'interrupted'"
+        ).fetchone()
+    assert parent == ("running", None)

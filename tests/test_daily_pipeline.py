@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -19,6 +20,7 @@ import daily_pipeline
 from core.refresh import CrossSourceCheckConfig, RefreshOrchestrator
 from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
+from core.refresh_store import ResumedTaskOutcome
 from core.retained_streak import RetainedStreak
 from core.task_result import ErrorKind, TaskResult, normalize_task_result
 
@@ -1557,7 +1559,7 @@ class TestRunCloseRefresh:
         captured: list = []
 
         class FakeOrchestrator:
-            def run(self, context):
+            def run(self, context, *, resume_from=()):
                 captured.append(context)
                 return TaskResult.success("refresh_today", saved=0)
 
@@ -1594,7 +1596,7 @@ class TestRunCloseRefresh:
         captured: list = []
 
         class FakeOrchestrator:
-            def run(self, context):
+            def run(self, context, *, resume_from=()):
                 captured.append(context)
                 return TaskResult.success("refresh_today", saved=0)
 
@@ -1650,6 +1652,77 @@ class TestRunCloseRefresh:
         assert store.calls[0][0] == "start"
         assert store.calls[0][1]["target_date"] == "2026-07-27"
         assert store.calls[-1][0] == "finish"
+
+    def test_resume_without_interrupted_run_warns_and_runs_normally(
+        self, tmp_path, caplog
+    ):
+        """无可续跑的中断运行时，--resume 只告警，绝不因此中止刷新。"""
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt, \
+             patch("daily_pipeline.load_interrupted_refresh", return_value=None) as loader, \
+             caplog.at_level(logging.WARNING, logger="daily_pipeline"):
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                resume=True,
+                orchestrator=_empty_orchestrator(store),
+            )
+        loader.assert_called_once_with(
+            str(tmp_path / "refresh.db"), target_date="2026-07-27"
+        )
+        assert result.exit_failure is False
+        assert [name for name, _ in store.calls] == ["start", "finish"]
+        assert "未找到" in caplog.text
+
+    def test_resume_forwards_settled_outcomes_to_orchestrator(self, tmp_path):
+        """命中中断运行时，已落定的任务通过 resume_from 交给编排器。"""
+        outcomes = (
+            ResumedTaskOutcome(
+                task_name="update_bars",
+                policy_kind="remote_keyed_upsert",
+                as_of_date="2026-07-27",
+                status="success",
+                fetched=3,
+                validated=3,
+                replaced=3,
+                retained=0,
+                failed=0,
+                metadata={},
+            ),
+        )
+        captured: list = []
+
+        class FakeOrchestrator:
+            def run(self, context, *, resume_from=()):
+                captured.append(resume_from)
+                return TaskResult.success("refresh_today", saved=0)
+
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt, \
+             patch("daily_pipeline.load_interrupted_refresh", return_value=("prev-run", outcomes)):
+            _shanghai_now(mock_dt, 16, 30)
+            result = daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                resume=True,
+                orchestrator=FakeOrchestrator(),
+            )
+        assert result.exit_failure is False
+        assert captured == [outcomes]
+
+    def test_without_resume_flag_interrupted_run_is_never_queried(self, tmp_path):
+        """未传 --resume 时绝不查询/续跑，行为与此前完全一致。"""
+        store = _RecordingRefreshStore()
+        with patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-27"), \
+             patch("daily_pipeline.datetime") as mock_dt, \
+             patch("daily_pipeline.load_interrupted_refresh") as loader:
+            _shanghai_now(mock_dt, 16, 30)
+            daily_pipeline.run_close_refresh(
+                str(tmp_path / "refresh.db"),
+                orchestrator=_empty_orchestrator(store),
+            )
+        loader.assert_not_called()
+        assert [name for name, _ in store.calls] == ["start", "finish"]
 
     def test_default_wiring_requests_uncached_loader(self, tmp_path):
         with patch("daily_pipeline.ProviderFactory") as factory:
@@ -1844,12 +1917,16 @@ class TestRefreshTodayCLI:
         assert exc_info.value.code == 2
         assert "--task 不能与 --refresh-today 同时使用" in capsys.readouterr().err
 
-    def test_resume_conflicts_with_refresh_today(self, capsys):
+    def test_refresh_today_forwards_resume(self):
+        """--refresh-today --resume 不再互斥，而是把续跑意图传给 run_close_refresh。"""
+        ok = TaskResult.success("refresh_today", saved=0)
         with patch.object(sys, "argv", ["daily_pipeline.py", "--refresh-today", "--resume"]), \
-             pytest.raises(SystemExit) as exc_info:
+             patch("daily_pipeline.ProviderFactory"), \
+             patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh:
             daily_pipeline.main()
-        assert exc_info.value.code == 2
-        assert "--resume 不能与 --refresh-today 同时使用" in capsys.readouterr().err
+        refresh.assert_called_once_with(
+            os.environ["QUANT_DB_PATH"], symbols=None, force=False, resume=True
+        )
 
     def test_refresh_today_dispatches_and_never_calls_run_all(self):
         ok = TaskResult.success("refresh_today", saved=0)
@@ -1858,7 +1935,9 @@ class TestRefreshTodayCLI:
              patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh, \
              patch("daily_pipeline.run_all") as run_all_mock:
             daily_pipeline.main()
-        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=False)
+        refresh.assert_called_once_with(
+            os.environ["QUANT_DB_PATH"], symbols=None, force=False, resume=False
+        )
         run_all_mock.assert_not_called()
 
     def test_refresh_today_forwards_force(self):
@@ -1867,7 +1946,9 @@ class TestRefreshTodayCLI:
              patch("daily_pipeline.ProviderFactory"), \
              patch("daily_pipeline.run_close_refresh", return_value=ok) as refresh:
             daily_pipeline.main()
-        refresh.assert_called_once_with(os.environ["QUANT_DB_PATH"], symbols=None, force=True)
+        refresh.assert_called_once_with(
+            os.environ["QUANT_DB_PATH"], symbols=None, force=True, resume=False
+        )
 
     def test_refresh_today_acquires_global_pipeline_lock(self):
         ok = TaskResult.success("refresh_today", saved=0)
@@ -1949,6 +2030,7 @@ class TestRefreshTodayCLI:
             os.environ["QUANT_DB_PATH"],
             symbols=["000001.SZ", "600000.SH"],
             force=False,
+            resume=False,
         )
 
 

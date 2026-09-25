@@ -17,6 +17,7 @@ from core.refresh_store import (
     RefreshValidationError,
     RunSnapshotReplacement,
     SQLiteRefreshStore,
+    load_interrupted_refresh,
 )
 
 
@@ -1208,3 +1209,140 @@ def test_composite_checks_all_coverage_under_write_lock_before_any_delete(
     assert len(count_indexes) == 2
     assert begin_index < min(count_indexes)
     assert max(count_indexes) < first_delete_index
+
+
+# ---------------------------------------------------------------------------
+# load_interrupted_refresh：断点续跑的审计读取
+# ---------------------------------------------------------------------------
+def _insert_run(
+    db_path: Path,
+    *,
+    run_id: str,
+    started_at: str,
+    status: str,
+    target_date: str = "2026-07-27",
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO refresh_runs (run_id, target_date, started_at, status) "
+            "VALUES (?, ?, ?, ?)",
+            (run_id, target_date, started_at, status),
+        )
+
+
+def _insert_task(
+    db_path: Path,
+    *,
+    run_id: str,
+    task_name: str,
+    status: str,
+    metadata_json: str = "{}",
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO refresh_task_runs "
+            "(run_id, task_name, policy_kind, requested_date, status, metadata_json) "
+            "VALUES (?, ?, 'remote_keyed_upsert', '2026-07-27', ?, ?)",
+            (run_id, task_name, status, metadata_json),
+        )
+
+
+def test_load_interrupted_refresh_returns_settled_tasks_of_newest_run(db_path):
+    _insert_run(
+        db_path,
+        run_id="old",
+        started_at="2026-07-27T08:00:00+00:00",
+        status="aborted",
+    )
+    _insert_run(
+        db_path,
+        run_id="new",
+        started_at="2026-07-27T09:00:00+00:00",
+        status="running",
+    )
+    for run in ("old", "new"):
+        _insert_task(db_path, run_id=run, task_name="update_bars", status="success")
+    _insert_task(
+        db_path,
+        run_id="new",
+        task_name="update_fund_flow",
+        status="degraded",
+        metadata_json='{"attempts": 1}',
+    )
+
+    found = load_interrupted_refresh(db_path, target_date="2026-07-27")
+
+    assert found is not None
+    run_id, outcomes = found
+    assert run_id == "new"
+    assert [outcome.task_name for outcome in outcomes] == [
+        "update_bars",
+        "update_fund_flow",
+    ]
+    assert [outcome.status for outcome in outcomes] == ["success", "degraded"]
+    assert outcomes[1].metadata == {"attempts": 1}
+
+
+def test_load_interrupted_refresh_excludes_failed_and_blocked_tasks(db_path):
+    _insert_run(
+        db_path,
+        run_id="r",
+        started_at="2026-07-27T09:00:00+00:00",
+        status="aborted",
+    )
+    _insert_task(db_path, run_id="r", task_name="bars", status="success")
+    _insert_task(db_path, run_id="r", task_name="flow", status="failed")
+    _insert_task(
+        db_path,
+        run_id="r",
+        task_name="blocked",
+        status="failed",
+        metadata_json='{"blocked_by": ["bars"]}',
+    )
+
+    found = load_interrupted_refresh(db_path, target_date="2026-07-27")
+
+    assert found is not None
+    _, outcomes = found
+    assert [outcome.task_name for outcome in outcomes] == ["bars"]
+
+
+def test_load_interrupted_refresh_ignores_completed_runs_and_other_dates(db_path):
+    _insert_run(
+        db_path,
+        run_id="done",
+        started_at="2026-07-27T09:00:00+00:00",
+        status="success",
+    )
+    _insert_task(db_path, run_id="done", task_name="bars", status="success")
+    _insert_run(
+        db_path,
+        run_id="other",
+        started_at="2026-07-24T09:00:00+00:00",
+        status="aborted",
+        target_date="2026-07-24",
+    )
+    _insert_task(db_path, run_id="other", task_name="bars", status="success")
+
+    assert load_interrupted_refresh(db_path, target_date="2026-07-27") is None
+
+
+def test_load_interrupted_refresh_returns_none_when_nothing_settled(db_path):
+    """只有失败任务的中断运行没有可沿用的成果，不算可续跑。"""
+    _insert_run(
+        db_path,
+        run_id="r",
+        started_at="2026-07-27T09:00:00+00:00",
+        status="aborted",
+    )
+    _insert_task(db_path, run_id="r", task_name="bars", status="failed")
+
+    assert load_interrupted_refresh(db_path, target_date="2026-07-27") is None
+
+
+def test_load_interrupted_refresh_tolerates_missing_audit_tables(tmp_path):
+    """审计表不存在时不得抛异常，只当无可续跑。"""
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(empty).close()
+
+    assert load_interrupted_refresh(empty, target_date="2026-07-27") is None

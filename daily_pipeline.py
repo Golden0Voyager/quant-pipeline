@@ -80,7 +80,11 @@ from core.refresh import (
 from core.refresh_adapters import build_all_refresh_adapters
 from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
-from core.refresh_store import SQLiteRefreshStore
+from core.refresh_store import (
+    ResumedTaskOutcome,
+    SQLiteRefreshStore,
+    load_interrupted_refresh,
+)
 from core.run_state import mark_run_completed, mark_run_started
 from core.runner import safe_task
 from core.task_registry import TASK_REGISTRY, Cadence, lookup_task, refreshable_trading_tasks
@@ -982,6 +986,7 @@ def run_close_refresh(
     *,
     symbols: list[str] | None = None,
     force: bool = False,
+    resume: bool = False,
     orchestrator: RefreshOrchestrator | None = None,
     cross_source_verifier: CrossSourceVerifier | None = None,
 ) -> TaskResult:
@@ -989,6 +994,10 @@ def run_close_refresh(
 
     16:00 前的拦截由编排器自身的 pre-close 闸门完成，
     --force 仅映射为 allow_pre_close=True，不在 CLI 层重复门控逻辑。
+
+    ``resume`` 时先在同一目标交易日上寻找被中断的运行，把已完成任务的结果
+    接力到本次运行（新 run_id，审计行重新落一遍），避免从 20-55 分钟的
+    全市场任务重头再来。找不到可续跑的运行时按普通运行处理，只告警不报错。
     """
     if orchestrator is None:
         orchestrator = _build_refresh_orchestrator(
@@ -996,15 +1005,33 @@ def run_close_refresh(
         )
     # 单次读取上海时钟：闸门、started_at 与目标交易日共用同一时间基准
     now = datetime.now(_SHANGHAI_TZ)
+    target_date = get_expected_latest_trading_day(now=now)
+    resume_from: tuple[ResumedTaskOutcome, ...] = ()
+    if resume:
+        found = load_interrupted_refresh(db_path, target_date=target_date)
+        if found is None:
+            logger.warning(
+                "⚠️ --resume 未找到 %s 的可续跑运行（需 status 为 running/aborted "
+                "且已有可沿用的任务），本次将从头开始",
+                target_date,
+            )
+        else:
+            parent_run_id, resume_from = found
+            logger.info(
+                "🔁 续跑 %s 的中断运行 %s：可沿用 %d 个任务",
+                target_date,
+                parent_run_id,
+                len(resume_from),
+            )
     context = RefreshContext(
-        target_date=get_expected_latest_trading_day(now=now),
+        target_date=target_date,
         started_at=now,
         run_id=str(uuid4()),
         # 保留 None（全市场）与 ()（no-op）的区分：空列表绝不得升级为全市场
         symbols=None if symbols is None else tuple(symbols),
         allow_pre_close=force,
     )
-    return orchestrator.run(context)
+    return orchestrator.run(context, resume_from=resume_from)
 
 
 # ===========================================================================
@@ -1021,14 +1048,14 @@ def main():
     parser.add_argument(
         "--refresh-today",
         action="store_true",
-        help="收盘后刷新当日数据（与 --task / --resume 互斥）",
+        help="收盘后刷新当日数据（与 --task 互斥；可加 --resume）",
     )
     parser.add_argument("--limit", type=int, default=None, help="测试模式：只处理前 N 只股票")
     parser.add_argument("--force", action="store_true", help="强制运行（忽略交易日检查）")
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="断点续传：从上次中断的位置继续",
+        help="断点续传：从上次中断的位置继续（--refresh-today 时=TUI/CLI 中断后的续跑）",
     )
     parser.add_argument(
         "--db-path",
@@ -1059,8 +1086,6 @@ def main():
     # --refresh-today 是独立的顶层模式；未指定任何模式时仍走 legacy all
     if args.refresh_today and args.task is not None:
         parser.error("--task 不能与 --refresh-today 同时使用")
-    if args.refresh_today and args.resume:
-        parser.error("--resume 不能与 --refresh-today 同时使用")
     task = args.task if args.task is not None else "all"
 
     symbols_arg = args.symbols
@@ -1084,7 +1109,12 @@ def main():
         _acquire_lock()
         try:
             ProviderFactory.configure(db_path=args.db_path, provider="smartmoney")
-            result = run_close_refresh(args.db_path, symbols=symbols, force=args.force)
+            result = run_close_refresh(
+                args.db_path,
+                symbols=symbols,
+                force=args.force,
+                resume=args.resume,
+            )
         except KeyboardInterrupt:
             # 刷新路径不同于 legacy：中断必须非零退出，供调度/TUI 感知 aborted
             logger.info("收到中断信号，正在退出...")

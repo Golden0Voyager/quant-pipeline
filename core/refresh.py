@@ -19,6 +19,7 @@ from core.refresh_audit import (
     compare_cross_source_quotes,
     stratified_cross_source_sample,
 )
+from core.refresh_store import RESUMABLE_TASK_STATUSES, ResumedTaskOutcome
 from core.task_registry import TaskSpec
 from core.task_result import ErrorKind, TaskResult, TaskStatus
 
@@ -198,8 +199,19 @@ class RefreshOrchestrator:
         self._cross_source = cross_source
         self._verifier = verifier
 
-    def run(self, context: RefreshContext) -> TaskResult:
-        """Execute one dependency-aware close-refresh run."""
+    def run(
+        self,
+        context: RefreshContext,
+        *,
+        resume_from: Sequence[ResumedTaskOutcome] = (),
+    ) -> TaskResult:
+        """Execute one dependency-aware close-refresh run.
+
+        ``resume_from`` carries settled outcomes from an earlier interrupted
+        run for the same target date. Those tasks are not executed again; they
+        are re-recorded into this run so its audit trail stays complete (see
+        ``RESUMABLE_TASK_STATUSES`` for which outcomes qualify).
+        """
         gate_failure = self._pre_close_failure(context)
         if gate_failure is not None:
             return gate_failure
@@ -221,7 +233,7 @@ class RefreshOrchestrator:
         )
 
         try:
-            return self._execute(context, ordered_specs)
+            return self._execute(context, ordered_specs, resume_from)
         except Exception as exc:
             # The run row is already open; contain any unexpected error so
             # run() honors its TaskResult contract and the row does not stay
@@ -261,6 +273,7 @@ class RefreshOrchestrator:
         self,
         context: RefreshContext,
         ordered_specs: tuple[TaskSpec, ...],
+        resume_from: Sequence[ResumedTaskOutcome] = (),
     ) -> TaskResult:
         # 任务级进展必须逐条落日志：全市场任务（如 update_bars）单跑就要
         # 20-55 分钟且此处强制绕过缓存，而该刷新是由 TUI/手动触发、需要人
@@ -277,12 +290,39 @@ class RefreshOrchestrator:
             total,
             context.run_id,
         )
+        # 续跑：只有「已完成且结果已落定」的任务会被沿用；失败/被阻塞的
+        # 任务会重跑，因此既不必重做 20-55 分钟的全市场任务，又还能补救失败项。
+        resumed = {
+            outcome.task_name: outcome
+            for outcome in resume_from
+            if outcome.status in RESUMABLE_TASK_STATUSES
+        }
+        if resumed:
+            logger.info(
+                "🔁 续跑：%d 个任务沿用上次运行结果，其余按拓扑顺序执行",
+                len(resumed),
+            )
+
         executions: dict[str, _TaskExecution] = {}
         for index, spec in enumerate(runnable, start=1):
             policy = spec.refresh_policy
             assert policy is not None
             logger.info("▶ 收盘刷新任务 [%d/%d]: %s", index, total, spec.name)
             task_started = self._clock()
+            carried = resumed.get(spec.name)
+            if carried is not None:
+                execution = self._resumed_execution(carried)
+                executions[spec.name] = execution
+                self._record_resumed(context, spec, carried)
+                self._log_task_result(
+                    index,
+                    total,
+                    spec.name,
+                    execution,
+                    task_started,
+                    resumed=True,
+                )
+                continue
             blocked_by = tuple(
                 dependency
                 for dependency in policy.dependencies
@@ -318,6 +358,72 @@ class RefreshOrchestrator:
         )
         return aggregate
 
+    @staticmethod
+    def _resumed_execution(outcome: ResumedTaskOutcome) -> _TaskExecution:
+        """Rebuild a settled task's execution without re-running it.
+
+        The task's status must still be visible: a carried-over ``degraded``
+        task has to degrade the aggregate again, and a dependent must be able
+        to see that its dependency already finished.
+        """
+        status = TaskStatus(outcome.status)
+        metadata = dict(outcome.metadata)
+        if status is TaskStatus.NO_DATA:
+            task_result = TaskResult.no_data(
+                outcome.task_name,
+                reason=str(metadata.get("reason", "resumed from an earlier run")),
+                attempted=outcome.fetched,
+            )
+        elif status is TaskStatus.DEGRADED:
+            task_result = TaskResult.degraded(
+                outcome.task_name,
+                ErrorKind.DATA_QUALITY,
+                "resumed from an earlier run",
+                saved=outcome.replaced,
+                attempted=outcome.fetched,
+                fetched=outcome.fetched,
+                accepted=outcome.validated,
+                rejected=outcome.failed,
+                metadata=metadata,
+            )
+        else:
+            # 调用方的 RESUMABLE_TASK_STATUSES 过滤保证只剩 success。
+            assert status is TaskStatus.SUCCESS
+            task_result = TaskResult.success(
+                outcome.task_name,
+                saved=outcome.replaced,
+                attempted=outcome.fetched,
+                fetched=outcome.fetched,
+                accepted=outcome.validated,
+                rejected=outcome.failed,
+                metadata=metadata,
+            )
+        return _TaskExecution(task_result=task_result, metadata=metadata)
+
+    def _record_resumed(
+        self,
+        context: RefreshContext,
+        spec: TaskSpec,
+        outcome: ResumedTaskOutcome,
+    ) -> None:
+        """Re-record a carried-over task so this run's audit trail is complete."""
+        metadata = dict(outcome.metadata)
+        metadata["resumed"] = True
+        self._store.record_task_result(
+            run_id=context.run_id,
+            task_name=spec.name,
+            policy_kind=outcome.policy_kind,
+            requested_date=context.target_date,
+            as_of_date=outcome.as_of_date,
+            status=outcome.status,
+            fetched=outcome.fetched,
+            validated=outcome.validated,
+            replaced=outcome.replaced,
+            retained=outcome.retained,
+            failed=outcome.failed,
+            metadata=metadata,
+        )
+
     def _log_task_result(
         self,
         index: int,
@@ -325,6 +431,8 @@ class RefreshOrchestrator:
         task_name: str,
         execution: _TaskExecution,
         started_at: datetime,
+        *,
+        resumed: bool = False,
     ) -> None:
         """Log one finished task with its position and elapsed time.
 
@@ -334,8 +442,15 @@ class RefreshOrchestrator:
         full-market tasks take.
         """
         label = f"[{index}/{total}] {task_name}"
-        elapsed = (self._clock() - started_at).total_seconds()
         result = execution.task_result
+        if resumed:
+            logger.info(
+                "⏭️ 任务 %s [resumed] 沿用上次运行结果（%s），跳过",
+                label,
+                result.status,
+            )
+            return
+        elapsed = (self._clock() - started_at).total_seconds()
         blocked_by = execution.metadata.get("blocked_by")
         reason = f"：{result.error}" if result.error else ""
         if blocked_by:
