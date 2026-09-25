@@ -19,6 +19,7 @@ import daily_pipeline
 from core.refresh import CrossSourceCheckConfig, RefreshOrchestrator
 from core.refresh_audit import CrossSourceTolerance
 from core.refresh_cross_source import XueqiuCrossSourceVerifier
+from core.retained_streak import RetainedStreak
 from core.task_result import ErrorKind, TaskResult, normalize_task_result
 
 
@@ -1119,6 +1120,107 @@ class TestHealthCheck:
 
         assert not any("未完整结束" in i for i in r["issues"])
         assert "已完整结束" in r["report"]
+
+    # ── 连续「保留旧数据」巡检 ──
+
+    def _health_check_with_retained_streaks(
+        self, health_db: str, streaks: list[RetainedStreak]
+    ) -> dict:
+        """只验证 health_check 的**接线**：命中项进 issues、报告里可见。
+
+        检测器本身的判定规则由 ``tests/test_retained_streak.py`` 覆盖。
+        """
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"), \
+             patch("tasks.utility.retained_streaks", return_value=streaks):
+            return daily_pipeline.health_check(db)
+
+    def test_retained_streak_is_alerted_and_degrades_the_run(self, health_db: str):
+        """连续多日 retained 必须让本轮变 degraded。
+
+        这才是「不再静默」的全部机理：degraded 进 ``failed_tasks`` → ``run_all`` 收尾
+        通知升为 **error 级**（不再被 ``NOTIFICATION_LEVEL=error`` 抑制）、退出码非 0。
+        """
+        streak = RetainedStreak(
+            "update_concept_board", 5, "2026-09-21", "2026-09-25", "network"
+        )
+        r = self._health_check_with_retained_streaks(health_db, [streak])
+
+        assert any("连续保留旧数据" in i and "update_concept_board" in i for i in r["issues"])
+        assert r["status"] == "degraded"
+        assert "update_concept_board" in r["report"]
+        assert normalize_task_result("health_check", r).exit_failure is True
+
+    def test_no_retained_streak_keeps_health_green(self, health_db: str):
+        r = self._health_check_with_retained_streaks(health_db, [])
+
+        assert not any("连续保留旧数据" in i for i in r["issues"])
+        assert r["status"] == "success"
+
+    def test_retained_streak_scan_skips_a_missing_audit_table(self, health_db: str):
+        """整日缺席之外的孪生风险：未迁移/测试库没有 ingestion_runs。
+
+        此时必须跳过（并在报告里写明），而不是把「表不存在」报成告警，
+        也不是让整个 health_check 直接失败。
+        """
+        db = _mock_db_path(health_db)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db)
+
+        assert not any("连续保留旧数据" in i for i in r["issues"])
+        assert "连续保留旧数据巡检跳过" in r["report"]
+
+    def test_retained_streak_is_detected_end_to_end(self, tmp_path: Path):
+        """真实审计表 + 真实检测器（不 patch）：连续 3 个运行日 retained → 告警。"""
+        db_path = str(tmp_path / "streak.db")
+        conn = sqlite3.connect(db_path)
+        _init_health_tables(conn)
+        conn.execute(
+            "CREATE TABLE ingestion_runs ("
+            " run_id TEXT PRIMARY KEY, task_name TEXT, status TEXT,"
+            " finished_at TEXT, error_kind TEXT)"
+        )
+        for i, day in enumerate(("2026-09-21", "2026-09-22", "2026-09-23")):
+            conn.execute(
+                "INSERT INTO ingestion_runs VALUES (?, ?, ?, ?, ?)",
+                (f"run-{i}", "update_fund_flow", "retained", f"{day}T10:00:00+00:00", "network"),
+            )
+        conn.commit()
+        conn.close()
+
+        db = _mock_db_path(db_path)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db)
+
+        assert any("连续保留旧数据" in i and "update_fund_flow" in i for i in r["issues"])
+        assert r["status"] == "degraded"
+
+    def test_single_retained_day_is_not_alerted_end_to_end(self, tmp_path: Path):
+        """单次 retained 是正常的（源端抖动）：不得因为一次抖动就报警。"""
+        db_path = str(tmp_path / "one_day.db")
+        conn = sqlite3.connect(db_path)
+        _init_health_tables(conn)
+        conn.execute(
+            "CREATE TABLE ingestion_runs ("
+            " run_id TEXT PRIMARY KEY, task_name TEXT, status TEXT,"
+            " finished_at TEXT, error_kind TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO ingestion_runs VALUES (?, ?, ?, ?, ?)",
+            ("run-0", "update_fund_flow", "retained", "2026-09-23T10:00:00+00:00", "network"),
+        )
+        conn.commit()
+        conn.close()
+
+        db = _mock_db_path(db_path)
+        with patch("tasks.utility.get_expected_latest_trading_day", return_value="2024-06-20"), \
+             patch("tasks.utility.logger"):
+            r = daily_pipeline.health_check(db)
+
+        assert not any("连续保留旧数据" in i for i in r["issues"])
 
 
 # ===========================================================================
