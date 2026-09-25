@@ -20,6 +20,8 @@
   与对应的 ``test_every_write_connection_site_calls_the_single_helper``
 * 写连接不设上限（如 ``providers._get_write_conn`` 退回旧写法）→
   ``test_provider_shared_write_connection_declares_the_limit``（旧实现读回 ``-1``）
+* 负值告警改回「如需「不限制」请显式设 0」→
+  ``test_negative_limit_warning_does_not_advise_zero_as_unlimited``
 """
 
 from __future__ import annotations
@@ -105,7 +107,54 @@ def test_invalid_limit_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch
     assert wal_size_limit_bytes() == DEFAULT_WAL_SIZE_LIMIT_BYTES
 
 
-# ── apply_write_pragmas ────────────────────────────────────────────────
+def test_negative_limit_warning_does_not_advise_zero_as_unlimited(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """告警得说实话：``0`` 是「截到 0」，不是「不限制」。
+
+    旧文案写的是「如需「不限制」请显式设 0」——运维照办会得到**相反**的效果（实测：上限 0 会把
+    WAL 截到 0 字节；而「永不缩文件」是 SQLite 的 ``-1``，本仓库刻意不通过环境变量开放）。
+    这里显式钉住那句错误建议：把措辞改回去即变红。
+    """
+    monkeypatch.setenv(WAL_SIZE_LIMIT_ENV, "-1")
+    with caplog.at_level("WARNING", logger="core.db_pragmas"):
+        assert wal_size_limit_bytes() == DEFAULT_WAL_SIZE_LIMIT_BYTES
+
+    messages = [r.getMessage() for r in caplog.records]
+    warnings = [m for m in messages if WAL_SIZE_LIMIT_ENV in m]
+    assert len(warnings) == 1, f"预期恰好一条告警，实得 {messages}"
+    warning = warnings[0]
+    assert "如需「不限制」请显式设 0" not in warning, "这行文案会把运维引向相反的效果"
+    assert "截到 0" in warning, "必须说清 0 的真实含义"
+    assert "-1" in warning, "必须指出「不缩文件」对应的才是 -1"
+
+
+def test_zero_is_honoured_as_a_real_limit_not_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``0`` 是合法上限，不是「没设」：当成未设置等于默默关掉运维的显式选择。"""
+    monkeypatch.setenv(WAL_SIZE_LIMIT_ENV, "0")
+    assert wal_size_limit_bytes() == 0
+
+
+def test_zero_shrinks_the_wal_to_zero_on_the_next_write(tmp_path: Path) -> None:
+    """``0`` 的行为对照：巨型事务之后的第一次写入把 WAL 截到 0，**此后只按当次写入的帧增长**。
+
+    实测残留是一次写入的帧（1 行 ≈ 4152 字节 ≈ 一帧）：既不是高水位，也不是「不限制」。
+    写 ``0`` 会把文件截到 0，而截断发生在每次 WAL 代 reset 时，所以它是触发最频繁的一端。
+    """
+    db = tmp_path / "g.db"
+    conn = _make_db(db, limit=0)
+
+    _bulk_write(conn, _GIANT_ROWS, b"z" * _ROW)
+    peak = wal_bytes(db)
+    assert peak > 2 * _LIMIT, "巨型事务没撑出高水位，测试前提不成立"
+
+    _bulk_write(conn, 1, b"x")
+    residual = wal_bytes(db)
+    assert residual < 64 * 1024, f"上限 0 应截到 0 后只留当次写入的帧，实得 {residual} 字节（峰值 {peak}）"
+    conn.close()
+
+
+# ── apply_write_pragmas ─────────────────────────────────────────────────
 
 
 def test_apply_write_pragmas_enables_wal_and_declares_the_limit(tmp_path: Path) -> None:

@@ -63,7 +63,14 @@ WAL_SIZE_LIMIT_ENV = "QUANT_WAL_SIZE_LIMIT_MB"
 
 
 def wal_size_limit_bytes() -> int:
-    """WAL 文件上限（字节）。``QUANT_WAL_SIZE_LIMIT_MB`` 可覆盖，非法值回落默认并告警。"""
+    """WAL 文件上限（字节）。``QUANT_WAL_SIZE_LIMIT_MB`` 可覆盖，非法值回落默认并告警。
+
+    ``0`` 是**合法且最激进**的取值：每次 WAL 代被 reset 后的第一次写入把文件截到 0 字节。
+    负值一律**不被本变量接受**（回落默认并告警），包括 SQLite 自身用来表示「永不缩文件」的
+    ``-1`` —— 而「永不缩文件」正是生产库曾长期占着 2.39 GiB 的成因，不该由一个手滑的负数
+    静默打开。``apply_write_pragmas`` 内部仍原样透传调用方显式传入的值（测试要用 ``-1`` 造
+    对照组），本函数只管环境变量这一条运维入口。
+    """
     raw = os.environ.get(WAL_SIZE_LIMIT_ENV, "").strip()
     if not raw:
         return DEFAULT_WAL_SIZE_LIMIT_BYTES
@@ -78,8 +85,11 @@ def wal_size_limit_bytes() -> int:
         )
         return DEFAULT_WAL_SIZE_LIMIT_BYTES
     if mib < 0:
+        # 这里**不能**再写「如需『不限制』请设 0」：实测 0 是「截到 0」（最激进），而真正的
+        # 「不缩文件」是 SQLite 的 -1 —— 运维照旧文案操作会得到与自己意图相反的效果。
         logger.warning(
-            "%s=%d 为负，WAL 上限回落默认 %d MiB（如需「不限制」请显式设 0）",
+            "%s=%d 为负，WAL 上限回落默认 %d MiB（本变量不接受负值：0 表示每次截到 0 字节，"
+            "「永不缩文件」需要 SQLite 的 -1，本仓库刻意不通过环境变量开放该档位）",
             WAL_SIZE_LIMIT_ENV,
             mib,
             DEFAULT_WAL_SIZE_LIMIT_BYTES // (1024 * 1024),
