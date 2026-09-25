@@ -167,6 +167,9 @@ XUEQIU_USER_ID=xxx        # 雪球用户 ID
 | `ULTRA_SAFE` | `0` | 极致稳定模式（更小批次、更长间隔） |
 | `XUEQIU_TOKEN` | — | 雪球 API Token（`update_market_snapshot` 任务需要） |
 | `XUEQIU_USER_ID` | — | 雪球用户 ID |
+| `QUANT_WAL_SIZE_LIMIT_MB` | `64` | WAL 文件（`quant_core.db-wal`）体积上限，单位 MiB；每个写连接建立时生效 |
+
+> WAL 文件是**只涨不缩**的高水位线（曾被单个大事务撑到 2.39 GiB），仓库用「体积上限 + 收尾显式截断」两者互补兜住它。机制、观测与 `QUANT_WAL_SIZE_LIMIT_MB` 调参见 [docs/runbooks/wal-size-and-reclamation.md](docs/runbooks/wal-size-and-reclamation.md)。
 
 ---
 
