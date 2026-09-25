@@ -112,6 +112,7 @@ quant-data     # TUI 面板（可视化监控 + 实时日志）
 ```bash
 rtk uv run python daily_pipeline.py --refresh-today
 rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.SH
+rtk uv run python daily_pipeline.py --refresh-today --resume   # 中断后续跑
 ```
 
 - **16:00 时间闸门**：北京时间（Asia/Shanghai）16:00 之前运行会被直接拦截，不产生任何写入；确需提前运行时加 `--force`（仅解除时间闸门，数据校验照常执行）。
@@ -121,6 +122,8 @@ rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.S
 - **回滚行为**：所有写入先进 staging 校验，再在单个事务内替换目标日分区；复合任务（如 `update_sector_derivatives` 的三张表）任一组件失败则整体回滚，所有表保持原样。
 - **退出码**：任一任务 degraded/failed 时进程以非零码退出，便于脚本与定时任务判断。
 - **跨源抽样校验（opt-in，默认关闭）**：`REFRESH_CROSS_SOURCE=1` 开启后，刷新完成时抽样对比雪球日线（只读，绝不用于写入；价按 qfq 对齐，成交量按手/股约定归一，北交所不参与）。**开启即先进入观察态**：`REFRESH_CROSS_SOURCE_REPORT_ONLY` 默认 `1`，命中不一致只记录/告警、绝不降级；确认容差后设 `0` 才真降级。审计元数据 `cross_source` 区分 `mismatched`（真不一致）、`unverifiable`（雪球当天无数据，如停牌）与 `reference_dead`（整体零命中）。相关变量：`REFRESH_CROSS_SOURCE_TASK`（默认 `update_bars`）、`REFRESH_CROSS_SOURCE_SAMPLE_SIZE`（默认 30）、`REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL`（默认 0.005/0.05，临时值，须用真实数据调参）。启用与调参三步流程见 [docs/runbooks/cross-source-verification-rollout.md](docs/runbooks/cross-source-verification-rollout.md)。
+- **进度可见**：每个任务开始/结束都写日志（`▶ 收盘刷新任务 [i/N]: name` 与 `✅/⚠️/⏭️/❌ … 耗时 Xs`），TUI 的 Live Logs 面板实时可见。全市场 `update_bars` 单跑就要 20–55 分钟，没有进度输出会被误当成卡死。
+- **断点续跑**：被中断（Ctrl-C / SIGTERM / TUI 强杀）后用 `--refresh-today --resume` 继续。上一轮**已落定**的任务（success/no_data/degraded）直接沿用、不再执行，只补跑失败与被依赖阻塞的任务；无可用续跑时只告警并从头开始，不会因此跑不起来。
 - **TUI 入口**：面板中按 `U`（Close Refresh）确认后即启动收盘刷新。
 
 ---
