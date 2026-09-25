@@ -66,6 +66,7 @@ ensure_sibling_paths()
 
 import pandas as pd
 
+from core.db_pragmas import apply_write_pragmas, truncate_wal  # noqa: E402
 from core.lock import ProcessLock  # noqa: E402
 
 try:
@@ -757,8 +758,7 @@ def _worker_task(
 
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        apply_write_pragmas(conn)
         result = compare_and_repair(
             conn,
             symbol,
@@ -967,8 +967,7 @@ def main():
         atexit.register(ProcessLock.release)
 
     conn = sqlite3.connect(args.db_path, timeout=60.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    apply_write_pragmas(conn)
     cursor = conn.cursor()
 
     # 获取待处理股票列表
@@ -1167,6 +1166,11 @@ def main():
         logger.info("\n⚠️  修复完成后，建议重新计算技术指标：")
         logger.info("   python daily_pipeline.py --task update_indicators")
         logger.info("   或下次运行 reconcile 时加 --update-indicators 参数")
+
+    # WAL 文件只涨不缩：本脚本是全仓最大的批量写入方（巨型事务会把文件撑到该事务的
+    # 大小，之后即使帧被复用文件也不缩）。收尾显式 checkpoint 一次把空间还给磁盘，
+    # 失败只记日志、不影响退出码。
+    truncate_wal(args.db_path)
 
 
 if __name__ == "__main__":

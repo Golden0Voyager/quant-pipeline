@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.db_pragmas import apply_write_pragmas
+
 logger = logging.getLogger(__name__)
 
 
@@ -229,9 +231,7 @@ class MigrationEngine:
         all_migrations = self._load()
 
         conn = sqlite3.connect(str(self._db_path), timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        apply_write_pragmas(conn, busy_timeout_ms=30000)
 
         try:
             self._ensure_tracking_table(conn)
