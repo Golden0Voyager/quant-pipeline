@@ -31,6 +31,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from core._bootstrap import ensure_sibling_paths  # noqa: E402
+from core.db_pragmas import apply_write_pragmas  # noqa: E402
 
 ensure_sibling_paths()
 
@@ -204,7 +205,8 @@ def main() -> int:
     end_date = (pd.Timestamp.now() + pd.Timedelta(days=1)).strftime("%Y%m%d")
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # 原本只开 WAL；其余 PRAGMA 保持脚本原有行为（synchronous=None 表示不动）
+    apply_write_pragmas(conn, synchronous=None)
     cur = conn.cursor()
     symbols = get_symbols_to_repair(cur, args.cutoff)
     print(f"找到 {len(symbols)} 只需修复 turnover_rate 的股票（cutoff={args.cutoff}）", flush=True)
