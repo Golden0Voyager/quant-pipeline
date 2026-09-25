@@ -24,6 +24,7 @@ from core.refresh_audit import (
     RefreshAuditError,
     stratified_cross_source_sample,
 )
+from core.refresh_store import ResumedTaskOutcome
 from core.task_registry import (
     Cadence,
     DateStrategy,
@@ -122,6 +123,30 @@ class RecordingAdapter:
         if len(self.calls) <= self.failures_before_success:
             raise ConnectionError(f"{self.task_name} unavailable")
         return self.result or _adapter_result(self.task_name)
+
+
+def _outcome(
+    task_name: str,
+    *,
+    status: str,
+    replaced: int = 1,
+    fetched: int = 1,
+    validated: int = 1,
+    failed: int = 0,
+    metadata: Mapping[str, Any] | None = None,
+) -> ResumedTaskOutcome:
+    return ResumedTaskOutcome(
+        task_name=task_name,
+        policy_kind="remote_date_snapshot",
+        as_of_date="2026-07-27",
+        status=status,
+        fetched=fetched,
+        validated=validated,
+        replaced=replaced,
+        retained=0,
+        failed=failed,
+        metadata=metadata or {},
+    )
 
 
 def _context(
@@ -1105,3 +1130,92 @@ def test_cross_source_report_only_dead_reference_records_flag_without_degrade(
     assert summary["mismatched"] == ()
     warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
     assert any("no data for any sampled symbol" in m for m in warnings)
+
+
+def test_resume_skips_settled_tasks_and_reruns_failures() -> None:
+    """续跑沿用已落定的任务（适配器不再被调用），但失败任务必须重跑。"""
+    store = RecordingStore()
+    bars_calls: list[RefreshContext] = []
+    flow_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"), _spec("flow")),
+        adapters={
+            "bars": RecordingAdapter("bars", bars_calls),
+            "flow": RecordingAdapter("flow", flow_calls),
+        },
+        store=store,
+    )
+    resume = (
+        _outcome("bars", status="success", replaced=1234),
+        _outcome("flow", status="failed"),
+    )
+
+    result = orchestrator.run(_context(), resume_from=resume)
+
+    assert bars_calls == []
+    assert len(flow_calls) == 1
+    task_records = {
+        kwargs["task_name"]: kwargs for call, kwargs in store.calls if call == "task"
+    }
+    # 沿用的任务仍要重新落一遍审计行，metadata 标记来源
+    assert task_records["bars"]["status"] == "success"
+    assert task_records["bars"]["replaced"] == 1234
+    assert task_records["bars"]["metadata"]["resumed"] is True
+    # 重跑的任务不带 resumed 标记
+    assert task_records["flow"]["status"] == "success"
+    assert "resumed" not in task_records["flow"]["metadata"]
+    assert result.status is TaskStatus.SUCCESS
+
+
+def test_resume_degraded_task_keeps_run_degraded() -> None:
+    """沿用的 degraded 任务必须让聚合结果照样 degraded，不得被洗成成功。"""
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", [])},
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(
+        _context(), resume_from=(_outcome("bars", status="degraded"),)
+    )
+
+    assert result.status is TaskStatus.DEGRADED
+    assert result.exit_failure is True
+
+
+def test_resume_satisfies_dependent_dependency() -> None:
+    """沿用的成功任务要能被依赖看到：下游不会因「依赖失败」被误阻塞。"""
+    base_calls: list[RefreshContext] = []
+    dependent_calls: list[RefreshContext] = []
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("dependent", dependencies=("base",)), _spec("base")),
+        adapters={
+            "base": RecordingAdapter("base", base_calls),
+            "dependent": RecordingAdapter("dependent", dependent_calls),
+        },
+        store=RecordingStore(),
+    )
+
+    result = orchestrator.run(
+        _context(), resume_from=(_outcome("base", status="success"),)
+    )
+
+    assert base_calls == []
+    assert len(dependent_calls) == 1
+    assert result.status is TaskStatus.SUCCESS
+
+
+def test_resume_logs_skip_line(caplog: pytest.LogCaptureFixture) -> None:
+    """沿用旧结果必须明写 [resumed]，否则日志会像「任务凭空消失」。"""
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", [])},
+        store=RecordingStore(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.refresh"):
+        orchestrator.run(_context(), resume_from=(_outcome("bars", status="success"),))
+
+    messages = [rec.message for rec in caplog.records]
+    assert any("[resumed]" in m and "bars" in m for m in messages)
+    assert any("🔁 续跑" in m for m in messages)
