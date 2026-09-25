@@ -31,6 +31,7 @@ from smartmoney_hunter.data_loader import DataLoader  # noqa: E402
 from smartmoney_hunter.database import DatabaseManager  # noqa: E402
 from smartmoney_hunter.indicators import IndicatorCalculator  # noqa: E402
 
+from core.db_pragmas import apply_write_pragmas  # noqa: E402
 from core.source_record_key import (  # noqa: E402
     INSTITUTION_SURVEY_SOURCE_KEY_FIELDS,
     STOCK_REPURCHASE_SOURCE_KEY_FIELDS,
@@ -103,10 +104,9 @@ class SmartMoneyDBProvider:
         """
         if self._write_conn is None:
             conn = sqlite3.connect(str(self._db.db_path), timeout=30.0, check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA foreign_keys=ON")
+            # 唯一出处：WAL + 体积上限。journal_size_limit 不持久（新连接读回 -1），
+            # 所以每个写连接都必须自己设，散在各处迟早会漏。
+            apply_write_pragmas(conn, busy_timeout_ms=30000, foreign_keys=True)
             self._write_conn = conn
         return self._write_conn
 
@@ -130,9 +130,7 @@ class SmartMoneyDBProvider:
             return
         try:
             with sqlite3.connect(str(db_path), timeout=5.0) as conn:
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA synchronous=NORMAL")
+                apply_write_pragmas(conn)
         except Exception:
             # WAL 启用失败不应阻塞正常流程
             pass
