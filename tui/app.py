@@ -16,6 +16,7 @@ from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid
+from textual.events import Resize
 from textual.widgets import (
     Footer,
     Header,
@@ -137,6 +138,7 @@ class PipelineApp(App):
     async def on_mount(self) -> None:
         """启动时应用保存的主题、同步自选股，然后检测后台进程询问是否终止。"""
         self.theme = self._theme_name
+        self._apply_narrow_class(self.size.width)
         self._start_watchlist_sync()
 
         proc_finder = getattr(tui, "find_running_pipeline_processes", None)
@@ -148,6 +150,21 @@ class PipelineApp(App):
                     should_stop, processes
                 ),
             )
+
+    def on_resize(self, event: Resize) -> None:
+        """按终端宽度切换 .narrow（TCSS 无 @media，窄屏样式全挂在该类下）。"""
+        self._apply_narrow_class(event.size.width)
+
+    @staticmethod
+    def _narrow_threshold(width: int) -> bool:
+        # 100 列以下左栏 35% ≈ 35 列，Dashboard/Select/分组按钮均会腰斩
+        return width < 100
+
+    def _apply_narrow_class(self, width: int) -> None:
+        if self._narrow_threshold(width):
+            self.add_class("narrow")
+        else:
+            self.remove_class("narrow")
 
     def _start_watchlist_sync(self) -> None:
         """Schedule startup watchlist sync outside the Textual event handler."""

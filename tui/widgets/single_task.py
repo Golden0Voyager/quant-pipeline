@@ -164,7 +164,7 @@ class SingleTaskWidget(Static):
         self.SINGLE_TASKS = self._build_single_tasks()
         select = Select(
             options=self.SINGLE_TASKS,
-            prompt="选择一项任务...",
+            prompt="选择任务...",
             id="task-select",
         )
         self.mount(select)

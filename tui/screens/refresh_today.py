@@ -40,10 +40,11 @@ class ConfirmRefreshTodayScreen(ModalScreen[str | None]):
         with Vertical(id="refresh-dialog"):
             yield Label("[bold]收盘刷新确认[/bold]")
             yield Label("")
-            yield Label(f"目标交易日（上海时间）: [yellow]{self._target_date}[/yellow]")
-            yield Label(f"刷新范围: 全部 {self._task_count} 个交易日任务")
-            yield Label("[dim]可选股票范围（逗号分隔，留空为全市场）[/dim]")
-            yield Input(placeholder="如 600000,000001（留空=全市场）", id="refresh-symbols")
+            # 短标签：80 列下 width:90% 的对话框内边宽 ~64，长说明会超宽
+            yield Label(f"交易日: [yellow]{self._target_date}[/yellow]")
+            yield Label(f"范围: 全部 {self._task_count} 个交易日任务")
+            yield Label("[dim]股票范围（逗号分隔，空=全市场）[/dim]")
+            yield Input(placeholder="600000,000001（空=全市场）", id="refresh-symbols")
             with Horizontal(id="refresh-buttons"):
                 yield Button("确认刷新", variant="primary", id="refresh-confirm")
                 yield Button("取消", variant="error", id="refresh-cancel")

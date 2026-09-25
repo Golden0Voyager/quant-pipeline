@@ -170,17 +170,14 @@ class DataCompletenessWidget(VerticalScroll):
             self._content.update(" 等待数据库连接...")
             return
 
-        # 快速模式：显示估算值，等待后台精确更新
         estimated_total = counts.get("_estimated_total", 0)
         if estimated_total and sum(counts.get(k, 0) for k in self.TABLE_LABELS) == 0:
             db_size = get_db_size(str(DEFAULT_DB_PATH))
-            lines = [
-                f" - [bold]数据库：[/bold][cyan]{db_size}[/cyan]  [dim]行数加载中...[/dim]",
-                "",
-            ]
-            for _tbl, label in self.TABLE_LABELS.items():
-                lines.append(f" - [bold gray]{label}：[/bold gray][dim]计算中...[/dim]")
-            self._content.update("\n".join(lines))
+            table_n = len(self.TABLE_LABELS)
+            self._content.update(
+                f" - [bold]数据库：[/bold][cyan]{db_size}[/cyan]  "
+                f"[dim]行数加载中… (0/{table_n} 表)[/dim]"
+            )
             return
 
         exp_fn = getattr(

@@ -14,7 +14,13 @@ from tui.services.formatting import get_db_size
 from tui.services.process import get_daemon_status, get_launchd_status
 
 
-class DashboardWidget(Static):
+# can_focus=True:让状态看板成为 AUTO_FOCUS="*" 按 DOM 顺序命中的第一个
+# 可聚焦控件(它排在 LogsWidget 之前)。否则启动自动聚焦会落到可滚动的
+# LogsWidget 上,Screen.focus 的 scroll_to_center 在窄屏(.narrow 溢出滚动)
+# 下把 #main-grid 滚到上限,Dashboard 的边框标题("Dashboard")滚出视口 ——
+# tests/test_tui_tmux.py::test_copy_panel_opens_and_closes 第 80 行因此失败。
+# 看板位于内容顶端,聚焦它时滚动量恒为 0,标题始终可见。
+class DashboardWidget(Static, can_focus=True):
     """显示数据库大小、股票数、守护进程及调度器状态的概览面板。"""
 
     async def on_mount(self) -> None:
@@ -49,11 +55,13 @@ class DashboardWidget(Static):
             else "[bold red]Inactive[/bold red]"
         )
 
+        # 标签压到 8 列内：80 列终端下左栏 ~27 列，长标签会把值挤到下一行
+        # （5.47 / GB 分家、Stopped 孤行）。值+单位必须同行。
         text = (
-            f" • [bold gray]DB Size:    [/bold gray] [cyan]{db_size}[/cyan]\n"
-            f" • [bold gray]Stocks:     [/bold gray] [cyan]{active_stocks}[/cyan]\n"
-            f" • [bold gray]Daemon:     [/bold gray] {daemon_str}\n"
-            f" • [bold gray]Scheduler:  [/bold gray] {launchd_str}\n"
+            f" • [bold gray]DB      [/bold gray][cyan]{db_size}[/cyan]\n"
+            f" • [bold gray]Stocks  [/bold gray][cyan]{active_stocks}[/cyan]\n"
+            f" • [bold gray]Daemon  [/bold gray]{daemon_str}\n"
+            f" • [bold gray]Sched   [/bold gray]{launchd_str}\n"
         )
         self.update(text)
 
