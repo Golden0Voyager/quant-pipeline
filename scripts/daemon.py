@@ -25,9 +25,16 @@ import time
 from pathlib import Path
 
 PIDFILE = Path("/tmp/smartmoney_daemon.pid")
-PIPELINE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = Path.home() / "Code/quant_data/logs"
 LOG_FILE = LOG_DIR / "daemon.log"
+
+# 仓库根必须就地注入：本脚本以 `python scripts/daemon.py start` 直接执行，
+# 此时 `sys.path[0]` 是 scripts/，此刻还 import 不到 core（函数内的 core.* import 同样需要它）。
+# 这一句无法抽成函数——语言层面的先后顺序。统一写法与门禁见 core/_bootstrap.py 与
+# tests/test_sys_path_bootstrap.py。
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # daemon.log 以 append 模式长期增长，超过 10MB 时启动期截断保留尾部 1MB
 LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -37,9 +44,6 @@ LOG_KEEP_BYTES = 1 * 1024 * 1024
 BASE_BACKOFF_SECONDS = 30
 MAX_BACKOFF_SECONDS = 3600
 BACKOFF_NOTIFY_THRESHOLD = 3
-
-if str(PIPELINE_DIR) not in sys.path:
-    sys.path.insert(0, str(PIPELINE_DIR))
 
 
 def _log(msg: str, f):
@@ -171,7 +175,7 @@ def start(resume: bool = False) -> None:
                 # start_new_session：子进程独立进程组，stop 时可整组终止
                 proc = subprocess.Popen(
                     [sys.executable, "daily_pipeline.py", *task_args],
-                    cwd=str(PIPELINE_DIR),
+                    cwd=_REPO_ROOT,
                     stdout=log,
                     stderr=log,
                     start_new_session=True,
