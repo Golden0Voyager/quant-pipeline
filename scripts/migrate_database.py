@@ -19,9 +19,12 @@ import logging
 import sys
 from pathlib import Path
 
-# Ensure project root is on sys.path
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
+# 仓库根必须就地注入：以 `python scripts/migrate_database.py` 直接执行时 `sys.path[0]`
+# 是 scripts/，此时 import 不到 core。这一句无法抽成函数——语言层面的先后顺序。
+# 统一写法与门禁见 core/_bootstrap.py 与 tests/test_sys_path_bootstrap.py。
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from core.migrations import MigrationEngine, run_migrations  # noqa: E402
 

@@ -56,6 +56,14 @@ if _REPO_ROOT not in sys.path:
 # 该目录下任何一级名字（`Trading_Agents` 甚至不存在），故删除；兄弟仓库路径由
 # `core._bootstrap` 负责。
 
+from core._bootstrap import ensure_sibling_paths  # noqa: E402
+
+# 本文件后面在**函数内** import `smartmoney_hunter.database` / `smartmoney_hunter.indicators`。
+# 过去那两行靠「上面先执行了 `from core.lock import ...`」才碰巧成功（`core/__init__.py`
+# 的包级 choke point 顺带把兄弟仓库注入了）——正是 P2-16 要消灭的「取决于谁先被导入」。
+# 显式调用一次，导入顺序不再重要（幂等）。
+ensure_sibling_paths()
+
 import pandas as pd
 
 from core.lock import ProcessLock  # noqa: E402

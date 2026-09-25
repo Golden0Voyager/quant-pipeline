@@ -167,7 +167,7 @@ class TestCleanup:
             (tmp_path / f"quant_core_worker{wid}.db").write_text("data")
             (tmp_path / f"progress_worker{wid}.json").write_text("{}")
         with patch.object(parallel_backfill, "MASTER_DB", tmp_path / "quant_core.db"), \
-             patch.object(parallel_backfill, "PIPELINE_DIR", tmp_path):
+             patch.object(parallel_backfill, "_REPO_ROOT", tmp_path):
             parallel_backfill.cleanup([0, 1])
         assert not (tmp_path / "quant_core_worker0.db").exists()
         assert not (tmp_path / "progress_worker0.json").exists()
@@ -176,7 +176,7 @@ class TestCleanup:
 
     def test_skip_missing(self, tmp_path: Path):
         with patch.object(parallel_backfill, "MASTER_DB", tmp_path / "quant_core.db"), \
-             patch.object(parallel_backfill, "PIPELINE_DIR", tmp_path):
+             patch.object(parallel_backfill, "_REPO_ROOT", tmp_path):
             parallel_backfill.cleanup([0])
 
 
@@ -192,7 +192,7 @@ class TestRunWorker:
         conn.close()
         (tmp_path / "progress_worker0.json").write_text('{"done": []}')
         with patch.object(parallel_backfill, "MASTER_DB", master), \
-             patch.object(parallel_backfill, "PIPELINE_DIR", tmp_path), \
+             patch.object(parallel_backfill, "_REPO_ROOT", tmp_path), \
              patch("subprocess.Popen") as mock_popen:
             proc = MagicMock()
             proc.returncode = 0
@@ -207,7 +207,7 @@ class TestRunWorker:
         conn.commit()
         conn.close()
         with patch.object(parallel_backfill, "MASTER_DB", master), \
-             patch.object(parallel_backfill, "PIPELINE_DIR", tmp_path), \
+             patch.object(parallel_backfill, "_REPO_ROOT", tmp_path), \
              patch("subprocess.Popen") as mock_popen:
             proc = MagicMock()
             proc.returncode = 1

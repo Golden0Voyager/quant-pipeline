@@ -22,7 +22,12 @@ os.environ.setdefault("NO_PROXY", "*")
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
     os.environ.pop(_k, None)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 仓库根必须就地注入：以 `python scripts/backfill_turnover_rate.py` 直接执行时
+# `sys.path[0]` 是 scripts/，此时 import 不到 core。这一句无法抽成函数——语言层面的
+# 先后顺序。统一写法与门禁见 core/_bootstrap.py 与 tests/test_sys_path_bootstrap.py。
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from core.stock_cyq_em import _fetch_kline_sina  # noqa: E402
 

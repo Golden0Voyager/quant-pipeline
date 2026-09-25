@@ -309,3 +309,53 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 2. ✅ **8 个高频 daily 任务补 `error_kind=network`**（PR #105）：hk_tech_index、us_macro、cftc_cot、eia_petroleum、lithium_spot、macro.py 的 index_daily/limit_up_down/dividend_summary/gold_price/usd/global_index/us_treasury
 3. ✅ **17 个低频任务补 `error_kind=network`**（PR #106 + 直接提交）：convertible_bond×3、futures、china_macro、hkscc_holder、money_market、stock_pledge、stock_repurchase、finance_flow×3、core_chain、corporate_actions×2、financials、index_chain、market_flow×2、valuation_chain×2
 4. ✅ **统一重试装饰器**（`tasks/retry_utils.py` 的 `@retry_on_network`）→ 已创建，hkscc_holder 已迁移
+
+---
+
+## 🟡 8. `refresh_runs` / `refresh_task_runs` 近乎死表（close-refresh 从未在生产完成过）
+
+### 现状（2026-09-25 只读复核生产库）
+
+| 表 | 行数 | 内容 |
+|----|------|------|
+| `refresh_runs` | **3** | 全部 `status='aborted'`，全在 2026-07-30（2 条）与 07-31（1 条） |
+| `refresh_task_runs` | **0** | **从未写入过任何一行** |
+
+写入方是 `core/refresh.py::RefreshOrchestrator`（经 `core/refresh_store.py`），入口只有
+`daily_pipeline.py --refresh-today`（TUI `U` 键，或单任务下拉里的「收盘刷新」）。读取方只有
+`tui/services/refresh_state.py`（收盘刷新状态面板）——因此那个面板设计的「六态」实际上**永远只会显示
+「无任务审计记录」**。
+
+### 为什么是 0 行（日志有据）
+
+`refresh_task_runs` 是**每完成一个任务就写一行**（`RefreshOrchestrator._record_task`），所以 0 行意味着
+每次尝试都在 29 个任务里的**第一个**完成之前就结束了。当日日志：
+
+```
+2026-07-30  --refresh-today exited with code 1     # 14:58，16:00 闸门之前，属正常拒绝（不建 run 行）
+2026-07-30  --refresh-today exited with code 143   # SIGTERM（从 TUI 停止）
+2026-07-30  --refresh-today exited with code 143
+2026-07-31  --refresh-today exited with code 143
+```
+
+即 07-30/07-31 共试了 4 次、每次都在第一个任务跑完前被终止，之后**再没运行过**（近两个月）。看上去是
+「第一个任务就要几十分钟（全市场、29 个任务、绕过缓存）+ 手动触发 + 得有人守着」的组合劝退了使用者，
+而不是某处代码缺陷。
+
+### 两个已核实的“不是”，避免误判
+
+- **不是跨仓库契约**：`~/Code/quant_hunter` 全仓库不引用这两张表（对照：`ingestion_runs.attempts` 是两仓库
+  逐字共享的 DDL，改它要两边一起动）。所以这里没有共享 schema 的约束。
+- **不是时间戳 bug**：`started_at` 是上海 aware、`finished_at` 是 UTC，格式不一致但**绝对时间一致**
+  （已逐行校对）；唯一读取方只拿 `started_at` 排序，而它恒为 `+08:00`，文本序即时间序。真要统一格式可另开小项。
+
+### 待决（三选一）
+
+1. **修好并让它可用**：先弄清「第一个任务要几十分钟」是否可接受，或补进度/断点续跑。
+2. **删掉整条 close-refresh**：新迁移 drop 两张表，移除 `--refresh-today`、TUI `U` 键、29 个适配器与测试
+   （约 11,000 行：`core/refresh*.py` 4,601 + `tests/test_refresh*.py` 6,690）。
+3. **保持现状**：只保留本节记录——至少让「TUI 上的 `U` 键看着能用、实际从未跑完」这个误解不再存在。
+
+**为何没有直接处理**：删除等于移除一个**已文档化**的用户入口（README 表格与 `docs/AGENTS.md` 都写着它的用法），
+工作量在千行量级；这超出「低价值清理」应有的尺度，需要先定方向。代码侧的唯一变更（`scripts/*` 路径引导统一）
+与本节无关。
