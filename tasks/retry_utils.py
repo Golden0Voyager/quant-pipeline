@@ -35,12 +35,13 @@ import random
 import time
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypeVar
+from typing import ParamSpec, TypeVar
 
 from core.config import MAX_RETRY_VAL, RETRY_DELAY_VAL
 
 logger = logging.getLogger(__name__)
-F = TypeVar("F", bound=Callable[..., Any])
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def retry_on_network(
@@ -48,7 +49,7 @@ def retry_on_network(
     max_attempts: int = MAX_RETRY_VAL,
     base_delay: float = RETRY_DELAY_VAL,
     label: str = "",
-) -> Callable[[F], F]:
+) -> Callable[[Callable[P, R]], Callable[P, R | None]]:
     """返回装饰器：对抓取函数做指数退避重试，全部失败返回 None。
 
     - 任意异常均视为可重试（网络类为主）
@@ -56,9 +57,9 @@ def retry_on_network(
     - 成功返回真实值；全部失败返回 None 并打 warning 日志
     """
 
-    def decorator(fn: F) -> F:
+    def decorator(fn: Callable[P, R]) -> Callable[P, R | None]:
         @wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any | None:
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R | None:
             last_exc: Exception | None = None
             for attempt in range(max_attempts):
                 try:
@@ -84,6 +85,6 @@ def retry_on_network(
                 logger.warning(f"⚠️ {fn.__name__} 重试 {max_attempts} 次仍失败: {last_exc}")
             return None
 
-        return wrapper  # type: ignore[return-value]
+        return wrapper
 
     return decorator

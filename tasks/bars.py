@@ -253,7 +253,38 @@ def _filter_index_codes(codes: list[str]) -> tuple[list[str], int]:
 
 
 def _is_index_code(code: str) -> bool:
-    return len(code) == 8 and code.startswith(("sh00", "sz39", "sz30", "bj89"))
+    """是否为指数代码（daily_bars 只收个股，指数行情属于 index_daily）。
+
+    支持两种形态：
+    - 市场前缀式：``sh000300`` / ``sz399001`` / ``bj899050``
+    - 点分式（README ``--symbols 000001.SZ,600000.SH`` 文档格式）：
+      ``000300.SH`` / ``399001.SZ`` / ``899050.BJ``
+
+    按市场判数字段：sh→``00`` 开头（000xxx 上证系列）、sz→``399`` 开头、
+    bj→``89`` 开头（899xxx 北证系列）。**sz30 段不是指数**——300xxx 是
+    创业板个股（如 300750），旧实现按 ``sz30`` 前缀剔除会把它们误杀。
+
+    裸 6 位码一律不判定（000001 无市场时既可能是平安银行也可能是上证综指），
+    按个股放行——股票列表来源本身不含指数。
+    """
+    raw = code.strip()
+    if "." in raw:
+        digits, _, market = raw.partition(".")
+        market = market.strip().lower()
+    elif len(raw) == 8 and raw[:2].lower() in ("sh", "sz", "bj"):
+        market = raw[:2].lower()
+        digits = raw[2:]
+    else:
+        return False
+    if not digits.isdigit():
+        return False
+    if market == "sh":
+        return digits.startswith("00")
+    if market == "sz":
+        return digits.startswith("399")
+    if market == "bj":
+        return digits.startswith("89")
+    return False
 
 
 # ===========================================================================

@@ -336,8 +336,8 @@ class TestIsSuspendedRealtime:
 # ===========================================================================
 
 class TestIndexCodeFilter:
-    """历史事故回归：--symbols 传入的指数代码(sh00/sz39/sz30/bj89)必须被
-    update_bars 剔除，绝不作为个股抓取/落库。
+    """历史事故回归：--symbols 传入的指数代码（sh00/sz399/bj89 前缀式与
+    000300.SH 点分式）必须被 update_bars 剔除，绝不作为个股抓取/落库。
 
     事故背景：sh000300/sz399001 经该入口写入 daily_bars，其
     amount=close×volume 使全市场成交额聚合被放大约 400 倍。
@@ -353,12 +353,41 @@ class TestIndexCodeFilter:
         assert not _is_index_code("000001")
         assert not _is_index_code("sz000001")
 
+    def test_is_index_code_dot_form(self):
+        """点分式（README `--symbols 000001.SZ,600000.SH` 格式）必须被识别。
+
+        同数字不同市场判定相反：000001.SH 是上证综指，000001.SZ 是平安银行。
+        还原旧实现（仅认 8 位前缀式）会让本用例全红。
+        """
+        assert _is_index_code("000300.SH")
+        assert _is_index_code("399001.SZ")
+        assert _is_index_code("899050.BJ")
+        assert _is_index_code("000001.SH")
+        assert not _is_index_code("000001.SZ")
+        assert not _is_index_code("300750.SZ")
+        assert not _is_index_code("600000.SH")
+
+    def test_is_index_code_sz30_prefix_is_stock(self):
+        """sz30 段是创业板个股(300xxx)不是指数，旧实现 `sz30` 前缀会误剔除。
+
+        300750(宁德时代) 经 --symbols 传入会被旧判定当作指数丢弃。
+        """
+        assert not _is_index_code("sz300750")
+        assert _is_index_code("sz399001")
+
     def test_filter_index_codes(self):
         kept, dropped = _filter_index_codes(
             ["sz399001", "sh000300", "600000", "000001", "sh000001"]
         )
         assert kept == ["600000", "000001"]
         assert dropped == 3
+
+    def test_filter_index_codes_dot_form(self):
+        kept, dropped = _filter_index_codes(
+            ["000300.SH", "600000.SH", "399001.SZ", "300750.SZ"]
+        )
+        assert kept == ["600000.SH", "300750.SZ"]
+        assert dropped == 2
 
     def test_update_bars_excludes_index_symbols(self):
         db = MagicMock()
@@ -382,7 +411,7 @@ class TestIndexCodeFilter:
             r = update_bars(
                 db,
                 loader,
-                symbols=["sz399001", "sh000300", "600000", "000001"],
+                symbols=["sz399001", "sh000300", "000300.SH", "600000", "000001"],
             )
             ProgressTracker.clear()
 

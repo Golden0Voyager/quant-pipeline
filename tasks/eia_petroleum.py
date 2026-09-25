@@ -21,13 +21,17 @@ from __future__ import annotations
 
 import logging
 import os
+from types import ModuleType
 
 from interface import DatabaseInterface
+
+# 显式声明使 `except ImportError: requests = None` 类型可收窄（原为 ignore[assignment]）
+requests: ModuleType | None
 
 try:
     import requests
 except ImportError:
-    requests = None  # type: ignore[assignment]
+    requests = None
 
 logger = logging.getLogger(__name__)
 
