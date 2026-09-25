@@ -1013,6 +1013,76 @@ def test_cross_source_enforce_dead_reference_degrades_without_retry(
     assert any("no data for any sampled symbol" in m for m in warnings)
 
 
+def test_execute_logs_per_task_progress_and_run_bounds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """每完成一个任务必须通报序号/总数与耗时，否则长任务看起来像卡死。
+
+    历史事故：07-30 三次 --refresh-today 全因界面长时间无输出被 SIGTERM，
+    26 分钟的工作全部作废。TUI 的实时日志面板 tail 的是同一日志文件。
+    """
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("base"), _spec("overlay", dependencies=("base",))),
+        adapters={
+            "base": RecordingAdapter("base", []),
+            "overlay": RecordingAdapter("overlay", []),
+        },
+        store=RecordingStore(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.refresh"):
+        result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.SUCCESS
+    messages = [rec.message for rec in caplog.records]
+    assert any("开始收盘刷新" in m and "共 2 个任务" in m for m in messages)
+    assert any("收盘刷新任务 [1/2]: base" in m for m in messages)
+    assert any("收盘刷新任务 [2/2]: overlay" in m for m in messages)
+    assert any("✅ 任务 [1/2] base 完成" in m for m in messages)
+    assert any("✅ 任务 [2/2] overlay 完成" in m for m in messages)
+    assert any("🏁 收盘刷新结束：状态 success" in m for m in messages)
+
+
+def test_blocked_task_logs_blocked_not_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """被依赖阻塞的任务须标注 [blocked]，与真正失败区分开。"""
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("dependent", dependencies=("base",)), _spec("base")),
+        adapters={
+            "base": RecordingAdapter("base", [], failures_before_success=2),
+            "dependent": RecordingAdapter("dependent", []),
+        },
+        store=RecordingStore(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.refresh"):
+        result = orchestrator.run(_context())
+
+    assert result.status is TaskStatus.DEGRADED
+    messages = [rec.message for rec in caplog.records]
+    assert any("[blocked]" in m and "dependent" in m for m in messages)
+    assert any("[failed]" in m and "base" in m for m in messages)
+
+
+def test_pre_close_gate_logs_rejection_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """闸门拒绝必须落日志：否则日志里只有一个无从解释的退出码 1。"""
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", [])},
+        store=RecordingStore(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.refresh"):
+        result = orchestrator.run(_context(hour_utc=7, minute=59))
+
+    assert result.status is TaskStatus.FAILED
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("收盘刷新被拒" in m and "16:00" in m for m in warnings)
+
+
 def test_cross_source_report_only_dead_reference_records_flag_without_degrade(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
