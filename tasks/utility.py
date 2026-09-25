@@ -28,6 +28,7 @@ from core.known_gaps import (
     is_known_missing_day,
 )
 from core.monitor import AkShareMonitor  # noqa: F401
+from core.retained_streak import retained_streaks
 from core.run_state import describe_run_state, read_run_state
 from core.utils import is_real_db_path, should_skip_beijing, should_update  # noqa: F401
 from interface import DatabaseInterface, DataLoaderInterface
@@ -408,6 +409,26 @@ def health_check(db: DatabaseInterface, fast: bool = False) -> dict:
             )
     except Exception as exc:  # noqa: BLE001 - 巡检不应因标记读取失败而整体失败
         report_lines.append(f"  运行状态标记读取失败: {exc}")
+
+    # ── 连续「保留旧数据」巡检（2026-09-25 新增） ──
+    # retained 以 0 退出、只映射到 warning，而 NOTIFICATION_LEVEL 默认 error 恰好把它
+    # 压掉：一个任务可以连续多日静默退化到「数据完全没更新」而无人知晓（实测
+    # update_concept_board 连续 5 天、update_fund_flow 连续 3 天，见 core/retained_streak.py）。
+    # 单次 retained 是正常的（源端抖动，core.runner 内建重试已吸收），只对**连续多日**
+    # 告警。命中即进 issues → 本轮 degraded → daily_pipeline 收尾通知升为 error 级。
+    try:
+        streaks = retained_streaks(cursor)
+        if streaks:
+            report_lines.append(
+                f"\n  连续保留旧数据巡检: {len(streaks)} 个任务仍在退化"
+            )
+            for streak in streaks:
+                report_lines.append("    " + streak.describe())
+                issues.append(streak.describe())
+        else:
+            report_lines.append("\n  连续保留旧数据巡检: 无")
+    except sqlite3.OperationalError as exc:
+        report_lines.append(f"  连续保留旧数据巡检跳过（表缺失）: {exc}")
 
     # ── 碎片空间检查 ──
     try:
