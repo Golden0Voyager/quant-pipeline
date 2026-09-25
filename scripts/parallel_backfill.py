@@ -34,8 +34,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 HOME = Path.home()
 MASTER_DB = HOME / "Code/quant_data/quant_core.db"
-PIPELINE_DIR = HOME / "Code/quant_pipeline"
-PYTHON = HOME / "Code/quant_hunter/.venv/bin/python3"
+# 仓库根从 __file__ 推导：此前这里硬编码 ~/Code/quant_pipeline，于是在另一个 checkout 里
+# 运行会把 worker 的 cwd、脚本路径与进度文件全部指向**另一个**仓库副本（改动看着生效、其实没生效）。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+# worker 解释器用当前解释器（`uv run python scripts/parallel_backfill.py` 下即本项目 venv）。
+# 此前写死兄弟仓库的 ~/Code/quant_hunter/.venv/bin/python3——那是另一个项目的 venv，
+# 本仓库的依赖不保证装在那里。
+PYTHON = Path(sys.executable)
 
 
 def copy_schema(src_db: Path, dst_db: Path):
@@ -76,7 +81,7 @@ def prepare_worker_db(worker_id: int, stocks: list[str]) -> Path:
 def run_worker(worker_id: int, stocks: list[str], total_workers: int):
     """启动一个 worker 进程"""
     worker_db = prepare_worker_db(worker_id, stocks)
-    progress_file = PIPELINE_DIR / f"progress_worker{worker_id}.json"
+    progress_file = _REPO_ROOT / f"progress_worker{worker_id}.json"
     if progress_file.exists():
         progress_file.unlink()
 
@@ -86,7 +91,7 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
 
     cmd = [
         str(PYTHON),
-        str(PIPELINE_DIR / "daily_pipeline.py"),
+        str(_REPO_ROOT / "daily_pipeline.py"),
         "--task", "update_bars",
         "--force",
     ]
@@ -98,7 +103,7 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
     with open(log_file, "w") as f:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(PIPELINE_DIR),
+            cwd=str(_REPO_ROOT),
             env=env,
             stdout=f,
             stderr=subprocess.STDOUT,
@@ -153,7 +158,7 @@ def cleanup(worker_ids: list[int]):
     for wid in worker_ids:
         for p in [
             MASTER_DB.parent / f"quant_core_worker{wid}.db",
-            PIPELINE_DIR / f"progress_worker{wid}.json",
+            _REPO_ROOT / f"progress_worker{wid}.json",
         ]:
             if p.exists():
                 p.unlink()
@@ -242,11 +247,11 @@ def main():
     try:
         cmd_ind = [
             str(PYTHON),
-            str(PIPELINE_DIR / "daily_pipeline.py"),
+            str(_REPO_ROOT / "daily_pipeline.py"),
             "--task", "update_indicators",
             "--force",
         ]
-        subprocess.run(cmd_ind, cwd=str(PIPELINE_DIR), check=True)
+        subprocess.run(cmd_ind, cwd=str(_REPO_ROOT), check=True)
         print("✅ 技术指标计算完成！")
     except Exception as e:
         print(f"⚠️ 技术指标计算失败: {e}")
