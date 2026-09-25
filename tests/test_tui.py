@@ -2296,3 +2296,197 @@ def test_db_queries_cache_and_invalidation(tmp_path):
     assert get_active_stock_count(str(db_file)) == 2
     counts2 = get_all_table_counts(str(db_file), fast=False)
     assert counts2.get("stock_list") == 2
+
+
+# ===========================================================================
+# 窄屏 / 快捷键文档 / 文案红线（Visual QA REVISE → 修复后 red-proof）
+# ===========================================================================
+def test_narrow_class_toggles_with_terminal_width():
+    """80 列必须挂 .narrow、140 列必须摘掉——还原 on_resize 会红。"""
+    app = PipelineApp()
+    assert app._narrow_threshold(80) is True
+    assert app._narrow_threshold(99) is True
+    assert app._narrow_threshold(100) is False
+    assert app._narrow_threshold(140) is False
+
+    app._apply_narrow_class(80)
+    assert "narrow" in app.classes
+    app._apply_narrow_class(140)
+    assert "narrow" not in app.classes
+    app._apply_narrow_class(80)
+    assert "narrow" in app.classes
+
+
+@pytest.mark.asyncio
+async def test_run_test_at_80_cols_has_narrow_class():
+    app = PipelineApp()
+    async with app.run_test(size=(80, 24)):
+        assert "narrow" in app.classes
+
+
+@pytest.mark.asyncio
+async def test_run_test_at_140_cols_has_no_narrow_class():
+    app = PipelineApp()
+    async with app.run_test(size=(140, 42)):
+        assert "narrow" not in app.classes
+
+
+def test_readme_tui_keys_match_app_bindings():
+    """README 按键表必须与 BINDINGS 一致——还原旧表（R=全量/M=续传/S=停守护）会红。"""
+    readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### 快捷键", 1)[1].split("###", 1)[0]
+    visible = {b.key.upper() for b in PipelineApp.BINDINGS} | {"?"}
+    for key in ("S", "R", "U", "D", "X", "H", "Q", "?"):
+        assert f"`{key}`" in section, f"README 快捷键表缺少 {key}"
+        assert key in visible
+    # 旧漂移：R 不再是全量、M 不是续传、S 不是停守护
+    assert "| `R` | 立即启动完整数据更新" not in section
+    assert "| `M` | 断点续传" not in section
+    assert "| `S` | 停止守护进程" not in section
+    assert "隐藏键" in readme
+    notes = readme.split("## 注意事项", 1)[1]
+    assert "断点续传（`R` 键）" in notes
+    assert "断点续传（`M` 键）" not in notes
+
+
+@pytest.mark.asyncio
+async def test_select_prompt_is_short_for_narrow_left_column():
+    """旧 prompt「选择一项任务...」在 80 列左栏腰斩——改短文案 red-proof。"""
+    from textual.widgets import Select
+
+    from tui import SingleTaskWidget
+
+    app = PipelineApp()
+    async with app.run_test(size=(80, 24)):
+        widget = app.query_one("#single-task", SingleTaskWidget)
+        select = widget.query_one("#task-select", Select)
+        assert select.prompt == "选择任务..."
+        assert select.prompt != "选择一项任务..."
+
+
+def test_group_button_labels_fit_narrow_single_column():
+    """分组按钮文案必须 ≤5 个显示宽——旧「核心行情/ETF/可转债/港通」会红。"""
+    from tui import TaskGroupWidget
+
+    long_old = ("核心行情", "资金面", "估值/财务", "宏观/全球", "行业/大盘", "事件信号")
+    for key, label in TaskGroupWidget.GROUP_LABELS.items():
+        assert len(label) <= 5, f"{key}={label!r} 过长，窄屏会腰斩"
+        assert label not in long_old
+
+
+def test_group_catchup_button_label_is_compact():
+    from tui import TaskGroupWidget
+
+    labels = TaskGroupWidget.GROUP_LABELS.values()
+    assert "核心行情" not in labels
+    # compose 文案
+    import inspect
+
+    src = inspect.getsource(TaskGroupWidget.compose)
+    assert "补齐缺失" in src
+    assert "⚡" not in src
+
+
+def test_modal_dialog_widths_are_fluid_not_fixed():
+    """TCSS 弹窗宽必须 90%+max-width——还原 width:70/66/56 会红。"""
+    tcss = (_PROJECT_ROOT / "tui" / "styles.tcss").read_text(encoding="utf-8")
+    for dialog in (
+        "ConfirmStopScreen #confirm-dialog",
+        "ConfirmRunScreen #confirm-dialog",
+        "ConfirmRefreshTodayScreen #refresh-dialog",
+        "#help-dialog",
+        "#logclean-dialog",
+        "#copy-dialog",
+    ):
+        block = tcss.split(dialog, 1)[1].split("}", 1)[0]
+        assert "width: 90%" in block, f"{dialog} 未改为流式宽度"
+        assert "max-width:" in block, f"{dialog} 缺少 max-width"
+
+
+def test_narrow_css_selectors_exist():
+    """.narrow 布局分支必须存在——删掉整段窄屏样式会红。"""
+    tcss = (_PROJECT_ROOT / "tui" / "styles.tcss").read_text(encoding="utf-8")
+    assert ".narrow #main-grid" in tcss
+    assert ".narrow #group-buttons" in tcss
+    assert "grid-size: 1" in tcss.split(".narrow #main-grid", 1)[1].split("}", 1)[0]
+
+
+def test_dashboard_labels_are_compact():
+    """旧 DB Size:/Scheduler: 会把值挤到下一行——标签必须短。"""
+    import inspect
+
+    from tui import DashboardWidget
+
+    src = inspect.getsource(DashboardWidget.update_status)
+    assert "DB Size:" not in src
+    assert "Scheduler:" not in src
+    assert "Sched" in src
+
+
+def test_completeness_fast_path_is_single_line_skeleton():
+    """快速模式不得再逐表输出「计算中...」——旧 N 行噪音会红。"""
+    import inspect
+
+    from tui import DataCompletenessWidget
+
+    src = inspect.getsource(DataCompletenessWidget._rebuild_content)
+    assert "行数加载中" in src
+    assert "计算中..." not in src
+    assert "for _tbl, label in self.TABLE_LABELS.items()" not in src
+
+
+def test_confirm_stop_truncates_long_command():
+    from tui.screens.confirm_stop import _MAX_CMD_WIDTH, _short_command
+
+    long_cmd = (
+        "/Users/someone/.local/share/uv/python/bin/python "
+        "/Users/someone/Code/quant_pipeline/daily_pipeline.py "
+        "--task all --force --resume"
+    )
+    out = _short_command(long_cmd)
+    assert len(out) <= _MAX_CMD_WIDTH
+    assert "daily_pipeline.py" in out or out.endswith("…")
+    short = "python daily_pipeline.py --task all"
+    assert _short_command(short) == short
+    # 单 token 超长（无空格）：旧实现 names[1] IndexError，弹窗挂掉
+    assert _short_command("x" * 60) == "x" * 47 + "…"
+
+
+@pytest.mark.asyncio
+async def test_confirm_stop_label_uses_truncated_command():
+    from textual.widgets import Label
+
+    from tui import ConfirmStopScreen
+
+    long_cmd = "/very/long/path/to/python " + "/very/long/daily_pipeline.py " * 8
+    screen = ConfirmStopScreen(
+        [{"pid": 1, "elapsed": "01:23", "command": long_cmd}]
+    )
+    app = PipelineApp()
+    with patch("tui.find_running_pipeline_processes", return_value=[]):
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            labels = [
+                str(getattr(lab, "_Static__content", ""))
+                for lab in screen.query(Label)
+            ]
+            joined = " ".join(labels)
+            assert long_cmd not in joined
+            assert any(
+                len(lab) < len(long_cmd)
+                for lab in labels
+                if "python" in lab or "daily" in lab
+            )
+
+
+def test_styles_scraping_progress_idle_collapses():
+    """空闲 Progress 必须 height:auto——还原 height:1fr 整格浪费会红。"""
+    tcss = (_PROJECT_ROOT / "tui" / "styles.tcss").read_text(encoding="utf-8")
+    # 共享块里 scraping-progress 不得再强制 1fr
+    shared = tcss.split("#status-dashboard, #scraping-progress", 1)[1].split("}", 1)[0]
+    assert "height: 1fr" not in shared
+    assert "#scraping-progress" in tcss
+    idle = tcss.split("#scraping-progress {", 1)[1].split("}", 1)[0]
+    assert "height: auto" in idle
+
