@@ -124,6 +124,26 @@
   「确实尝试外发但被拦下」的用例直接请求该 fixture 拿拦截列表，见
   `tests/test_notifications.py::test_external_notification_is_blocked_in_tests`。
 
+### 6. 连续 `retained` 是**静默退化**：单次正常，连续多日必须报
+- `retained`（保留旧数据）**以 0 退出**、只映射到 `warning`，而 `NOTIFICATION_LEVEL` 默认 `error`
+  恰好把它压掉 —— 于是一个任务可以连续多日「数据完全没更新」而整轮照样报「全部完成」。
+- 实测（2026-09-25 只读复核）：`update_concept_board` 连续 **5** 个运行日 retained
+  （09-21 ~ 09-25，`HTTP Error 502: Bad Gateway`），`concept_board` 停在 09-20 而 `daily_bars`
+  已到 09-24；`update_fund_flow` 连续 **3** 个运行日 retained 后于 09-24 恢复（恢复后**不得**再报）。
+- 检测器 `core/retained_streak.py` + 门禁 `tests/test_retained_streak.py`。规则：同一任务
+  **连续 N(=3) 个运行日**的裁定都是 `retained` 才命中；一天只认最后一次**有结论**的运行
+  （残留的 `status='running'` 父行不带结论，拿它当「当天最后状态」会把崩溃日判成「非 retained」）；
+  按**上海运行日**聚合（`finished_at` 按 UTC 落库，UTC 16:00 之后的运行属上海次日，
+  按 UTC 日切会割断连续计数）；没有运行的日子**跳过而不打断**计数（「某天没跑」归
+  `core.day_coverage` / `core.run_state`）。
+- **只报仍在持续的**：一旦恢复就不再报 —— 否则旧噪音天天重报，新退化会被淹没
+  （08 月连续 8 次无人处理的告警正是这个机理）。
+- **刻意不设豁免名单**：`core/known_gaps.py` 登记的是**已核实不可回补**的历史空洞；
+  连续 retained 是**正在发生且可修复**的退化（源端挂了 / 契约漂移），声明掉等于让它继续静默。
+- `health_check` 命中即进 `issues` → 本轮 `degraded` → `daily_pipeline` 收尾通知升为 **error 级**、
+  退出码非 0。生产库验收（只读）：改动前 `health_check` 对生产库返回 `success` / 0 问题，
+  改动后返回 `degraded` 且只命中 `update_concept_board`。
+
 ---
 
 ## 🧪 回归测试规范(red-proof)
@@ -158,3 +178,4 @@
 | P2-16 跨仓库路径注入在 4 处各抄一遍(`core/config.py`/`daily_pipeline.py`/`tasks/bars.py`/顶层 `__init__.py`),而 `core/utils.py`/`providers.py`/`tasks/valuation_chain.py` 有模块级跨仓库 import 却完全不注入 | P2 | ✅ 已修复 (PR #124):注入收敛到 `core/_bootstrap.py`,包级 choke point 置于 `core/__init__.py`/`tasks/__init__.py`,顶层模块各显式调一次。排查中修掉另外两处真缺陷:①顶层 `__init__.py` 只注入 `~/Code`——它不是仓库根也不是 `smartmoney_hunter` 的所在,故以包身份导入一直是「import 得进、子模块用不了」(`cd ~/Code && import quant_pipeline.providers` 实测 ModuleNotFoundError);②`scripts/audit_data_contracts.py` 缺仓库根注入,`uv run python scripts/audit_data_contracts.py --db <path> --json` 连 `--help` 都跑不起来——而 `tasks/utility.py` 正是把这条命令打印给运维的。顺带删除 `~/Code` 注入(两项独立证据表明无消费者:本仓库不 import 该目录下任何一级名字,`smartmoney_hunter` 自身只 import 标准库与第三方;`Trading_Agents` 甚至不存在),并加门禁阻止它回来。红证:还原旧实现会让 `tests/test_sys_path_bootstrap.py` 5 个用例变红(`core.utils`/`providers`/`tasks.valuation_chain` 的独立导入、包身份导入、`audit_data_contracts.py` 的脚本规则) |
 | P2-15 测试套件不 hermetic:配好通知通道后跑测试会真的外发推送,且该副作用只在本地存在(CI 无 `.env` 故恒绿) | P2 | ✅ 已修复 (PR #123):`core/notifications.py` 的配置由导入期常量改为**调用时**读环境变量(常量会让 `monkeypatch.delenv` 失效,本机配了凭据时「缺凭据」用例静默变成「有凭据」);新增 autouse 守卫 `tests/conftest.py::_block_external_notifications`,把模块唯一出网点 `urlopen` 换成记录后拒绝调用的桩。红证:还原旧实现会让 `tests/test_notifications.py::test_level_is_read_at_call_time_not_cached_at_import` 与 `::test_channel_credentials_are_read_at_call_time` 变红,且在配好通道的条件下 `::test_bark_channel_without_device_key_skips_network`/`::test_channels_warn_when_type_requested_without_credentials` 一并变红(正是本机实测的两个失败);把守卫生效行改为空操作则 `::test_external_notification_is_blocked_in_tests` 变红(`assert 0 == 1`,日志里出现真实 `HTTP Error 400`——请求确已离开本机) |
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
+| P2-18 连续 `retained` 静默退化:`retained` 以 0 退出、只记 `warning`,而 `NOTIFICATION_LEVEL` 默认 `error` 恰好压掉它 → 任务连续多日「数据完全没更新」而整轮仍报「全部完成」 | P2 | ✅ 已修复 (PR #126):新增 `core/retained_streak.py` —— 同一任务**连续 3 个运行日**裁定均为 `retained` 即命中;一天只认最后一次**有结论**的运行(排除残留的 `status='running'` 父行)、按**上海运行日**聚合(`finished_at` 按 UTC 落库,UTC 16:00 后属上海次日)、没有运行的日子跳过而不打断、只报**仍在持续**的(恢复即清零,避免旧噪音天天重报)。刻意**不设豁免名单**:`known_gaps` 登记的是不可回补的历史空洞,连续 retained 是**正在发生、可修复**的退化,声明掉等于让它继续静默。`tasks/utility.py::health_check` 新增巡检段,命中进 `issues` → 本轮 `degraded` → `daily_pipeline` 收尾通知升为 **error 级**、退出码非 0(且 `ingestion_runs` 缺失时跳过并在报告里写明)。生产库验收(只读):改动前 `health_check` 对生产库返回 `success`/0 问题,改动后返回 `degraded` 且只命中 `update_concept_board`(连续 5 天 09-21~09-25;`update_fund_flow` 连续 3 天后已于 09-24 恢复故不报)。红证:还原 `tasks/utility.py` 会让 `tests/test_daily_pipeline.py::TestHealthCheck` 的 4 个新用例变红;去掉 `_run_day` 的时区折算 → 2 个用例红;把「只数最近连续段」改成「数全部 retained 日」→ 2 个用例红 |
