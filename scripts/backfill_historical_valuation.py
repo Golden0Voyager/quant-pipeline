@@ -188,9 +188,9 @@ def main() -> int:
     conn.commit()
 
     session = requests.Session()
-    # None 表示「该 scheme 不走代理」，是 requests 的既有惯用法；
-    # typeshed 把 proxies 标注为 str，故显式忽略这一条
-    session.proxies = {"http": None, "https": None}  # type: ignore[dict-item]
+    # trust_env=False 已让 select_proxy 对所有 scheme 返回 None，
+    # 等价于置 proxies={"http": None, "https": None}（原写法因 typeshed
+    # 把 proxies 标注为 str 而需要 type: ignore，一并移除）
     session.trust_env = False
 
     total_saved = 0
