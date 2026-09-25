@@ -16,6 +16,15 @@ from core.task_result import TaskStatus
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TERMINAL_STATUSES = frozenset(status.value for status in TaskStatus)
 
+# 续跑只跳过「已完成且结果已落定」的任务。failed / aborted 的任务会重跑，
+# 因此在保留 20-55 分钟全市场任务成果的同时，仍能补救真正失败的任务。
+RESUMABLE_TASK_STATUSES = frozenset({"success", "no_data", "degraded"})
+
+# 可续跑的运行状态：running（进程被 SIGKILL，永远停在 running）与 aborted
+# （SIGTERM / KeyboardInterrupt）。failed 是「跑完了但有失败」的终态，
+# 没有缺失任务，不属于可续跑。
+RESUMABLE_RUN_STATUSES = ("running", "aborted")
+
 type Row = tuple[object, ...]
 type Rows = tuple[Row, ...]
 
@@ -55,6 +64,114 @@ def _validate_audit_counters(values: Mapping[str, object]) -> None:
             raise RefreshValidationError(
                 f"{name} must be a non-negative integer, got {value!r}"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ResumedTaskOutcome:
+    """One settled task outcome carried over from an interrupted run.
+
+    Mirrors the ``refresh_task_runs`` row so a resumed run can re-record the
+    task (keeping the new run's audit trail complete) and seed the aggregate
+    with the status that was already reached.
+    """
+
+    task_name: str
+    policy_kind: str
+    as_of_date: str | None
+    status: str
+    fetched: int
+    validated: int
+    replaced: int
+    retained: int
+    failed: int
+    metadata: Mapping[str, Any]
+
+
+def _parse_metadata(raw: str | None) -> Mapping[str, Any]:
+    """Decode a stored ``metadata_json`` value, tolerating corruption."""
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def load_interrupted_refresh(
+    db_path: str | Path,
+    *,
+    target_date: str,
+) -> tuple[str, tuple[ResumedTaskOutcome, ...]] | None:
+    """Find the newest interrupted refresh for ``target_date`` to resume.
+
+    Returns ``(run_id, outcomes)`` where ``outcomes`` contains only tasks that
+    already reached a settled non-failing outcome (see
+    ``RESUMABLE_TASK_STATUSES``); failed, aborted and dependency-blocked tasks
+    are deliberately excluded so a resume re-runs them.
+
+    Returns ``None`` when there is nothing to resume: no run for that target
+    date in a resumable state, no resumable task, or missing/unreadable audit
+    tables. Never raises on a read error - resuming is best effort and must not
+    stop a refresh from running.
+    """
+    run_placeholders = ", ".join("?" for _ in RESUMABLE_RUN_STATUSES)
+    statuses = sorted(RESUMABLE_TASK_STATUSES)
+    task_placeholders = ", ".join("?" for _ in statuses)
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        row = conn.execute(
+            f"""SELECT run_id FROM refresh_runs
+                WHERE target_date = ? AND status IN ({run_placeholders})
+                ORDER BY started_at DESC LIMIT 1""",
+            (target_date, *RESUMABLE_RUN_STATUSES),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id = str(row[0])
+        rows = conn.execute(
+            f"""SELECT task_name, policy_kind, as_of_date, status, fetched,
+                       validated, replaced, retained, failed, metadata_json
+                FROM refresh_task_runs
+                WHERE run_id = ? AND status IN ({task_placeholders})
+                ORDER BY task_name""",
+            (run_id, *statuses),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if not rows:
+        return None
+    outcomes = tuple(
+        ResumedTaskOutcome(
+            task_name=str(task_name),
+            policy_kind=str(policy_kind),
+            as_of_date=None if as_of_date is None else str(as_of_date),
+            status=str(status),
+            fetched=int(fetched),
+            validated=int(validated),
+            replaced=int(replaced),
+            retained=int(retained),
+            failed=int(failed),
+            metadata=_parse_metadata(metadata_json),
+        )
+        for (
+            task_name,
+            policy_kind,
+            as_of_date,
+            status,
+            fetched,
+            validated,
+            replaced,
+            retained,
+            failed,
+            metadata_json,
+        ) in rows
+    )
+    return run_id, outcomes
 
 
 @dataclass(frozen=True, slots=True)
