@@ -15,7 +15,7 @@ class LogCleanupScreen(ModalScreen[str]):
         with Vertical(id="logclean-dialog"):
             yield Label("[bold]清理日志文件[/bold]")
             yield Label("")
-            yield Label("[dim]当前正在写入的活跃日志会被保留[/dim]")
+            yield Label("[dim]活跃日志会保留[/dim]")
             yield Label("")
             with Grid(id="logclean-buttons"):
                 yield Button("全部清理", variant="error", id="all")
