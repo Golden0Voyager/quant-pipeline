@@ -21,6 +21,16 @@ PipelineApp {
     padding: 1 2;
 }
 
+/* 空闲 Progress 只占 1 行，把 1fr 让给 Completeness/Logs（运行中由 .active-task 撑开） */
+#scraping-progress {
+    height: auto;
+    max-height: 1fr;
+}
+
+#scraping-progress.active-task {
+    height: 1fr;
+}
+
 #single-task {
     border: round $blue-normal;
     background: $surface;
@@ -108,6 +118,9 @@ Select > .select-list > .select-list-item.button {
     padding: 0 1;
     border-title-align: left;
     border-title-color: #60a5fa;
+}
+
+#status-dashboard {
     height: 1fr;
 }
 
@@ -230,7 +243,8 @@ ConfirmStopScreen {
 }
 
 ConfirmStopScreen #confirm-dialog {
-    width: 70;
+    width: 90%;
+    max-width: 70;
     height: auto;
     max-height: 20;
     background: $surface;
@@ -256,7 +270,8 @@ ConfirmRunScreen {
 }
 
 ConfirmRunScreen #confirm-dialog {
-    width: 66;
+    width: 90%;
+    max-width: 66;
     height: auto;
     max-height: 14;
     background: $surface;
@@ -283,7 +298,8 @@ ConfirmRefreshTodayScreen {
 }
 
 ConfirmRefreshTodayScreen #refresh-dialog {
-    width: 70;
+    width: 90%;
+    max-width: 70;
     height: auto;
     max-height: 18;
     background: $surface;
@@ -315,7 +331,8 @@ CopyPanelScreen {
 }
 
 #copy-dialog {
-    width: 50;
+    width: 90%;
+    max-width: 50;
     height: auto;
     background: $surface 95%;
     border: round $primary;
@@ -389,7 +406,8 @@ HelpScreen {
 }
 
 #help-dialog {
-    width: 70;
+    width: 90%;
+    max-width: 70;
     height: auto;
     max-height: 24;
     background: $surface;
@@ -408,7 +426,8 @@ LogCleanupScreen {
 }
 
 #logclean-dialog {
-    width: 56;
+    width: 90%;
+    max-width: 56;
     height: auto;
     max-height: 16;
     background: $surface;
@@ -429,4 +448,58 @@ LogCleanupScreen {
     layout: grid;
     grid-size: 2;
     grid-gutter: 1;
+}
+
+/* ── 窄屏 (.narrow：终端宽 <100，由 PipelineApp.on_resize 切换) ──
+   TCSS 无 @media；80x24 下 Progress/Completeness 会被 2×4 网格挤出视口，
+   分组按钮 2 列腰斩、Dashboard 标签值分离。整体改单列可滚 + 紧凑行高。 */
+.narrow #main-grid {
+    grid-size: 1;
+    grid-rows: auto;
+    grid-columns: 1fr;
+    overflow-y: auto;
+    padding: 0 1;
+}
+
+.narrow #live-logs {
+    row-span: 1;
+    height: 12;
+}
+
+.narrow #status-dashboard,
+.narrow #scraping-progress {
+    height: auto;
+}
+
+.narrow #scraping-progress.active-task {
+    height: auto;
+}
+
+.narrow #data-completeness {
+    height: auto;
+    max-height: 20;
+}
+
+.narrow #group-buttons {
+    grid-size: 1;
+}
+
+.narrow #group-buttons Button {
+    height: 1;
+}
+
+.narrow #single-task Select > SelectCurrent {
+    text-overflow: clip;
+}
+
+.narrow ConfirmStopScreen #confirm-buttons,
+.narrow ConfirmRunScreen #confirm-buttons,
+.narrow ConfirmRefreshTodayScreen #refresh-buttons,
+.narrow #logclean-buttons {
+    layout: vertical;
+}
+
+.narrow ModalScreen Button {
+    width: 100%;
+    margin: 0 0 1 0;
 }
