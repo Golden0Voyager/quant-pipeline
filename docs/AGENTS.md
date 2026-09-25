@@ -63,6 +63,7 @@ quant_pipeline/
 
 - `quant-data` / `pipe-data` — Launch TUI panel
 - `uv run python daily_pipeline.py --task <name> [--force] [--resume]` — Direct CLI
+- `uv run python daily_pipeline.py --refresh-today [--force] [--resume]` — Close refresh; `--resume` continues an interrupted run
 - `uv run python scripts/daemon.py [start|stop]` — Daemon management (TUI D/S keys)
 
 ## Close Refresh (`--refresh-today`)
@@ -81,6 +82,8 @@ rtk uv run python daily_pipeline.py --refresh-today --symbols 000001.SZ,600000.S
 | Run records | Each run persists one `refresh_runs` row plus one `refresh_task_runs` row per task (status, fetched/validated/replaced/retained/failed counters, metadata JSON) |
 | Failure queue | Per-symbol fetch failures go to `failed_symbols` and keep their old rows; derived tasks (indicators, chip distribution) recompute only symbols whose bars actually changed |
 | Rollback | Every publish goes through staging + one transaction (date-partition replace / keyed upsert / run snapshot); composite tasks (`update_sector_derivatives`: `sector_daily`, `sector_valuation`, `index_futures_basis`) commit or roll back all tables together |
+| Progress | Every task logs `▶ 收盘刷新任务 [i/N]: <name>` then `✅/⚠️/⏭️/❌ … 耗时 Xs` in `core/refresh.py`. The TUI live-log panel tails the same log file, so this is what keeps a running refresh from looking frozen: `update_bars` alone takes 20-55 min uncached, and silent runs were previously SIGTERM'd mid-flight. The 16:00 gate rejection is logged too |
+| Resume | `--refresh-today --resume` continues an interrupted run for the same target date. Tasks the earlier run settled (`success`/`no_data`/`degraded`, see `RESUMABLE_TASK_STATUSES`) are carried over and re-recorded into the new run with `metadata.resumed=true` instead of being executed again; `failed`/`aborted`/dependency-blocked tasks are re-run. Carried statuses still drive dependency blocking and the aggregate. Discovery is `refresh_store.load_interrupted_refresh` (newest `running`/`aborted` run for the date; read errors/missing tables ⇒ no resume); when nothing is resumable the CLI warns and runs from scratch, never failing because of the flag |
 | Exit code | Any degraded/failed/aborted task makes the CLI exit nonzero |
 | Cross-source check | Opt-in, OFF by default. `REFRESH_CROSS_SOURCE=1` enables a read-only sampled comparison against Xueqiu daily bars (never used for writes; price aligned on qfq, volume normalized by the lot/share convention, Beijing excluded). **Enabling it starts in observe mode**: `REFRESH_CROSS_SOURCE_REPORT_ONLY` defaults to `1` (records/warns disagreements, never degrades); set `0` to enforce after tolerances are validated. Audit metadata `cross_source` splits `mismatched` (real disagreement), `unverifiable` (Xueqiu had no data that day, e.g. suspended) and `reference_dead` (zero hits overall). Tuning knobs: `REFRESH_CROSS_SOURCE_TASK` (default `update_bars`), `REFRESH_CROSS_SOURCE_SAMPLE_SIZE` (default 30), `REFRESH_CROSS_SOURCE_PRICE_TOL`/`REFRESH_CROSS_SOURCE_VOLUME_TOL` (defaults 0.005/0.05 — provisional, must be tuned on real data). Enable/tune 3-step flow: docs/runbooks/cross-source-verification-rollout.md |
 | TUI | `u` key ("Close Refresh") launches `daily_pipeline.py --refresh-today` after confirmation |
