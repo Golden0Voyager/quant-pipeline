@@ -262,11 +262,27 @@ class RefreshOrchestrator:
         context: RefreshContext,
         ordered_specs: tuple[TaskSpec, ...],
     ) -> TaskResult:
+        # 任务级进展必须逐条落日志：全市场任务（如 update_bars）单跑就要
+        # 20-55 分钟且此处强制绕过缓存，而该刷新是由 TUI/手动触发、需要人
+        # 盯着的。若不通报，运维看到的是「卡死」并会中断整轮刷新（历史事故：
+        # 07-30 连续 3 次 SIGTERM）。TUI 的实时日志面板 tail 的正是同一个
+        # 日志文件，因此这里 info 一行，界面上就能看到一行。
+        runnable = tuple(
+            spec for spec in ordered_specs if spec.refresh_policy is not None
+        )
+        total = len(runnable)
+        logger.info(
+            "▶ 开始收盘刷新：目标交易日 %s，共 %d 个任务 (run_id=%s)",
+            context.target_date,
+            total,
+            context.run_id,
+        )
         executions: dict[str, _TaskExecution] = {}
-        for spec in ordered_specs:
+        for index, spec in enumerate(runnable, start=1):
             policy = spec.refresh_policy
-            if policy is None:
-                continue
+            assert policy is not None
+            logger.info("▶ 收盘刷新任务 [%d/%d]: %s", index, total, spec.name)
+            task_started = self._clock()
             blocked_by = tuple(
                 dependency
                 for dependency in policy.dependencies
@@ -287,6 +303,7 @@ class RefreshOrchestrator:
                 execution = self._maybe_cross_check(spec, task_context, execution)
             executions[spec.name] = execution
             self._record_task(context, spec, execution)
+            self._log_task_result(index, total, spec.name, execution, task_started)
 
         aggregate = self._aggregate(context, executions)
         self._store.finish_run(
@@ -294,7 +311,48 @@ class RefreshOrchestrator:
             finished_at=self._aware_now().isoformat(),
             status=str(aggregate.status),
         )
+        logger.info(
+            "🏁 收盘刷新结束：状态 %s (run_id=%s)",
+            aggregate.status,
+            context.run_id,
+        )
         return aggregate
+
+    def _log_task_result(
+        self,
+        index: int,
+        total: int,
+        task_name: str,
+        execution: _TaskExecution,
+        started_at: datetime,
+    ) -> None:
+        """Log one finished task with its position and elapsed time.
+
+        Mirrors ``core/runner.py``'s progress lines so a running close-refresh
+        is observable in the shared log file (and therefore in the TUI's live
+        log panel) instead of looking frozen for the tens of minutes the
+        full-market tasks take.
+        """
+        label = f"[{index}/{total}] {task_name}"
+        elapsed = (self._clock() - started_at).total_seconds()
+        result = execution.task_result
+        blocked_by = execution.metadata.get("blocked_by")
+        reason = f"：{result.error}" if result.error else ""
+        if blocked_by:
+            logger.warning(
+                "⏭️ 任务 %s [blocked] 耗时 %.1fs：依赖失败 %s",
+                label,
+                elapsed,
+                "、".join(blocked_by),
+            )
+        elif result.status in {TaskStatus.SUCCESS, TaskStatus.NO_DATA}:
+            logger.info("✅ 任务 %s 完成，耗时 %.1fs", label, elapsed)
+        elif result.status is TaskStatus.DEGRADED:
+            logger.warning("⚠️ 任务 %s [degraded] 耗时 %.1fs%s", label, elapsed, reason)
+        elif result.status is TaskStatus.ABORTED:
+            logger.warning("⚠️ 任务 %s [aborted] 耗时 %.1fs%s", label, elapsed, reason)
+        else:
+            logger.error("❌ 任务 %s [failed] 耗时 %.1fs%s", label, elapsed, reason)
 
     @staticmethod
     def _pre_close_failure(context: RefreshContext) -> TaskResult | None:
@@ -303,6 +361,11 @@ class RefreshOrchestrator:
         )
         if shanghai_time >= _CLOSE_TIME or context.allow_pre_close:
             return None
+        logger.warning(
+            "⛔ 收盘刷新被拒：上海时间 %s 早于 16:00 收盘闸门；"
+            "如确需提前运行请显式传 --force",
+            shanghai_time.strftime("%H:%M"),
+        )
         return TaskResult.failed(
             "refresh_today",
             ErrorKind.DATA_QUALITY,
