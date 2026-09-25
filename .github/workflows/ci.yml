@@ -22,6 +22,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # TUI 端到端用例（tests/test_tui_tmux.py）驱动真 tmux 会话：不装的话它们会被
+      # skipif 静默跳过——本仓库的 TUI e2e 从此在 CI 上真的跑，而不是只有本机才跑。
+      - name: Install tmux
+        run: sudo apt-get install -y --no-install-recommends tmux
+
       - name: Install dependencies
         run: uv sync --extra dev
 
