@@ -49,11 +49,13 @@ class DashboardWidget(Static):
             else "[bold red]Inactive[/bold red]"
         )
 
+        # 标签压到 8 列内：80 列终端下左栏 ~27 列，长标签会把值挤到下一行
+        # （5.47 / GB 分家、Stopped 孤行）。值+单位必须同行。
         text = (
-            f" • [bold gray]DB Size:    [/bold gray] [cyan]{db_size}[/cyan]\n"
-            f" • [bold gray]Stocks:     [/bold gray] [cyan]{active_stocks}[/cyan]\n"
-            f" • [bold gray]Daemon:     [/bold gray] {daemon_str}\n"
-            f" • [bold gray]Scheduler:  [/bold gray] {launchd_str}\n"
+            f" • [bold gray]DB      [/bold gray][cyan]{db_size}[/cyan]\n"
+            f" • [bold gray]Stocks  [/bold gray][cyan]{active_stocks}[/cyan]\n"
+            f" • [bold gray]Daemon  [/bold gray]{daemon_str}\n"
+            f" • [bold gray]Sched   [/bold gray]{launchd_str}\n"
         )
         self.update(text)
 
