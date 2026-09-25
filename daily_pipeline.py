@@ -62,6 +62,7 @@ from core.config import (
     SHARED_DATA_DIR,  # noqa: F401
     read_cross_source_config,
 )
+from core.db_pragmas import truncate_wal
 from core.freshness import compute_catch_up_tasks, get_latest_dates
 from core.lock import ProcessLock, TaskLock, global_lock_held
 from core.monitor import AkShareMonitor  # noqa: F401
@@ -1184,6 +1185,11 @@ def main():
             db.close()
         if task_lock_name:
             TaskLock.release(task_lock_name)
+        # WAL 文件是只涨不缩的高水位线（实测：单个 310 MB 的事务把它撑到 310 MB，
+        # 之后无论再写多少都不缩，生产库曾长期占着 2.39 GiB）。收尾显式 checkpoint 一次
+        # 把空间还给磁盘——只要还有别的连接（TUI）开着，WAL 就不会被 SQLite 自己删除。
+        # 失败（库被占用等）只记日志：回收磁盘是尽力而为，不能改变退出码。
+        truncate_wal(args.db_path)
 
 
 if __name__ == "__main__":
