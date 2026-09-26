@@ -43,22 +43,29 @@
 ``sector_fund_flow``，对照日 09-15 分别有 4–5562 行）。
 
 为何不会自愈：这些任务的作用域固定在 ``get_expected_latest_trading_day()``
-（实测 11 个写入方**签名都不接受日期参数**），因此那天一旦过去就再也不会被回访
+（写入方签名原本都不接受日期参数），因此那天一旦过去就再也不会被回访
 ——与上一种空洞同一机理。仓库里已有的自愈先例是 ``update_margin_trading``：它回看
 最近 3 个交易日、逐日尝试直到成功（实测后果：``margin_trading`` 在 09-14 有 4105 行，
 而 09-15/09-16 反为空——回看只在当日源端尚未发布时才会落到前一日）。把这个模式
-推广到其余任务，是**独立工作项**。
+推广到其余任务，是**独立工作项**（整日缺席的回补入口已于 2026-09-26 落地：
+``daily_pipeline.py --backfill-days``，日期筛选与分类见 ``core/backfill.py``）。
 
-回补判定（2026-09-24 逐一查证）：
+回补判定（2026-09-26 按**源端**重新逐一复核）：
 
-* **不可回补**：``fundamentals``/``historical_valuation``（雪球接口与
-  ``stock_zh_ah_spot_em`` 都只给**实时**值，历史日期拿不到）、``ah_premium`` 的
-  A/H 部分同理。
-* **抓取层可回补、但任务层缺入口**：``block_trade``（``stock_dzjy_mrmx`` 带
-  ``start_date``/``end_date``）、``limit_up_down``（``stock_lhb_detail_em`` 同理）、
-  ``index_daily``（``stock_zh_index_daily_tx`` 返回全历史）、``sector_*``
-  （``stock_board_industry_hist_em`` 带 ``start_date``/``end_date``）。这些接口能
-  按历史日期取数，但任务函数不接日期参数，所以回补同样要等到「给任务加日期入口」。
+* **不可回补**（源端只给实时值）：``fundamentals``/``historical_valuation``（雪球接口）、
+  ``ah_premium``（``stock_zh_ah_spot_em``）、``fund_flow``（``get_market_fund_flow()``）。
+  另有两张不是「抓不到」而是**派生**：``sector_fund_flow``（同花顺
+  ``stock_fund_flow_industry`` 只有即时快照）、``sector_industry``（由 ``fundamentals``
+  + ``stock_list`` 派生，上游本身就缺）。
+* **可回补（4 张）**：``index_daily``（``stock_zh_index_daily_tx`` 返回全历史，按日期选行）、
+  ``limit_up_down``（``stock_zt_pool_em``/``stock_zt_pool_dtgc_em`` 的 ``date=``）、
+  ``block_trade``（``stock_dzjy_mrmx`` 的 ``start_date``/``end_date``）、
+  ``sector_valuation``（``stock_industry_pe_ratio_cninfo`` 的 ``date=``）。
+  这四张已接上 ``--backfill-days`` 入口。
+* 此前这里写的「``sector_*`` 走 ``stock_board_industry_hist_em``、``limit_up_down`` 走
+  ``stock_lhb_detail_em``」是错的：前者是 ``sector_daily`` 的源（而该表源端返回全历史、
+  实测从未真正缺过），后者是龙虎榜的源。分类以 ``core/backfill.py`` +
+  ``tests/test_backfill.py`` 的门禁为准，不要在这里重述细节。
 
 因此这里也是「已声明」而不是「装作无事」：漏跑的那几天，数据确实少了，
 而且其中一部分可能永远补不回来。
