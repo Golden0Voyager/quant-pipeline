@@ -308,8 +308,17 @@ def update_dragon_tiger(db: DatabaseInterface, symbols: list[str] | None = None)
 # ===========================================================================
 
 
-def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) -> dict:
-    """批量获取昨日大宗交易数据并保存。"""
+def update_block_trade(
+    db: DatabaseInterface,
+    symbols: list[str] | None = None,
+    target_date: str | None = None,
+) -> dict:
+    """批量获取昨日大宗交易数据并保存。
+
+    ``target_date`` 给定时改写该历史交易日（整日缺席回补入口）；缺省仍取
+    ``get_expected_latest_trading_day()``。源端 ``stock_dzjy_mrmx`` 本就按
+    ``start_date``/``end_date`` 取数，因此回补无需额外适配。
+    """
     if symbols:
         logger.info(f"  --symbols 过滤：{len(symbols)} 只")
     logger.info("\n" + "=" * 60)
@@ -320,7 +329,7 @@ def update_block_trade(db: DatabaseInterface, symbols: list[str] | None = None) 
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "total": 0, "error": "akshare not installed"}
 
-    target_date = get_expected_latest_trading_day()
+    target_date = target_date or get_expected_latest_trading_day()
     try:
         df = ak.stock_dzjy_mrmx(symbol="A股", start_date=target_date.replace("-", ""), end_date=target_date.replace("-", ""))
         if df is None or df.empty:
