@@ -215,8 +215,13 @@ def _fetch_limit_down(trade_date: str) -> list[dict]:
         return []
 
 
-def update_limit_up_down(db: DatabaseInterface) -> dict:
-    """获取涨停跌停统计并保存。"""
+def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) -> dict:
+    """获取涨停跌停统计并保存。
+
+    ``target_date`` 给定时改写该历史交易日（整日缺席回补入口）；缺省仍取
+    ``get_expected_latest_trading_day()``。源端 ``stock_zt_pool_em`` / ``stock_zt_pool_dtgc_em``
+    本就按 ``date`` 取数，因此回补无需额外适配。
+    """
     logger.info("\n" + "=" * 60)
     logger.info("🚀 任务: 更新涨停跌停统计")
     logger.info("=" * 60)
@@ -225,7 +230,7 @@ def update_limit_up_down(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "error": "akshare not installed"}
 
-    trade_date = get_expected_latest_trading_day()
+    trade_date = target_date or get_expected_latest_trading_day()
     try:
         limit_up = _fetch_limit_up_down(trade_date)
         limit_down = _fetch_limit_down(trade_date)

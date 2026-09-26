@@ -126,6 +126,20 @@ rtk uv run python daily_pipeline.py --refresh-today --resume   # 中断后续跑
 - **断点续跑**：被中断（Ctrl-C / SIGTERM / TUI 强杀）后用 `--refresh-today --resume` 继续。上一轮**已落定**的任务（success/no_data/degraded）直接沿用、不再执行，只补跑失败与被依赖阻塞的任务；无可用续跑时只告警并从头开始，不会因此跑不起来。
 - **TUI 入口**：面板中按 `U`（Close Refresh）确认后即启动收盘刷新。
 
+### 6. 整日缺席回补（`--backfill-days`）
+
+补写「当天什么都没写」的历史交易日（登记册见 `core/known_gaps.py`）：
+
+```bash
+rtk uv run python daily_pipeline.py --backfill-days                          # 自动取登记册里仍缺的日期
+rtk uv run python daily_pipeline.py --backfill-days 2026-09-14,2026-09-16    # 指定日期
+```
+
+- **只补 4 张表**：只有源端支持历史日期的表才补得回来 —— `index_daily`、`limit_up_down`、`block_trade`、`sector_valuation`。另外 6 张（`fundamentals`/`historical_valuation`/`ah_premium`/`fund_flow`/`sector_fund_flow`/`sector_industry`）源端只给实时值或本身是派生表，**补不回来**；逐表依据与门禁见 `core/backfill.py` 与 `tests/test_backfill.py`。
+- **幂等**：只处理**仍然**缺席的日期，已经补上的直接跳过，不会重复打源端。
+- **留痕**：每个任务经 `safe_task` 落 `ingestion_runs` 审计，与日常路径同一套。
+- **退出码**：任一任务 failed/degraded 时以非零码退出。
+
 ---
 
 ## 日线数据回填工具
