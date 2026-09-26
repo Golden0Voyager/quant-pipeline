@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -206,6 +206,36 @@ def test_force_equivalent_context_allows_pre_close_and_preserves_target_date() -
             "symbols": None,
         },
     )
+
+
+def test_started_at_is_normalized_to_utc_in_the_audit_row() -> None:
+    """refresh_runs.started_at 落库必须与 finished_at 同为 UTC。
+
+    ``context.started_at`` 由 daily_pipeline 以**上海 aware 时钟**创建（闸门、
+    目标交易日、started_at 共用一个时间基准），若直接 ``isoformat()`` 会写成
+    ``+08:00``，使同一行的两个时间戳偏移不一致（历史遗留）。编排器只归一化
+    落库字符串为 UTC，``context.started_at`` 本身仍按上海语义供闸门使用。
+    """
+    store = RecordingStore()
+    orchestrator = RefreshOrchestrator(
+        specs=(_spec("bars"),),
+        adapters={"bars": RecordingAdapter("bars", [])},
+        store=store,
+    )
+    shanghai = timezone(timedelta(hours=8))
+    context = RefreshContext(
+        target_date="2026-07-27",
+        # 16:05 +08:00 == 08:05 UTC：已过 16:00 收盘闸门。
+        started_at=datetime(2026, 7, 27, 16, 5, tzinfo=shanghai),
+        run_id="refresh-1",
+        symbols=None,
+    )
+
+    result = orchestrator.run(context)
+
+    assert result.status is TaskStatus.SUCCESS
+    # 关键：落库为 UTC（+00:00）而非 +08:00。
+    assert store.calls[0][1]["started_at"] == "2026-07-27T08:05:00+00:00"
 
 
 def test_dependencies_are_topological_and_shared_table_writers_are_serial() -> None:
