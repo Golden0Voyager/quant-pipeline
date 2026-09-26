@@ -203,6 +203,7 @@ TABLE_LABELS: dict[str, str] = {
     "concept_member": "Concept Members",
     "index_member_history": "Index Members",
     "market_valuation": "Market Valuation",
+    "market_breadth": "Market Breadth",
     # 股东
     "shareholder_count": "Shareholders",
     "institutional_holdings": "Inst. Holdings",
@@ -276,6 +277,7 @@ TABLE_LABELS_CN: dict[str, str] = {
     "concept_member": "概念成分",
     "index_member_history": "指数成分",
     "market_valuation": "大盘估值",
+    "market_breadth": "市场宽度",
     # 股东
     "shareholder_count": "股东户数",
     "institutional_holdings": "机构持仓",
@@ -350,6 +352,7 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_shareholder_count",
         "update_dividend_summary",
         "update_market_valuation",
+        "update_market_breadth",
         "update_financial_history",
     ],
     "macro": [
@@ -419,6 +422,7 @@ CATCH_UP_TASK_ORDER: tuple[str, ...] = (
     "update_hot_rank",
     "update_index_daily",
     "update_market_valuation",
+    "update_market_breadth",
     "update_concept_board",
     "update_south_flow",
     "update_ah_premium",
@@ -1132,6 +1136,17 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
             {"market_valuation": ("date", "data_source")},
             lookback_days=3,
         ),
+    ),
+    # ── Market breadth ─────────────────────────────────────────────
+    TaskSpec(
+        name="update_market_breadth",
+        callable=None,
+        tables=("market_breadth",),
+        cadence=Cadence.DAILY,  # 乐咕按日更新；非交易日幂等覆盖同一日期
+        date_columns={"market_breadth": "date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="市场宽度",
     ),
     # ── Sector derivatives ─────────────────────────────────────────
     TaskSpec(

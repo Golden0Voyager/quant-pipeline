@@ -1823,6 +1823,52 @@ class SmartMoneyDBProvider:
             logger.warning(f"⚠️ 大盘估值数据保存失败: {e}")
             return 0
 
+    def save_market_breadth_batch(self, records: list[dict[str, Any]]) -> int:
+        """批量保存市场宽度数据（新高新低/破净/赚钱效应），返回实际保存条数。"""
+        if not records:
+            return 0
+        try:
+            with self._write_lock:
+                conn = self._get_write_conn()
+                before_changes = conn.total_changes
+                conn.executemany(
+                    "INSERT OR REPLACE INTO market_breadth (date, close, high20, low20, high60, low60, high120, low120, below_net_asset, total_company, below_net_asset_ratio, up_count, down_count, flat_count, limit_up, limit_down, real_limit_up, real_limit_down, st_limit_up, st_limit_down, suspended, activity_ratio, data_source, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            r.get("date"),
+                            r.get("close"),
+                            r.get("high20"),
+                            r.get("low20"),
+                            r.get("high60"),
+                            r.get("low60"),
+                            r.get("high120"),
+                            r.get("low120"),
+                            r.get("below_net_asset"),
+                            r.get("total_company"),
+                            r.get("below_net_asset_ratio"),
+                            r.get("up_count"),
+                            r.get("down_count"),
+                            r.get("flat_count"),
+                            r.get("limit_up"),
+                            r.get("limit_down"),
+                            r.get("real_limit_up"),
+                            r.get("real_limit_down"),
+                            r.get("st_limit_up"),
+                            r.get("st_limit_down"),
+                            r.get("suspended"),
+                            r.get("activity_ratio"),
+                            r.get("data_source", "legu"),
+                            r.get("data_date"),
+                        )
+                        for r in records
+                    ],
+                )
+                return self._commit_delta(conn, before_changes)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 市场宽度数据保存失败: {e}")
+            return 0
+
     def save_concept_board_batch(self, records: list[dict[str, Any]]) -> int:
         """批量保存概念板块日频行情数据。"""
         if not records:

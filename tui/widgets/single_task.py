@@ -41,6 +41,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_shareholder_count": "股东户数 (Shareholders)",
     "update_dividend_summary": "分红信息 (Dividends)",
     "update_market_valuation": "大盘估值 (Market Valuation)",
+    "update_market_breadth": "市场宽度 (Market Breadth)",
     "update_financial_history": "财务历史 (Financial History)",
     "update_china_macro": "中国宏观 (China Macro)",
     "update_gold_price": "黄金价格 (Gold Price)",

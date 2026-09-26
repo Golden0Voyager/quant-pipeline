@@ -189,7 +189,13 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 
 **接入状态（2026-09 复核）**：
 - ✅ 高优先级：策略信号类（股债利差、全A PE/PB）→ 已在 `tasks/market_valuation.py`，TRADING_DAY 每日运行
-- ⏳ 中优先级：市场宽度类（新高新低/破净/赚钱效应）→ 未接入，可并入 limit_up_down 或新建任务
+- ✅ 中优先级：市场宽度类（新高新低/破净/赚钱效应）→ **已接入**（PR #139，2026-09-26）：
+  新任务 `update_market_breadth`（`tasks/market_breadth.py`，DAILY）写入新表
+  `market_breadth`（migration 026），三源按日期合并：
+  `stock_a_high_low_statistics`（20/60/120 日新高新低家数，全历史）、
+  `stock_a_below_net_asset_statistics`（破净家数/占比）、
+  `stock_market_activity_legu`（当日赚钱效应快照）。
+  ⚠️ 破净源上游当前返回缺 `marketId`（乐咕端变更），尽力而为：缺失列留 NULL、只告警不阻断。
 - ⏳ 低优先级：基金仓位 / 巴菲特分位数 / 指数 PE+PB → 等需求明确后再做
 
 ### 4.2 同花顺 (10jqka) — 30+ 个函数
@@ -243,7 +249,7 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | 🔴 P0 | 乐咕 | 股债利差、巴菲特指标、全A PE | ✅ 已接入（`update_market_valuation`） |
 | 🔴 P0 | 东财 | 沪深港通持股个股明细 | ✅ 已接入（`update_north_hold` 季度快照） |
 | 🔴 P0 | 东财 | 股东增减持 | ⏳ 未做（东财 API 暂不稳定） |
-| 🟡 P1 | 乐咕 | 市场宽度（新高新低/破净） | ⏳ 未接入 |
+| 🟡 P1 | 乐咕 | 市场宽度（新高新低/破净/赚钱效应） | ✅ 已接入（`update_market_breadth` → `market_breadth`） |
 | 🟡 P1 | 东财 | 概念板块 | ✅ 已接入（`update_concept_board` 东财源） |
 | 🟡 P1 | 东财 | 机构调研 | ✅ 已接入（`update_institution_survey`） |
 | 🟢 P2 | 同花顺 | 技术选股系列 | 未接入（因子输入，不直接入库） |
