@@ -61,6 +61,7 @@ _SHARED_TO_FLOAT_MODULES = (
     "tasks.convertible_bond",
     "tasks.corporate_actions",
     "tasks.finance_flow",
+    "tasks.market_breadth",
     "tasks.market_valuation",
     "tasks.money_market",
     "tasks.option_sentiment",
