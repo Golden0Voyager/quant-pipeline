@@ -69,6 +69,7 @@ uv run python daily_pipeline.py --task update_etf_daily
 uv run python daily_pipeline.py --task update_sector_industry  # 实际为 sector_daily
 
 # 或等下次全量运行（pipe-run）自动重试
+```
 
 ---
 
@@ -250,7 +251,6 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 | ⚪ P3 | 腾讯 | 日线 fallback / 分笔 | 未接入（备用/高级分析） |
 | ⚪ P3 | 乐咕 | 基金仓位 | 未接入（低更新频率） |
 | ⚪ P3 | 东财/同花顺 | 期权数据 | ✅ 已接入（`update_option_sentiment`） |
-```
 
 ---
 
@@ -371,5 +371,7 @@ close-refresh 这个功能本身不成立：
 **因此本节关闭**：两张表继续保留，`refresh_runs`/`refresh_task_runs` 仍是收盘刷新的审计存储；
 `tui/services/refresh_state.py` 的六态面板在续跑完成后能拿到完整的每任务记录。
 
-**仍未做（另开小项，不阻塞本节）**：`started_at`（+08:00）与 `finished_at`（UTC）格式不统一——
-绝对时间一致、唯一读取方只按 `started_at` 文本排序，故无实际影响。
+**已收尾（小项，2026-09-26）**：`started_at` 与 `finished_at` 的格式不一致已修复——编排器
+落库时把 `context.started_at`（上海 aware，供闸门与目标交易日使用）归一化为 UTC，审计行两个
+时间戳现同为 `+00:00`（`core/refresh.py`；回归 `tests/test_refresh.py::test_started_at_is_normalized_to_utc_in_the_audit_row`）。
+历史三行仍是 `+08:00`（未回填），但唯一读取方只按 `started_at` 文本排序，且新行偏移恒为 `+00:00`，无实际影响。
