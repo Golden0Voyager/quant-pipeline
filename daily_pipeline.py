@@ -161,6 +161,7 @@ from tasks.macro import (
     update_us_treasury,
     update_usd,
 )
+from tasks.market_breadth import update_market_breadth
 from tasks.market_flow import (
     _fetch_sector_fund_flow,  # noqa: F401
     update_block_trade,
@@ -257,6 +258,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_concept_board": update_concept_board,
     "update_concept_member": update_concept_member,
     "update_market_valuation": update_market_valuation,
+    "update_market_breadth": update_market_breadth,
     "update_sector_derivatives": update_sector_derivatives,
     "update_option_sentiment": update_option_sentiment,
     "update_stock_repurchase": update_stock_repurchase,
@@ -524,6 +526,7 @@ def run_all(
         results["hot_rank"] = _run_task("update_hot_rank", update_hot_rank, db)
         results["index_daily"] = _run_task("update_index_daily", update_index_daily, db)
         results["market_valuation"] = _run_task("update_market_valuation", update_market_valuation, db)
+        results["market_breadth"] = _run_task("update_market_breadth", update_market_breadth, db)
         results["concept_board"] = _run_task("update_concept_board", update_concept_board, db)
         results["south_flow"] = _run_task("update_south_flow", update_south_flow, db)
         results["ah_premium"] = _run_task("update_ah_premium", update_ah_premium, db)
@@ -680,6 +683,7 @@ def run_all(
             ("update_restricted_share", update_restricted_share, (db,), {}),
             ("update_earnings_forecast", update_earnings_forecast, (db,), {}),
             ("update_dividend_summary", update_dividend_summary, (db,), {}),
+            ("update_market_breadth", update_market_breadth, (db,), {}),
             ("update_financial_history", update_financial_history, (db,), {}),
             ("update_shareholder_count", update_shareholder_count, (db,), {}),
             ("update_quarterly_financials", update_quarterly_financials, (db, loader), {}),
@@ -707,6 +711,7 @@ def run_all(
         results["restricted_share"] = stage4_results.get("update_restricted_share", {})
         results["earnings_forecast"] = stage4_results.get("update_earnings_forecast", {})
         results["dividend_summary"] = stage4_results.get("update_dividend_summary", {})
+        results["market_breadth"] = stage4_results.get("update_market_breadth", {})
         results["financial_history"] = stage4_results.get("update_financial_history", {})
         results["shareholder_count"] = stage4_results.get("update_shareholder_count", {})
         results["quarterly_financials"] = stage4_results.get("update_quarterly_financials", {})
