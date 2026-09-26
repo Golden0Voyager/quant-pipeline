@@ -20,11 +20,13 @@
         <integer>30</integer>
     </dict>
 
-    <!-- 运行命令：python 解释器必须能提供 akshare/pandas 等依赖，
-         当前部署使用 quant_hunter venv，按实际情况调整 -->
+    <!-- 运行命令：python 解释器必须能提供 akshare/pandas 等依赖。
+         用**本仓库自己的** venv（`uv sync` 生成），不要指向兄弟仓库 quant_hunter 的 venv ——
+         那会让本仓库入口跑在别人的依赖集上。兄弟仓库（smartmoney_hunter）的路径由
+         `core._bootstrap.ensure_sibling_paths()` 在运行期自动注入，无需在此配 PYTHONPATH。 -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin/python3</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/.venv/bin/python3</string>
         <string>/Users/hainingyu/Code/quant_pipeline/daily_pipeline.py</string>
         <string>--task</string>
         <string>all</string>
@@ -38,9 +40,10 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>PYTHONPATH</key>
-        <string>/Users/hainingyu/Code/quant_hunter</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- 无需 PYTHONPATH：兄弟仓库路径取自 `__file__`（`core._bootstrap`），
+             且曾写的 `/Users/.../quant_hunter` 根目录并不含 smartmoney_hunter 包
+             （它在 quant_hunter/src 下），实际从未生效。 -->
         <!-- 指向真实数据库 -->
         <key>QUANT_DB_PATH</key>
         <string>/Users/hainingyu/Code/quant_data/quant_core.db</string>

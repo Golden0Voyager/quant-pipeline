@@ -4,7 +4,7 @@
 <dict>
     <!-- 模板说明（2026-09-04）：原部署版（7 月起，每天 20:00）从未纳入仓库，
          卸载时已删除且未留痕；本文件按运行痕迹（launchd_health.{out,err}.log 命名、
-         每日 20:00 触发、--task health_check）重建，环境变量按 update 模板惯例补全，
+         每日 20:00 触发、参数 task=health_check）重建，环境变量按 update 模板惯例补全，
          恢复前请逐项核对。 -->
     <!-- 任务标识 -->
     <key>Label</key>
@@ -19,10 +19,10 @@
         <integer>0</integer>
     </dict>
 
-    <!-- 运行命令：与 update 模板同一套 venv -->
+    <!-- 运行命令：与 update 模板同一套 venv（本仓库自己的 .venv，非兄弟仓库 venv） -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin/python3</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/.venv/bin/python3</string>
         <string>/Users/hainingyu/Code/quant_pipeline/daily_pipeline.py</string>
         <string>--task</string>
         <string>health_check</string>
@@ -36,9 +36,8 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/hainingyu/Code/quant_hunter/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>PYTHONPATH</key>
-        <string>/Users/hainingyu/Code/quant_hunter</string>
+        <string>/Users/hainingyu/Code/quant_pipeline/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- 无需 PYTHONPATH：兄弟仓库路径取自 `__file__`（`core._bootstrap`） -->
         <!-- 指向真实数据库 -->
         <key>QUANT_DB_PATH</key>
         <string>/Users/hainingyu/Code/quant_data/quant_core.db</string>
