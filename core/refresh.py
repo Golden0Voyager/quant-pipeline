@@ -225,10 +225,15 @@ class RefreshOrchestrator:
                 str(exc),
             )
 
+        # 审计时间戳统一按 UTC 落库，与 finished_at（`_aware_now()` 用
+        # datetime.now(UTC)）保持同一基准。context.started_at 是上海 aware 的，
+        # 但那只是为了闸门/目标交易日；直接 isoformat() 会写成 +08:00，使同一行的
+        # 两个时间戳偏移不一致（历史上即如此）。这里只归一化落库的字符串，
+        # context.started_at 本身仍留给闸门与适配器按上海语义使用。
         self._store.start_run(
             run_id=context.run_id,
             target_date=context.target_date,
-            started_at=context.started_at.isoformat(),
+            started_at=context.started_at.astimezone(UTC).isoformat(),
             symbols=context.symbols,
         )
 
