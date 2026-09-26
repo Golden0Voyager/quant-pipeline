@@ -33,10 +33,20 @@ macOS launchd 每日任务的安装模板与说明。纳入仓库以便审查与
 > 每周/每月层仅手动触发：
 > `uv run python daily_pipeline.py --task weekly_backfill|monthly_repair`，或 TUI 按 W / M 键。
 
+## 启用前提
+
+- **解释器用本仓库自己的 venv**：模板指向 `<repo>/.venv/bin/python3`（由 `uv sync` 生成）。
+  不要把解释器/`PATH`/`PYTHONPATH` 指向兄弟仓库 `quant_hunter` 的 venv —— 那会让本仓库入口
+  跑在别的依赖集上。兄弟仓库 `smartmoney_hunter` 的路径由 `core._bootstrap.ensure_sibling_paths()`
+  在运行期从 `__file__` 自动注入（默认 `~/Code/quant_hunter/src`，可用 `QUANT_HUNTER_PATH` 覆盖），
+  因此**无需**在 plist 里配 `PYTHONPATH`。
+- 若本机 checkout 不在 `/Users/hainingyu/Code/quant_pipeline`，连同 `ProgramArguments`、`PATH`、
+  `WorkingDirectory`、`QUANT_DB_PATH` 一并改成实际路径。
+
 ## 安装（启用自动运行）
 
 ```bash
-# 1. 拷贝模板并按需编辑：python 解释器路径、NOTIFICATION_*、排期
+# 1. 拷贝模板并按需编辑：本仓库路径（解释器/PATH）、NOTIFICATION_*、排期
 cp scripts/launchd/com.smartmoney.update.plist ~/Library/LaunchAgents/
 # 2. 加载
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.smartmoney.update.plist
