@@ -22,6 +22,28 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _select_index_row(df: pd.DataFrame, trade_date: str):
+    """在腾讯全历史序列里挑出**目标日**那一行；取不到时返回 ``None``。
+
+    行为分三种：
+
+    * 目标日在序列里 → 取该行（回补历史日期靠这条）；
+    * 目标日**晚于**序列最新（当日行情源端尚未发布）→ 仍取最后一行，
+      保留旧的「源端滞后自愈」行为（正常日跑不该因为没发布就整体空手而归）；
+    * 目标日早于序列最新但当天确实无行（停牌/非交易日）→ ``None``，
+      绝不拿别的日期张冠李戴。
+    """
+    if "date" not in df.columns:
+        return df.iloc[-1]
+    dates = df["date"].astype(str).str.slice(0, 10)
+    matched = df[dates == trade_date]
+    if not matched.empty:
+        return matched.iloc[-1]
+    if trade_date >= str(dates.max()):
+        return df.iloc[-1]
+    return None
+
+
 def _fetch_index_daily(trade_date: str) -> list[dict]:
     """获取主要指数日线行情（上证、深证、创业板、科创50）。"""
     if ak is None:
@@ -39,7 +61,10 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
         try:
             df = ak.stock_zh_index_daily_tx(symbol=index_code)
             if df is not None and not df.empty:
-                latest = df.iloc[-1]
+                latest = _select_index_row(df, trade_date)
+                if latest is None:
+                    logger.warning(f"⚠️ 指数 {index_name}({index_code}) 无 {trade_date} 数据，跳过")
+                    continue
                 records.append(
                     {
                         "index_code": index_code,
@@ -61,8 +86,12 @@ def _fetch_index_daily(trade_date: str) -> list[dict]:
     return records
 
 
-def update_index_daily(db: DatabaseInterface) -> dict:
-    """获取主要指数日线行情并保存。"""
+def update_index_daily(db: DatabaseInterface, target_date: str | None = None) -> dict:
+    """获取主要指数日线行情并保存。
+
+    ``target_date`` 给定时改写该历史交易日（整日缺席回补入口）；缺省仍取
+    ``get_expected_latest_trading_day()``。
+    """
     logger.info("\n" + "=" * 60)
     logger.info("📊 任务: 更新指数日线行情")
     logger.info("=" * 60)
@@ -72,7 +101,7 @@ def update_index_daily(db: DatabaseInterface) -> dict:
         return {"saved": 0, "error": "akshare not installed"}
 
     try:
-        records = _fetch_index_daily(get_expected_latest_trading_day())
+        records = _fetch_index_daily(target_date or get_expected_latest_trading_day())
         if not records:
             logger.warning("⚠️ 指数日线无数据")
             # 显式 skipped：上游正常返回但无数据（非交易日等），避免被结果契约误判为 failed
