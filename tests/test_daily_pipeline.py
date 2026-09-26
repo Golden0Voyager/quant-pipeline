@@ -1897,6 +1897,80 @@ class TestCrossSourceOptIn:
         )
 
 
+class TestBackfillDaysCLI:
+    """整日缺席回补入口（--backfill-days）的 CLI 接线。"""
+
+    def test_conflicts_with_task(self, capsys):
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--backfill-days"]
+        ), pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--backfill-days" in capsys.readouterr().err
+
+    def test_conflicts_with_refresh_today(self, capsys):
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--refresh-today", "--backfill-days"]
+        ), pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--backfill-days" in capsys.readouterr().err
+
+    def test_dispatches_with_the_explicit_date_and_skips_run_all(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-days", "2026-09-14"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_days", return_value={"failed": 0}) as backfill, \
+             patch("daily_pipeline.update_daily_core") as daily_mock:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once_with(factory.get_db.return_value, "2026-09-14")
+        daily_mock.assert_not_called()
+
+    def test_bare_flag_means_auto_discovery(self):
+        """不带值的 --backfill-days 必须传空串（=自动取登记册），不得当成没给。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-days"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_days", return_value={"failed": 0}) as backfill:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once_with(factory.get_db.return_value, "")
+
+    def test_acquires_global_pipeline_lock(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-days"]), \
+             patch("daily_pipeline._acquire_lock") as lock, \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_days", return_value={"failed": 0}):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        lock.assert_called_once_with()
+
+    def test_failures_exit_nonzero(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-days"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_days", return_value={"failed": 3}), \
+             pytest.raises(SystemExit) as exc_info:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
+
+    def test_all_success_exits_cleanly(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-days"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_days", return_value={"failed": 0}):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()  # 不抛 SystemExit
+
+
 class TestRefreshTodayCLI:
     def test_no_flags_still_runs_legacy_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
