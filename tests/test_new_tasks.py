@@ -740,6 +740,42 @@ def test_update_index_daily_ak_none():
     assert "error" in result
 
 
+def test_update_index_daily_backfills_the_requested_historical_date():
+    """回补历史日：从全历史序列里选目标日那一行，而不是永远取最后一行。"""
+    ak = MagicMock()
+    ak.stock_zh_index_daily_tx.return_value = pd.DataFrame(
+        {
+            "date": ["2026-09-11", "2026-09-14", "2026-09-15"],
+            "open": [1.0, 2.0, 3.0],
+            "high": [1.5, 2.5, 3.5],
+            "low": [0.5, 1.5, 2.5],
+            "close": [1.2, 2.2, 3.2],
+            "volume": [10.0, 20.0, 30.0],
+        }
+    )
+    db = MagicMock()
+    db.save_index_daily_batch.return_value = 5
+    with patch.object(index_chain, "ak", ak):
+        result = index_chain.update_index_daily(db, target_date="2026-09-14")
+
+    assert result["saved"] == 5
+    rec = db.save_index_daily_batch.call_args[0][0][0]
+    assert rec["trade_date"] == "2026-09-14"
+    assert rec["close"] == 2.2
+
+
+def test_select_index_row_keeps_the_lag_fallback_for_a_newer_target():
+    """目标日晚于源端最新（当日尚未发布）→ 仍取最后一行，保留旧的源端滞后自愈。"""
+    df = pd.DataFrame({"date": ["2026-09-14", "2026-09-15"], "close": [1.0, 2.0]})
+    assert index_chain._select_index_row(df, "2026-09-16")["close"] == 2.0
+
+
+def test_select_index_row_returns_none_for_an_absent_historical_date():
+    """目标日早于源端最新但当天确实无行（停牌/非交易日）→ None，不得张冠李戴。"""
+    df = pd.DataFrame({"date": ["2026-09-14", "2026-09-15"], "close": [1.0, 2.0]})
+    assert index_chain._select_index_row(df, "2026-09-12") is None
+
+
 def test_update_chip_distribution_em_success():
     db = MagicMock()
     db.save_chip_distribution_em_batch.return_value = 1
