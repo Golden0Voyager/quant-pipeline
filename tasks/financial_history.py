@@ -9,15 +9,19 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import json
 import logging
+import os
 import time
-from collections.abc import Callable
-from datetime import date
+from collections.abc import Callable, Iterable
+from datetime import date, datetime
 from functools import partial
 from typing import Any
 
 import pandas as pd
 
+from core.config import SHARED_DATA_DIR
 from interface import DatabaseInterface
 
 try:
@@ -275,6 +279,85 @@ def _merge_financial_period(period: str) -> list[dict]:
     return records
 
 
+# ── 失败报告期重试队列 ────────────────────────────────────────────────
+
+# 报告期抓取一旦失败，若仅依赖 discover_missing_financial_periods（它只看库内
+# 覆盖率是否低于阈值）会漏掉「覆盖率已达标、但实际不完整」的报告期：失败前部分
+# 数据已落库，覆盖率可能已经过线，于是以后永远不会被重新抓取。本队列把失败期次
+# 显式记下，下次自动发现时并回待抓取列表，抓取成功后自动移除。
+#
+# 文件语义与 core.progress.ProgressTracker 一致：flock 互斥 + 原子替换，避免多
+# 进程并发或写一半崩溃损坏队列。路径在**调用时**读取模块属性，便于测试替换
+# （P2-15 教训：导入期固化的常量会让 monkeypatch 失效）。
+_FAILED_PERIODS_FILE: Any = SHARED_DATA_DIR / "financial_period_retry.json"
+
+
+@contextlib.contextmanager
+def _queue_lock(exclusive: bool = True):
+    """用文件锁保护失败报告期队列的读写（锁文件锚点，不删除）。"""
+    lock_path = _FAILED_PERIODS_FILE.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def load_failed_periods() -> list[str]:
+    """读取待重试的报告期列表；文件缺失或损坏时返回空列表（不抛异常）。"""
+    with _queue_lock(exclusive=False):
+        if not _FAILED_PERIODS_FILE.exists():
+            return []
+        try:
+            with open(_FAILED_PERIODS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("⚠️ 失败报告期队列文件损坏，按空队列处理")
+            return []
+    periods = data.get("periods") if isinstance(data, dict) else None
+    if not isinstance(periods, list):
+        return []
+    return [str(p).strip() for p in periods if str(p).strip()]
+
+
+def _write_failed_periods(periods: Iterable[str]) -> None:
+    """原子写入队列；为空时删除文件（不留空壳）。"""
+    unique = sorted({str(p).strip() for p in periods if str(p).strip()})
+    with _queue_lock(exclusive=True):
+        if not unique:
+            if _FAILED_PERIODS_FILE.exists():
+                _FAILED_PERIODS_FILE.unlink()
+            return
+        payload = {
+            "periods": unique,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        tmp = _FAILED_PERIODS_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(_FAILED_PERIODS_FILE)
+
+
+def record_failed_periods(periods: Iterable[str]) -> list[str]:
+    """把报告期并入失败队列（去重、排序），返回合并后的完整队列。"""
+    merged = sorted(set(load_failed_periods()) | {str(p).strip() for p in periods})
+    _write_failed_periods(merged)
+    return merged
+
+
+def clear_failed_periods(periods: Iterable[str]) -> list[str]:
+    """把已成功抓取的报告期从失败队列移除，返回剩余队列。"""
+    remove = {str(p).strip() for p in periods}
+    remaining = [p for p in load_failed_periods() if p not in remove]
+    _write_failed_periods(remaining)
+    return remaining
+
+
 # ── 主入口 ─────────────────────────────────────────────────────────────
 
 
@@ -301,6 +384,12 @@ def update_financial_history(
 
     if periods is None:
         periods = discover_missing_financial_periods(db)
+        # 并回上次失败的报告期：覆盖率发现会漏掉「已达标但不完整」的期次，
+        # 队列里的期次即使覆盖率过线也必须重试。
+        queued = [p for p in load_failed_periods() if p not in periods]
+        if queued:
+            logger.info(f"🔁 并回上次失败的报告期: {queued}")
+            periods = periods + queued
 
     if not periods:
         logger.info("✅ 所有报告期数据已覆盖，无需更新")
@@ -341,6 +430,14 @@ def update_financial_history(
             failed_periods.append(period)
             logger.warning(f"  ⚠️ {period} 处理失败: {e}")
 
+    # 持久化重试队列：成功的期次清出，失败的期次记入，供下次自动重试。
+    # 手动指定 periods 的定向修复同样生效（成功则清队列、失败则入队列）。
+    resolved_periods = [p for p in periods if p not in failed_periods]
+    if resolved_periods:
+        clear_failed_periods(resolved_periods)
+    if failed_periods:
+        record_failed_periods(failed_periods)
+
     logger.info(f"✅ 财务历史更新完成: 共写入 {total_saved} 条")
     if total_saved == 0 and failed_periods:
         return {
@@ -355,6 +452,8 @@ def update_financial_history(
     result: dict[str, Any] = {"saved": total_saved}
     if last_error:
         result["error"] = last_error
+    if failed_periods:
+        result["metadata"] = {"failed_periods": failed_periods}
     return result
 
 

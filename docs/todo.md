@@ -281,7 +281,11 @@ uv run python daily_pipeline.py --task update_sector_industry  # 实际为 secto
 
 1. ✅ 报告期处理已加 3 次指数退避重试（`_retry` helper，照抄 `sector_derivatives.py`）
 2. ✅ 全部报告期失败 → 返回 `retained`（保留旧数据、exit 0），不再 failed 阻塞下游
-3. ⏳ 失败报告期持久化到待重试列表（类似 `failed_symbols` 队列）→ 未做，可后续补
+3. ✅ 失败报告期持久化到待重试队列（PR #138，2026-09-26）：`tasks/financial_history.py` 新增
+   文件队列（语义同 `core.progress.ProgressTracker`：flock + 原子替换），失败期次自动记入、
+   成功自动清出；`periods=None` 的自动发现路径会把队列期次**并回**待抓取列表——
+   补上「覆盖率已达标但不完整」时发现逻辑永远不再回访的盲区。测试隔离见
+   `tests/conftest.py::_isolate_financial_period_queue`。
 
 ---
 

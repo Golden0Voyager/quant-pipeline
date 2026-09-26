@@ -187,3 +187,95 @@ class TestUpdateFinancialHistory:
 
         assert result["saved"] > 0
         assert "error" in result
+
+    def test_failed_period_is_persisted_for_next_run(self) -> None:
+        """失败的报告期要落进重试队列，供下次自动重试。"""
+        from tasks import financial_history as fh
+
+        db = MagicMock()
+        merge = MagicMock(side_effect=Exception("boom"))
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            update_financial_history(db, periods=["20260630"])
+
+        assert fh.load_failed_periods() == ["20260630"]
+
+    def test_success_clears_persisted_period(self) -> None:
+        """定向修复成功后，该报告期必须从队列移除，且不动其他期次。"""
+        from tasks import financial_history as fh
+
+        db = MagicMock()
+        db.save_financial_history_batch.return_value = {"history_saved": 1}
+        fh.record_failed_periods(["20260630", "20260331"])
+        merge = MagicMock(return_value=[{"x": 1}])
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            update_financial_history(db, periods=["20260630"])
+
+        assert fh.load_failed_periods() == ["20260331"]
+
+    def test_queued_period_retried_when_discovery_finds_nothing(self) -> None:
+        """覆盖率已达标的报告期：发现逻辑不返回，但队列里的失败期次仍要重试。"""
+        from tasks import financial_history as fh
+
+        db = MagicMock()
+        db.save_financial_history_batch.return_value = {"history_saved": 1}
+        fh.record_failed_periods(["20251231"])
+        merge = MagicMock(return_value=[{"x": 1}])
+        with (
+            patch("tasks.financial_history.ak", object()),
+            patch("tasks.financial_history._merge_financial_period", merge),
+            patch(
+                "tasks.financial_history.discover_missing_financial_periods",
+                return_value=[],
+            ),
+            patch("tasks.financial_history.time.sleep"),
+        ):
+            update_financial_history(db)  # periods=None → 自动发现路径
+
+        merge.assert_called_once_with("20251231")
+        assert fh.load_failed_periods() == []
+
+
+class TestFailedPeriodQueue:
+    """失败报告期队列的读写语义（仿 bars 的 failed_symbols 队列）。"""
+
+    def test_missing_file_returns_empty(self) -> None:
+        from tasks import financial_history as fh
+
+        assert fh.load_failed_periods() == []
+
+    def test_record_merges_dedupes_and_sorts(self) -> None:
+        from tasks import financial_history as fh
+
+        fh.record_failed_periods(["20260630", "20260331"])
+        fh.record_failed_periods(["20260630", "20251231"])
+        assert fh.load_failed_periods() == ["20251231", "20260331", "20260630"]
+
+    def test_clear_removes_only_named_periods(self) -> None:
+        from tasks import financial_history as fh
+
+        fh.record_failed_periods(["20260630", "20260331"])
+        assert fh.clear_failed_periods(["20260630"]) == ["20260331"]
+        assert fh.load_failed_periods() == ["20260331"]
+
+    def test_clearing_last_period_removes_the_file(self) -> None:
+        from tasks import financial_history as fh
+
+        fh.record_failed_periods(["20260630"])
+        fh.clear_failed_periods(["20260630"])
+        assert not fh._FAILED_PERIODS_FILE.exists()
+
+    def test_corrupt_file_is_tolerated(self) -> None:
+        """文件损坏不能抛异常，只能当作空队列。"""
+        from tasks import financial_history as fh
+
+        fh._FAILED_PERIODS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fh._FAILED_PERIODS_FILE.write_text("{not json", encoding="utf-8")
+        assert fh.load_failed_periods() == []

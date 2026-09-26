@@ -167,6 +167,25 @@ def _fast_default_source_client(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_financial_period_queue(monkeypatch, tmp_path):
+    """把财务失败报告期队列指向每个测试独立的临时文件。
+
+    ``tasks.financial_history`` 把失败报告期写进 ``SHARED_DATA_DIR``
+    （生产为 ``~/Code/quant_data``）；不隔离的话，任何直接调用
+    ``update_financial_history`` 的用例都会在真实数据目录留下队列文件，
+    与本机状态耦合（P2-15 同类副作用）。
+    """
+    import tasks.financial_history as financial_history
+
+    monkeypatch.setattr(
+        financial_history,
+        "_FAILED_PERIODS_FILE",
+        tmp_path / "financial_period_retry.json",
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _skip_watchlist_sync_on_tui_test_mount(monkeypatch, request):
     """Keep Textual mount tests from touching the operator's watchlist database."""
     if request.node.get_closest_marker("allow_startup_watchlist_sync"):
