@@ -64,6 +64,7 @@ quant_pipeline/
 - `quant-data` / `pipe-data` — Launch TUI panel
 - `uv run python daily_pipeline.py --task <name> [--force] [--resume]` — Direct CLI
 - `uv run python daily_pipeline.py --refresh-today [--force] [--resume]` — Close refresh; `--resume` continues an interrupted run
+- `uv run python daily_pipeline.py --backfill-days [YYYY-MM-DD,...]` — Re-fetch whole missing trading days for the tables whose source supports historical dates (see `core/backfill.py`); no value means auto-discover from `core/known_gaps.py`
 - `uv run python scripts/daemon.py [start|stop]` — Daemon management (TUI D/S keys)
 
 ## Close Refresh (`--refresh-today`)
