@@ -125,7 +125,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        # delay=True: 文件只在首条日志真正写出时才创建。import 期就打开文件的话,
+        # 被测试 import 或 --help 行为探针执行时都会在生产 logs/ 留下一个空文件。
+        logging.FileHandler(LOG_FILE, encoding="utf-8", delay=True),
         logging.StreamHandler(sys.stdout),
     ],
 )

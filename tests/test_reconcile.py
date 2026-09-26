@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,25 @@ import pandas as pd
 import pytest
 
 from scripts import reconcile_with_akshare as rwa
+
+
+@pytest.fixture(autouse=True)
+def _isolate_reconcile_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """把 main() 会写的生产路径全部重定向到 tmp。
+
+    不隔离的话,TestMain 里调 rwa.main() 的用例会把 fixture CSV 写进真实
+    ~/Code/quant_data/reports/,末尾的 ReconcileProgress.clear() 还会删除
+    真实断点 reconcile_progress.json。还原本 fixture 会让
+    TestProductionPathIsolation::test_module_paths_do_not_point_at_production 变红。
+    """
+    reports = tmp_path / "reports"
+    reports.mkdir(exist_ok=True)
+    progress = tmp_path / "reconcile_progress.json"
+    retry = tmp_path / "reconcile_retry.txt"
+    monkeypatch.setattr(rwa, "REPORT_DIR", reports)
+    monkeypatch.setattr(rwa, "PROGRESS_FILE", progress)
+    monkeypatch.setattr(rwa, "RETRY_FILE", retry)
+    monkeypatch.setattr(rwa.ReconcileProgress, "FILE", progress)
 
 
 # ===========================================================================
@@ -594,3 +614,55 @@ class TestExecuteWriteWithRetry:
              patch("scripts.reconcile_with_akshare.logger"), pytest.raises(sqlite3.OperationalError):
             rwa.execute_write_with_retry(db_conn, mock_func, max_retries=3, initial_delay=0.01)
         assert mock_func.call_count == 3
+
+
+# ===========================================================================
+# 生产目录隔离（red-proof）
+# 还原 fixture 或 FileHandler 的 delay=True 会让本节变红。
+# ===========================================================================
+_REPO_ROOT = Path(rwa.__file__).resolve().parents[1]
+
+
+class TestProductionPathIsolation:
+    def test_module_paths_do_not_point_at_production_quant_data(self):
+        """main() 会写的路径在测试期间绝不允许指向真实 ~/Code/quant_data。
+
+        还原 _isolate_reconcile_paths fixture（或任何让 REPORT_DIR /
+        PROGRESS_FILE / RETRY_FILE 指回生产目录的改动）会让本用例变红：
+        测试会把 fixture CSV 写进真实 reports/，main() 末尾的
+        ReconcileProgress.clear() 还会删除真实断点文件。
+        """
+        real = Path(os.path.expanduser("~/Code/quant_data")).resolve()
+        for attr in ("REPORT_DIR", "PROGRESS_FILE", "RETRY_FILE"):
+            p = Path(getattr(rwa, attr)).resolve()
+            assert not str(p).startswith(str(real)), (
+                f"{attr} 指向生产目录 {p}：测试会污染真实数据目录"
+            )
+        prog = Path(rwa.ReconcileProgress.FILE).resolve()
+        assert not str(prog).startswith(str(real)), (
+            f"ReconcileProgress.FILE 指向生产 {prog}：main() 的 clear() 会删除真实断点"
+        )
+
+    def test_fresh_import_creates_no_log_file(self, tmp_path: Path):
+        """全新解释器 import 该脚本不得创建任何日志文件。
+
+        还原 FileHandler 的 delay=True 会让本用例变红：import 期构造
+        handler 即落盘 0B 文件——测试套件与 --help 行为探针每天都会
+        在真实 logs/ 下留一个 reconcile_YYYYMMDD.log。
+        """
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+        proc = subprocess.run(
+            [sys.executable, "-c", "import scripts.reconcile_with_akshare"],
+            cwd=str(_REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, f"import 失败：\n{proc.stdout}\n{proc.stderr}"
+        log_dir = fake_home / "Code" / "quant_data" / "logs"
+        created = sorted(log_dir.glob("reconcile_*.log")) if log_dir.exists() else []
+        assert created == [], f"import 创建了日志文件：{created}"
