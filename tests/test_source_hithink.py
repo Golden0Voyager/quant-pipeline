@@ -8,6 +8,7 @@ no real network.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -100,6 +101,25 @@ class TestToThscode:
     ])
     def test_unsupported(self, symbol: str) -> None:
         assert to_thscode(symbol) is None
+
+
+class TestToMs:
+    def test_uses_shanghai_midnight_not_host_tz(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """日期换算以 Asia/Shanghai 为准。
+
+        CI 跑在 UTC，旧实现用 ``time.mktime``（本机时区）会整体偏移 8 小时，
+        单日区间甚至落到前一天。这里把宿主机时区强制为 UTC 以钉住该行为。
+        """
+        monkeypatch.setenv("TZ", "UTC")
+        if hasattr(time, "tzset"):
+            time.tzset()
+        try:
+            assert source_hithink._to_ms("2026-09-02", "") == _ms(2026, 9, 2)
+            assert source_hithink._to_ms(None, "20260902") == _ms(2026, 9, 2)
+        finally:
+            monkeypatch.delenv("TZ", raising=False)
+            if hasattr(time, "tzset"):
+                time.tzset()
 
 
 # ── HithinkClient envelope handling ──────────────────────────────────────
