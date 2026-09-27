@@ -64,11 +64,18 @@
   滚动窗口（2026-09-27 实测；跌停池超窗报错、涨停池超窗静默返回空表）。任务在两池皆空时
   改用同花顺 HiThink 兜底（保留约近几个月），因此 2026-09-02 这类东财窗口外的历史日也能
   补上（同花顺不提供 industry 与涨停池换手率）。这三张 + 这张都已接上 ``--backfill-days``
-  入口（更早的日子仍补不回来）。
+  / ``--backfill-table`` 入口（更早的日子仍补不回来）。
 * 此前这里写的「``sector_*`` 走 ``stock_board_industry_hist_em``、``limit_up_down`` 走
   ``stock_lhb_detail_em``」是错的：前者是 ``sector_daily`` 的源（而该表源端返回全历史、
   实测从未真正缺过），后者是龙虎榜的源。分类以 ``core/backfill.py`` +
   ``tests/test_backfill.py`` 的门禁为准，不要在这里重述细节。
+
+2026-09-27 补记：上述 4 张（3 可回补 + 1 部分可回补）× 6 个登记日已全部补齐并经
+生产库只读核验（``limit_up_down`` 4 天均为 ``data_source='hithink'``：08-03 92 行 /
+08-19 156 行 / 08-21 71 行 / 09-02 59 行）。**这不改变登记状态**：``MissingDay``
+描述的「那天为什么整天空」是历史事实，其余 6 张表永久不可恢复；登记册日期仍是
+回补入口的日期来源（``--backfill-table`` 对已填的 (表, 日) 对幂等空转）。
+恢复状态明细见 ``RECOVERY_NOTES``。
 
 因此这里也是「已声明」而不是「装作无事」：漏跑的那几天，数据确实少了，
 而且其中一部分可能永远补不回来。
@@ -194,6 +201,26 @@ KNOWN_MISSING_DAYS: tuple[MissingDay, ...] = (
     ),
     MissingDay("2026-09-14", "既无日志文件也无任务记录 ⇒ 当天天管线未被启动"),
     MissingDay("2026-09-16", "既无日志文件也无任务记录 ⇒ 当天天管线未被启动"),
+)
+
+
+# 6 个整日缺口在登记后的**部分恢复**状态（2026-09-27 实测回补 + 生产库只读核验）。
+# 条目本身不删不改：MissingDay 记录的是「那天为什么整天空」，这部分历史事实不变；
+# 这里只追加「后来补回了什么、还缺什么」。补回明细可在生产库复核：
+#   SELECT trade_date, data_source, COUNT(*) FROM limit_up_down
+#   WHERE trade_date IN ('2026-08-03','2026-08-19','2026-08-21','2026-09-02')
+#   GROUP BY 1, 2;  -- 4 天全部 data_source='hithink'
+RECOVERY_NOTES: tuple[tuple[str, str], ...] = (
+    (
+        "2026-09-27",
+        "6 个整日缺口已部分恢复：index_daily/block_trade/sector_valuation/limit_up_down "
+        "4 张可回补表 × 6 天全部补齐（limit_up_down 经同花顺 HiThink 兜底，4 天均为 "
+        "data_source='hithink'：08-03 92 行、08-19 156 行、08-21 71 行、09-02 59 行）；"
+        "其余 6 张表（fundamentals/historical_valuation/ah_premium/fund_flow/"
+        "sector_fund_flow/sector_industry）源端只给实时值或为派生表，永久不可恢复。"
+        "登记条目保留：成因是历史事实，且日期仍是回补入口的日期来源；"
+        "单表残留空洞用表格级入口补（--backfill-table）。",
+    ),
 )
 
 
