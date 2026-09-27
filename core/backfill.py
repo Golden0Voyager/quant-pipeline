@@ -48,17 +48,29 @@
 ``tests/test_backfill.py`` 有一条门禁：上面三组必须正好覆盖 ``day_coverage.PROBE_TABLES``
 ——探针表增删时这张分类表必须同步，不允许留下「没说过能不能补」的表。
 
+第二种入口：表格级回补（``--backfill-table``，2026-09-27 新增）
+─────────────────────────────────────────────────────
+``--backfill-days`` 的幂等门是**整天级**的：某天只要任何一张探针表有行，就不再被
+当成回补目标。这在混合形态下会卡死：部分运行遗留的那几天，整日回补把缺口补齐之后，
+任何**单表残留空洞**（例如当日 ``limit_up_down`` 仍为空）就永远过不了那道门——
+该日不再「整天缺席」，而任务作用域又只认 ``get_expected_latest_trading_day()``。
+``--backfill-table`` 把幂等门下沉到 **(表, 日)** 粒度解决这个死角：某天某表没有行
+就可以对那一对目标重跑，互不影响其他表。其余语义与日期级入口一致：显式日期与
+登记册日期共用一套筛选，日期来源自动判定（给了日期 = explicit，没给 = declared），
+非法日期与已填过的目标进 ``skipped`` 而不是报错。
+
 （``sector_daily`` 不在探针表里：它的源返回全历史、写入方顺手覆盖了历史日期，
 实测 6 个缺席日都有 90 行，从未真正缺过。``index_futures_basis`` 同理不在探针集内。）
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from core.day_coverage import missing_trading_days
+from core.day_coverage import date_column, missing_trading_days
 from core.known_gaps import declared_missing_days
 
 # 可回补的「探针表 → 负责任务」映射。任务名不是 daily 路径上的任务名时（如
@@ -111,6 +123,26 @@ class BackfillPlan:
 
     days: tuple[str, ...] = ()
     skipped: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    source: str = "declared"
+
+
+@dataclass(frozen=True)
+class BackfillTablePlan:
+    """表格级回补计划：要补的 (表, 日期) 对，以及被跳过的项及原因。
+
+    Attributes
+    ----------
+    targets:
+        ``(表名, 日期)`` 对，旧日到新日、逐日内按注册表顺序排列。
+    skipped:
+        ``(目标, 原因)``。目标可以是日期串（解析失败/非交易日）或
+        ``(表名, 日期)`` 对（该表当日已有行）。
+    source:
+        ``"explicit"``（命令行给了日期）或 ``"declared"``（取登记册里的缺失日）。
+    """
+
+    targets: tuple[tuple[str, str], ...] = ()
+    skipped: tuple[tuple[str | tuple[str, str], str], ...] = field(default_factory=tuple)
     source: str = "declared"
 
 
@@ -171,3 +203,101 @@ def resolve_backfill_days(cursor: sqlite3.Cursor, spec: str | None) -> BackfillP
     days.sort()
     skipped.sort()
     return BackfillPlan(days=tuple(days), skipped=tuple(skipped), source=source)
+
+
+# 「形似日期」的判定：合法 YYYY-MM-DD 之外，也把斜杠式/紧凑式当成日期意图，
+# 用于 source 分类（是「给了日期」还是「没给」），不用于日期解析本身。
+_DATE_HINT_RE = re.compile(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{8}")
+
+
+# 回补注册表里 (表名 → 责任任务) 的全集，含部分可回补表。任务名由
+# daily_pipeline._BACKFILL_TASK_CALLABLES 兑现（tests/test_backfill.py 门禁）。
+def backfill_task_by_table() -> dict[str, str]:
+    """表名 → 责任任务的全集（可回补 + 部分可回补）。"""
+    return dict(BACKFILLABLE_TABLES) | {
+        table: task for table, task, _ in PARTIAL_BACKFILLABLE_TABLES
+    }
+
+
+def table_has_rows(cursor: sqlite3.Cursor, table: str, day: str) -> bool | None:
+    """该表在 ``day`` 是否已有行；表不存在时返回 ``None``（无法判定）。
+
+    「无法判定」不得当成「已有行」：那会把可回补的表悄悄跳过。
+    """
+    column = date_column(table)
+    if column is None:
+        raise ValueError(f"未知回补表：{table}")
+    try:
+        row = cursor.execute(
+            f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+            (day,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row is not None
+
+
+def resolve_backfill_targets(
+    cursor: sqlite3.Cursor,
+    spec: str | None,
+) -> BackfillTablePlan:
+    """把 ``--backfill-table`` 的命令行输入解析成 (表, 日) 回补计划。
+
+    ``spec`` 里的条目既可以是表名（回补注册表里的表），也可以是 ``YYYY-MM-DD``
+    日期；其余形式的条目原样进 ``skipped``（不猜测意图）。两种条目可任意混写。
+
+    * 只给表名 → 那些表 × 登记册缺失日；
+    * 只给日期 → 全部可回补表 × 那些日期；
+    * 什么都没给（裸旗标）→ 全部可回补表 × 登记册缺失日。
+
+    日期来源自动判定：给了日期 = explicit，没给 = declared。幂等门在
+    **(表, 日)** 粒度：该表当日已有行就跳过（表不存在时视为仍然缺失，照样尝试）。
+    """
+    tasks_by_table = backfill_task_by_table()
+    all_tables = tuple(tasks_by_table)
+
+    raw = [part for part in (spec or "").replace(",", " ").split() if part]
+    tables: list[str] = []
+    days: list[str] = []
+    skipped: list[tuple[str | tuple[str, str], str]] = []
+    date_like = False
+    for item in raw:
+        if item in tasks_by_table:
+            if item not in tables:
+                tables.append(item)
+            continue
+        try:
+            day = datetime.strptime(item, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            skipped.append((item, "既不是回补表名，也不是合法的 YYYY-MM-DD 日期"))
+            # 形似日期的非法项（如 ``2026/09/14``）也算「用户给了日期」：
+            # 否则会静默落到 declared 分支，突然回补全表 × 登记册日。
+            if _DATE_HINT_RE.fullmatch(item):
+                date_like = True
+            continue
+        date_like = True
+        if day not in days:
+            days.append(day)
+    days.sort()
+
+    if date_like:
+        source = "explicit"
+    else:
+        days = sorted(declared_missing_days())
+        source = "declared"
+    if not tables:
+        tables = list(all_tables)
+
+    targets: list[tuple[str, str]] = []
+    for day in days:
+        for table in tables:
+            has_rows = table_has_rows(cursor, table, day)
+            if has_rows:
+                skipped.append(((table, day), "该表当日已有数据，无需回补"))
+            else:
+                targets.append((table, day))
+    return BackfillTablePlan(
+        targets=tuple(targets),
+        skipped=tuple(skipped),
+        source=source,
+    )
