@@ -16,6 +16,10 @@ import daily_pipeline
 from core.day_coverage import PROBE_TABLES
 from core.known_gaps import declared_missing_days
 
+# backfill 引用了 day_coverage.date_column，这里同把 re-export 钉住，
+# 避免「幂等门悄悄换了判定来源」这类分叉。
+assert backfill.date_column is day_coverage.date_column
+
 # 钉住日历：``trading_days_between`` 只读本地缓存，CI 上不存在，不钉就永远返回空。
 CALENDAR = [
     "2026-08-03",
@@ -120,6 +124,95 @@ def test_blank_spec_is_treated_as_auto_discovery(conn):
     assert backfill.resolve_backfill_days(conn.cursor(), "   ").source == "declared"
 
 
+# ── resolve_backfill_targets（--backfill-table）────────────────────
+
+
+def test_targets_single_table_x_declared_days(conn):
+    """只给表名：那些表 × 登记册缺失日，source=declared。"""
+    plan = backfill.resolve_backfill_targets(conn.cursor(), "limit_up_down")
+
+    assert plan.source == "declared"
+    assert plan.targets == tuple(
+        ("limit_up_down", day) for day in sorted(declared_missing_days())
+    )
+
+
+def test_targets_single_day_x_all_backfillable_tables(conn):
+    """只给日期：全部可回补表 × 那些日期，source=explicit。"""
+    plan = backfill.resolve_backfill_targets(conn.cursor(), "2026-09-14")
+
+    assert plan.source == "explicit"
+    tables = {table for table, _ in plan.targets}
+    assert tables == {
+        table for table, _ in backfill.BACKFILLABLE_TABLES
+    } | {table for table, _, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
+    assert {day for _, day in plan.targets} == {"2026-09-14"}
+
+
+def test_targets_mixed_tables_and_days(conn):
+    """表名与日期可混写；幂等门在 (表, 日) 粒度：该表当日有行才跳过。"""
+    _fill(conn, "index_daily", "2026-08-03")
+    plan = backfill.resolve_backfill_targets(
+        conn.cursor(), "limit_up_down index_daily 2026-08-03"
+    )
+
+    assert plan.source == "explicit"
+    # index_daily 当日已有行 → 整对跳过；limit_up_down 同日仍要补
+    assert ("limit_up_down", "2026-08-03") in plan.targets
+    assert (("index_daily", "2026-08-03"), "该表当日已有数据，无需回补") in plan.skipped
+
+
+def test_targets_unknown_token_is_skipped_not_fatal(conn):
+    plan = backfill.resolve_backfill_targets(conn.cursor(), "limit_up_down 2026/99/99")
+
+    assert ("2026/99/99", "既不是回补表名，也不是合法的 YYYY-MM-DD 日期") in plan.skipped
+    # 形似日期的非法项也算「给了日期」：不得静默落到 declared 分支
+    # （否则会突然回补全表 × 登记册日）。全非法 ⇒ 空计划、无操作。
+    assert plan.source == "explicit"
+    assert plan.targets == ()
+
+
+def test_targets_bare_and_none_mean_declared_x_all_tables(conn):
+    for spec in ("", "   ", None):
+        plan = backfill.resolve_backfill_targets(conn.cursor(), spec)
+        assert plan.source == "declared"
+        tables = {table for table, _ in plan.targets}
+        assert tables == {
+            table for table, _ in backfill.BACKFILLABLE_TABLES
+        } | {table for table, _, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
+
+
+def test_targets_probeday_granularity_not_whole_day(conn):
+    """与 ``--backfill-days`` 的关键差异：整天有行不影响单表缺口。
+
+    08-03 除 limit_up_down 外全部有行——整天级判定会跳过该日；
+    表格级判定只跳过已有行的表，limit_up_down 仍是回补目标。
+    """
+    for table, _ in PROBE_TABLES:
+        if table != "limit_up_down":
+            _fill(conn, table, "2026-08-03")
+    plan = backfill.resolve_backfill_targets(conn.cursor(), "2026-08-03")
+
+    assert plan.targets == (("limit_up_down", "2026-08-03"),)
+
+
+def test_targets_unknown_date_hint_not_mistaken_for_day_intent(conn):
+    """纯表名输入里混入非日期的乱写 token：仍走 declared（没给日期）。"""
+    plan = backfill.resolve_backfill_targets(conn.cursor(), "limit_up_down oops")
+
+    assert plan.source == "declared"
+    assert {day for _, day in plan.targets} == set(declared_missing_days())
+
+
+def test_table_has_rows_missing_table_is_not_treated_as_filled(conn):
+    """表不存在 = 无法判定，不得当成「已有行」而把可补的表悄悄跳过。"""
+    bare = sqlite3.connect(":memory:")
+    try:
+        assert backfill.table_has_rows(bare.cursor(), "index_daily", "2026-08-03") is None
+    finally:
+        bare.close()
+
+
 # ── 分类覆盖门禁 ──────────────────────────────────────────────────────
 
 
@@ -148,6 +241,27 @@ def test_backfillable_tables_map_to_real_backfill_tasks():
     declared = {task for _, task in backfill.BACKFILLABLE_TABLES}
     declared |= {task for _, task, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
     assert declared == set(daily_pipeline._BACKFILL_TASK_CALLABLES)
+
+
+def test_backfill_task_by_table_matches_backfill_callables():
+    """``--backfill-table`` 的表名清单必须与任务注册表互相印证：
+
+    表名集合 = 可回补 + 部分可回补；每个表名都能在 ``_BACKFILL_TASK_CALLABLES``
+    里找到执行体。两边任一分叉这里先红。
+    """
+    by_table = backfill.backfill_task_by_table()
+    assert set(by_table) == {
+        table for table, _ in backfill.BACKFILLABLE_TABLES
+    } | {table for table, _, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
+    assert set(by_table.values()) <= set(daily_pipeline._BACKFILL_TASK_CALLABLES)
+    assert by_table["limit_up_down"] == "update_limit_up_down"
+
+
+def test_probe_tables_all_have_date_column_lookup():
+    """``date_column`` 必须认识全部探针表——``--backfill-table`` 的幂等门靠它查行。"""
+    for table, column in PROBE_TABLES:
+        assert backfill.date_column(table) == column
+    assert backfill.date_column("no_such_table") is None
 
 
 def test_partial_backfillable_entries_all_carry_a_reason():
