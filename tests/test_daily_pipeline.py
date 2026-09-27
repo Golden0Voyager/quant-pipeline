@@ -3249,12 +3249,47 @@ def test_update_limit_up_down_success(mock_ak: MagicMock):
 
 @patch("tasks.macro.ak")
 def test_update_limit_up_down_empty(mock_ak: MagicMock):
+    """两池皆空 = 源端没有这一天 → no_data/skipped，不是 failed。
+
+    整日回补里这正是「窗口外的历史交易日」：判 failed 会让回补每次以非零退出码收场，
+    而那是永远补不回来的。
+    """
     db = MagicMock()
     mock_ak.stock_zt_pool_em.return_value = pd.DataFrame()
     mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
     with patch("daily_pipeline.logger"):
         r = daily_pipeline.update_limit_up_down(db)
+    assert r.get("skipped") is True
+    assert "30 个交易日" in r["reason"]
+    assert "error" not in r
+    db.save_limit_up_down_batch.assert_not_called()
+
+
+@patch("tasks.macro.ak")
+def test_update_limit_up_down_window_error_is_no_data(mock_ak: MagicMock):
+    """跌停股池超窗报错是源端确定性限制，仍属 no_data，不得判失败。"""
+    db = MagicMock()
+    mock_ak.stock_zt_pool_em.return_value = pd.DataFrame()
+    mock_ak.stock_zt_pool_dtgc_em.side_effect = ValueError(
+        "跌停股池只能获取最近 30 个交易日的数据"
+    )
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db)
+    assert r.get("skipped") is True
+    assert "error" not in r
+    db.save_limit_up_down_batch.assert_not_called()
+
+
+@patch("tasks.macro.ak")
+def test_update_limit_up_down_real_error_is_failure(mock_ak: MagicMock):
+    """非窗口类异常（真网络/接口故障）仍判 failed，交由 safe_task 重试。"""
+    db = MagicMock()
+    mock_ak.stock_zt_pool_em.side_effect = ConnectionError("connection reset")
+    mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    with patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db)
     assert r["saved"] == 0
+    assert r["error_kind"] == "network"
     db.save_limit_up_down_batch.assert_not_called()
 
 
