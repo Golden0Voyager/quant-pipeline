@@ -3257,10 +3257,11 @@ def test_update_limit_up_down_empty(mock_ak: MagicMock):
     db = MagicMock()
     mock_ak.stock_zt_pool_em.return_value = pd.DataFrame()
     mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
-    with patch("daily_pipeline.logger"):
+    with patch("tasks.macro._fetch_limit_pools_hithink", return_value=([], [])), \
+         patch("daily_pipeline.logger"):
         r = daily_pipeline.update_limit_up_down(db)
     assert r.get("skipped") is True
-    assert "30 个交易日" in r["reason"]
+    assert "16 个交易日" in r["reason"]
     assert "error" not in r
     db.save_limit_up_down_batch.assert_not_called()
 
@@ -3273,7 +3274,8 @@ def test_update_limit_up_down_window_error_is_no_data(mock_ak: MagicMock):
     mock_ak.stock_zt_pool_dtgc_em.side_effect = ValueError(
         "跌停股池只能获取最近 30 个交易日的数据"
     )
-    with patch("daily_pipeline.logger"):
+    with patch("tasks.macro._fetch_limit_pools_hithink", return_value=([], [])), \
+         patch("daily_pipeline.logger"):
         r = daily_pipeline.update_limit_up_down(db)
     assert r.get("skipped") is True
     assert "error" not in r
@@ -3286,11 +3288,50 @@ def test_update_limit_up_down_real_error_is_failure(mock_ak: MagicMock):
     db = MagicMock()
     mock_ak.stock_zt_pool_em.side_effect = ConnectionError("connection reset")
     mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
-    with patch("daily_pipeline.logger"):
+    with patch("tasks.macro._fetch_limit_pools_hithink", return_value=([], [])), \
+         patch("daily_pipeline.logger"):
         r = daily_pipeline.update_limit_up_down(db)
     assert r["saved"] == 0
     assert r["error_kind"] == "network"
     db.save_limit_up_down_batch.assert_not_called()
+
+
+@patch("tasks.macro.ak")
+def test_update_limit_up_down_falls_back_to_hithink(mock_ak: MagicMock):
+    """东财两池皆空（窗口外历史日）时，改用同花顺兜底并落库。"""
+    db = MagicMock()
+    db.save_limit_up_down_batch.return_value = 59
+    mock_ak.stock_zt_pool_em.return_value = pd.DataFrame()
+    mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    hithink_up = [{"ts_code": "000001", "limit_type": "涨停", "data_source": "hithink"}]
+    hithink_down = [{"ts_code": "000002", "limit_type": "跌停", "data_source": "hithink"}]
+    with patch(
+        "tasks.macro._fetch_limit_pools_hithink",
+        return_value=(hithink_up, hithink_down),
+    ) as fallback, patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db, target_date="2026-09-02")
+    fallback.assert_called_once_with("2026-09-02")
+    assert r["saved"] == 59
+    recs = db.save_limit_up_down_batch.call_args[0][0]
+    assert len(recs) == 2
+    assert {row["data_source"] for row in recs} == {"hithink"}
+
+
+@patch("tasks.macro.ak")
+def test_update_limit_up_down_skips_hithink_when_eastmoney_has_data(mock_ak: MagicMock):
+    """东财有数据时不得触发同花顺兜底（避免无谓调用与混源覆盖）。"""
+    db = MagicMock()
+    db.save_limit_up_down_batch.return_value = 1
+    mock_ak.stock_zt_pool_em.return_value = pd.DataFrame({
+        "代码": ["000001"], "名称": ["平安银行"], "涨跌幅": [10.0],
+        "最新价": [10.0], "换手率": [0.5], "连板数": [1], "所属行业": ["银行"],
+    })
+    mock_ak.stock_zt_pool_dtgc_em.return_value = pd.DataFrame()
+    with patch("tasks.macro._fetch_limit_pools_hithink") as fallback, \
+         patch("daily_pipeline.logger"):
+        r = daily_pipeline.update_limit_up_down(db)
+    fallback.assert_not_called()
+    assert r["saved"] == 1
 
 
 @patch("tasks.macro.ak")
@@ -3413,7 +3454,9 @@ class TestGlobalMacroFetchException:
 
     def test_limit_up_down_fetch_exception(self):
         db = MagicMock()
-        with patch("tasks.macro.ak") as mock_ak, patch("daily_pipeline.logger"):
+        with patch("tasks.macro.ak") as mock_ak, \
+             patch("tasks.macro._fetch_limit_pools_hithink", return_value=([], [])), \
+             patch("daily_pipeline.logger"):
             mock_ak.stock_zt_pool_em.side_effect = ValueError("zt_pool error")
             r = daily_pipeline.update_limit_up_down(db)
         assert r["saved"] == 0

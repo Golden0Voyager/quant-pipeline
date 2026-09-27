@@ -8,6 +8,7 @@ no real network.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -102,6 +103,25 @@ class TestToThscode:
         assert to_thscode(symbol) is None
 
 
+class TestToMs:
+    def test_uses_shanghai_midnight_not_host_tz(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """日期换算以 Asia/Shanghai 为准。
+
+        CI 跑在 UTC，旧实现用 ``time.mktime``（本机时区）会整体偏移 8 小时，
+        单日区间甚至落到前一天。这里把宿主机时区强制为 UTC 以钉住该行为。
+        """
+        monkeypatch.setenv("TZ", "UTC")
+        if hasattr(time, "tzset"):
+            time.tzset()
+        try:
+            assert source_hithink._to_ms("2026-09-02", "") == _ms(2026, 9, 2)
+            assert source_hithink._to_ms(None, "20260902") == _ms(2026, 9, 2)
+        finally:
+            monkeypatch.delenv("TZ", raising=False)
+            if hasattr(time, "tzset"):
+                time.tzset()
+
+
 # ── HithinkClient envelope handling ──────────────────────────────────────
 
 
@@ -164,6 +184,79 @@ class TestFetchDailyBars:
         assert not client.available
         with pytest.raises(HithinkError, match="未配置"):
             client.fetch_daily_bars("600519")
+
+
+# ── fetch_limit_pools（同花顺涨跌停池） ──────────────────────────────────
+
+
+def _pool_envelope(items: list[dict], total: int | None = None) -> dict:
+    return _envelope(0, {
+        "item": items,
+        "pagination": {"total": len(items) if total is None else total},
+    })
+
+
+class TestFetchLimitPools:
+    def test_maps_up_and_down_fields(self) -> None:
+        up_item = {
+            "thscode": "603186.SH", "ticker": "603186", "name": "华正新材",
+            "is_st": False, "is_new": False, "last_price": 251.57,
+            "price_change_ratio_pct": 10, "limit_up_time": "09:31",
+            "limit_up_reason": "高速覆铜板", "continue_day_text": "2连板",
+            "continue_day_cnt": 2, "seal_money": 1.0,
+        }
+        down_item = {
+            "thscode": "603395.SH", "ticker": "603395", "name": "红四方",
+            "last_price": 27.81, "price_change_ratio_pct": -10.0,
+            "first_limit_time": "09:36", "last_limit_time": "15:00",
+            "turnover_ratio_pct": 31.7036,
+        }
+        client, session = _client([
+            _pool_envelope([up_item]),
+            _pool_envelope([down_item]),
+        ])
+
+        up, down = client.fetch_limit_pools("2026-09-02")
+
+        assert len(up) == 1 and len(down) == 1
+        row = up[0]
+        assert row["trade_date"] == "2026-09-02"
+        assert row["ts_code"] == "603186"
+        assert row["name"] == "华正新材"
+        assert row["limit_type"] == "涨停"
+        assert row["pct_change"] == 10
+        assert row["close_price"] == 251.57
+        assert row["board_count"] == 2
+        assert row["data_source"] == "hithink"
+        assert row["industry"] is None and row["turnover_rate"] is None
+        drow = down[0]
+        assert drow["limit_type"] == "跌停"
+        assert drow["board_count"] is None
+        assert drow["turnover_rate"] == pytest.approx(31.7036)
+        # 请求契约：date_ms 毫秒戳（传 trade_date 会被静默忽略并返回空）
+        params = session.calls[0]["params"]
+        assert params["date_ms"] == _ms(2026, 9, 2)
+        assert "trade_date" not in params
+
+    def test_paginates_until_total_is_reached(self) -> None:
+        size = source_hithink._LIMIT_POOL_PAGE_SIZE
+        page1 = [
+            {"ticker": f"{i:06d}", "name": "x", "price_change_ratio_pct": 10}
+            for i in range(size)
+        ]
+        page2 = [{"ticker": "999999", "name": "y", "price_change_ratio_pct": 10}]
+        client, session = _client([
+            _pool_envelope(page1, total=size + 1),
+            _pool_envelope(page2, total=size + 1),
+            _pool_envelope([]),
+        ])
+
+        up, down = client.fetch_limit_pools("2026-06-01")
+
+        assert len(up) == size + 1
+        assert down == []
+        assert session.calls[0]["params"]["page"] == 1
+        assert session.calls[1]["params"]["page"] == 2
 
 
 # ── SmartMoneyLoaderProvider fallback wiring ─────────────────────────────

@@ -108,10 +108,11 @@ if _REPO_ROOT not in sys.path:
   **可回补** 3 张——`index_daily`（`stock_zh_index_daily_tx` 全历史，按日期选行）、
   `block_trade`（`stock_dzjy_mrmx` 的 `start_date`/`end_date`）、
   `sector_valuation`（`stock_industry_pe_ratio_cninfo` 的 `date=`）；
-  **部分可回补** 1 张——`limit_up_down`：跌停股池 `stock_zt_pool_dtgc_em` 只服务最近约
-  30 个交易日（超窗报错），涨停股池 `stock_zt_pool_em` 超窗静默返回空表。2026-09-27 实测
-  回补 6 个缺席日只有 09-14/09-16 补上，08-03/08-19/08-21 超窗、09-02 窗口内但源端无数据。
-  该任务两池皆空时返回 no_data（不是 failed），否则回补会因永久补不回的日子每次非零退出；
+  **部分可回补** 1 张——`limit_up_down`：东财涨跌停池只保留最近约 **16 个交易日**的滚动窗口
+  （2026-09-27 实测；跌停池超窗报错、涨停池超窗静默返回空表）。任务在两池皆空时用
+  **同花顺 HiThink** 兜底（`special-data/limit-up-pool` 等，保留约近几个月，能补 2026-09-02
+  等窗口外历史日），两源都空才返回 no_data（不是 failed）；同花顺不提供 industry 与涨停池
+  换手率，更早的日子仍拿不到；
   **不可回补** 6 张——`fundamentals`/`historical_valuation`/`ah_premium`（源只给实时值）、
   `fund_flow`（`get_market_fund_flow()` 只给实时值）、`sector_fund_flow`（同花顺只有即时快照）、
   `sector_industry`（由 `fundamentals`+`stock_list` 派生，上游本身缺失）。

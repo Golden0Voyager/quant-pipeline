@@ -21,7 +21,9 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -36,6 +38,14 @@ _CODE_RATE_LIMIT = 4001
 _CODE_FORBIDDEN = 2003
 
 _REQUEST_TIMEOUT = 15
+
+# 服务端按**上海交易日**理解日期，因此换算必须显式用上海时区；
+# 不能用 ``time.mktime``（取本机时区，CI 为 UTC 时整体偏移 8 小时甚至落到前一天）。
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+# 涨跌停池分页大小：单日涨停可过百（实测 2026-06-01 有 164 只），而服务端
+# 默认 size=50，故显式放大并按 pagination.total 循环取全。
+_LIMIT_POOL_PAGE_SIZE = 200
 
 
 class HithinkError(RuntimeError):
@@ -61,9 +71,14 @@ def to_thscode(symbol: str) -> str | None:
 
 
 def _to_ms(date_str: str | None, default: str) -> int:
-    """``YYYYMMDD``/``YYYY-MM-DD`` → 毫秒时间戳（本地时区零点）。"""
+    """``YYYYMMDD``/``YYYY-MM-DD`` → 毫秒时间戳（Asia/Shanghai 零点）。
+
+    必须用上海时区而非本机时区：服务端按上海交易日解释日期，用 ``time.mktime``
+    在 UTC 机器（如 CI）上会整体偏移 8 小时，单日区间甚至会落到前一天。
+    """
     value = (date_str or default).replace("-", "")
-    return int(time.mktime(time.strptime(value, "%Y%m%d")) * 1000)
+    moment = datetime.strptime(value, "%Y%m%d").replace(tzinfo=_SHANGHAI_TZ)
+    return int(moment.timestamp() * 1000)
 
 
 class HithinkClient:
@@ -177,6 +192,66 @@ class HithinkClient:
         keep = ["date", "open", "high", "low", "close", "volume",
                 "amount", "pct_change", "amplitude", "data_source"]
         return df[keep].sort_values("date").reset_index(drop=True)
+
+    # ── 涨跌停池（special-data） ───────────────────────────────────────
+
+    def _fetch_limit_pool(
+        self, endpoint: str, trade_date: str, limit_type: str,
+    ) -> list[dict]:
+        """取单个池（涨停/跌停）某交易日的全部记录，按 pagination 分页拉全。
+
+        参数名是 **``date_ms``（毫秒时间戳）**——传 ``trade_date`` 会被服务端
+        静默忽略并返回 0 行（2026-09-27 实测），是最容易踩的坑。
+        """
+        date_ms = _to_ms(trade_date, trade_date)
+        rows: list[dict] = []
+        page = 1
+        while True:
+            data = self._get(
+                f"/api/a-share/special-data/{endpoint}",
+                date_ms=date_ms,
+                page=page,
+                size=_LIMIT_POOL_PAGE_SIZE,
+            )
+            items = data.get("item") or []
+            rows.extend(items)
+            total = (data.get("pagination") or {}).get("total") or 0
+            # 取满、空页或服务端未给总数时停；总数缺失时靠空页兜底
+            if not items or len(rows) >= total:
+                break
+            page += 1
+        return [self._limit_row(item, trade_date, limit_type) for item in rows]
+
+    @staticmethod
+    def _limit_row(item: dict, trade_date: str, limit_type: str) -> dict:
+        """池记录 → ``limit_up_down`` 行规范（与 ``tasks/macro.py`` 一致）。
+
+        同花顺不提供 ``industry``，涨停池也无换手率，均置 None（东财口径才有）。
+        """
+        return {
+            "trade_date": trade_date,
+            "ts_code": str(item.get("ticker") or "").strip(),
+            "name": str(item.get("name") or "").strip(),
+            "pct_change": item.get("price_change_ratio_pct"),
+            "close_price": item.get("last_price"),
+            "turnover_rate": item.get("turnover_ratio_pct"),
+            "limit_type": limit_type,
+            "board_count": item.get("continue_day_cnt"),
+            "industry": None,
+            "data_source": "hithink",
+        }
+
+    def fetch_limit_pools(self, trade_date: str) -> tuple[list[dict], list[dict]]:
+        """按交易日取涨停/跌停池，返回 ``(limit_up_rows, limit_down_rows)``。
+
+        行字段对齐 ``limit_up_down`` 表，``data_source='hithink'``。实测保留约
+        近几个月（2026-09-27 时点：2026-06-01 有数、2026-01-02 为空），足以覆盖
+        东财涨跌停池约 16 个交易日的滚动窗口之外的历史日。
+        """
+        return (
+            self._fetch_limit_pool("limit-up-pool", trade_date, "涨停"),
+            self._fetch_limit_pool("limit-down-pool", trade_date, "跌停"),
+        )
 
 
 _DEFAULT_HITHINK_CLIENT: HithinkClient | None = None

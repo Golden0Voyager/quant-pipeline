@@ -149,5 +149,22 @@ class HithinkClient:
 ### 遗留事项
 
 - API Key 轮换后需同步更新 `quant_pipeline/.env`（当前复用 quant_agents 的 Key 已可工作）
-- P2（龙虎榜/涨停池/估值交叉校验）未实施；quant_agents 实测龙虎榜日期参数有坑
+- P2（龙虎榜/涨停池/估值交叉校验）中**涨停/跌停池已于 2026-09-27 落地**（见下方补记）；
+  龙虎榜/估值交叉校验未实施；quant_agents 实测龙虎榜日期参数有坑
   （非交易日报 1002、`trade_date` 被静默忽略须用 `date_ms`），替换类工作建议另行立项
+
+### 补记（2026-09-27）：涨停/跌停池 P2 部分落地
+
+东财涨跌停池（`stock_zt_pool_em` / `stock_zt_pool_dtgc_em`）只保留约 16 个交易日的滚动
+窗口，导致整日回补对更早的历史日无源可取（2026-09-02 等）。本次落地：
+
+- `core/source_hithink.py` 新增 `fetch_limit_pools(trade_date)` / `_fetch_limit_pool()`：
+  调 `special-data/limit-up-pool` / `limit-down-pool`，参数为 **`date_ms`** 毫秒戳
+  （传 `trade_date` 会被服务端静默忽略并返回 0 行——与 quant_agents 的踩坑记录一致），
+  按 `pagination.total` 分页拉全（`size=200`）。
+- `tasks/macro.py:update_limit_up_down` 在东财两池皆空时用同花顺兜底，写库
+  `data_source='hithink'`；字段映射 `ticker`/`price_change_ratio_pct`/`last_price`/
+  `continue_day_cnt`（连板数）/`turnover_ratio_pct`，同花顺不提供 `industry` 与涨停池换手率。
+- 实测可补 2026-09-02（涨停 51 / 跌停 8）及 08-03/08-19/08-21 等东财窗口外历史日；
+  同花顺保留约近几个月（2026-06-01 有数、2026-01-02 为空）。
+- 龙虎榜 / 估值交叉校验仍属未实施。
