@@ -10,14 +10,24 @@
 
 * **可回补**（源端带日期参数，或返回全历史可按日期选行）：
 
-  ================= ==========================================
-  表                 源
-  ================= ==========================================
-  ``index_daily``     ``stock_zh_index_daily_tx``（全历史，按日期选行）
-  ``limit_up_down``   ``stock_zt_pool_em`` / ``stock_zt_pool_dtgc_em``（``date=``）
-  ``block_trade``     ``stock_dzjy_mrmx``（``start_date``/``end_date``）
-  ``sector_valuation`` ``stock_industry_pe_ratio_cninfo``（``date=``）
-  ================= ==========================================
+  =================== ==========================================
+  表                   源
+  =================== ==========================================
+  ``index_daily``       ``stock_zh_index_daily_tx``（全历史，按日期选行）
+  ``block_trade``       ``stock_dzjy_mrmx``（``start_date``/``end_date``）
+  ``sector_valuation``  ``stock_industry_pe_ratio_cninfo``（``date=``）
+  =================== ==========================================
+
+* **部分可回补**（源端只保留最近一段窗口，窗口外的日子永远补不回来）：
+
+  =================== ==========================================
+  表                   源与限制
+  =================== ==========================================
+  ``limit_up_down``     跌停股池 ``stock_zt_pool_dtgc_em`` 只服务最近约 30 个交易日，
+                        超窗直接报错；涨停股池 ``stock_zt_pool_em`` 超窗静默返回空表。
+                        2026-09-27 实测回补 6 个缺席日：仅 09-14 / 09-16 补上，
+                        08-03/08-19/08-21 超窗、09-02 在窗口内但源端无数据。
+  =================== ==========================================
 
 * **补不回来**（源端只给实时值，或表本身由缺失的上游派生）：
 
@@ -32,7 +42,7 @@
   ``sector_industry``         由 ``fundamentals`` + ``stock_list`` 派生，上游本身就缺
   ========================== ==================================================
 
-``tests/test_backfill.py`` 有一条门禁：上面两组必须正好覆盖 ``day_coverage.PROBE_TABLES``
+``tests/test_backfill.py`` 有一条门禁：上面三组必须正好覆盖 ``day_coverage.PROBE_TABLES``
 ——探针表增删时这张分类表必须同步，不允许留下「没说过能不能补」的表。
 
 （``sector_daily`` 不在探针表里：它的源返回全历史、写入方顺手覆盖了历史日期，
@@ -53,9 +63,21 @@ from core.known_gaps import declared_missing_days
 # 用回补专用的审计名，见 daily_pipeline._BACKFILL_TASK_CALLABLES。
 BACKFILLABLE_TABLES: tuple[tuple[str, str], ...] = (
     ("index_daily", "update_index_daily"),
-    ("limit_up_down", "update_limit_up_down"),
     ("block_trade", "update_block_trade"),
     ("sector_valuation", "update_sector_valuation"),
+)
+
+# **部分可回补**：源端只保留最近一段窗口的数据，窗口外永远补不回来。这些表仍留在
+# 回补注册表里（窗口内的日子要尝试补），但文档/巡检不得再把它们说成「一定补得上」。
+# 三元组 = (表名, 责任任务, 限制说明)。
+PARTIAL_BACKFILLABLE_TABLES: tuple[tuple[str, str, str], ...] = (
+    (
+        "limit_up_down",
+        "update_limit_up_down",
+        "跌停股池 stock_zt_pool_dtgc_em 只服务最近约 30 个交易日（超窗报错）；"
+        "涨停股池 stock_zt_pool_em 超窗静默返回空表。窗口外永远补不回来，"
+        "窗口内也可能遇到源端无数据的个案（如 2026-09-02）",
+    ),
 )
 
 # 已核实**不可回补**的探针表及原因（供巡检报告与文档引用；不要在代码里假装它们可补）。
