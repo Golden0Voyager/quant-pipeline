@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from types import ModuleType
 
 from core.calendar import get_expected_latest_trading_day
+from core.source_hithink import get_hithink_client
 from interface import DatabaseInterface
 
 try:
@@ -222,17 +223,41 @@ def _fetch_limit_down(trade_date: str) -> tuple[list[dict], str | None]:
         return [], str(e)
 
 
+def _fetch_limit_pools_hithink(trade_date: str) -> tuple[list[dict], list[dict]]:
+    """同花顺 HiThink 兜底取涨停/跌停池；不可用或出错时返回空（不抛）。
+
+    东财涨跌停池只保留约 16 个交易日的滚动窗口，超窗一律为空；同花顺保留约
+    近几个月，因此两池皆空时用它兜底（实测能补 2026-09-02 等窗口外历史日）。
+    """
+    try:
+        client = get_hithink_client()
+        if not client.available:
+            return [], []
+        up, down = client.fetch_limit_pools(trade_date)
+        if up or down:
+            logger.info(
+                "🔁 东财涨跌停池为空，改用同花顺兜底 %s（涨停 %d, 跌停 %d）",
+                trade_date, len(up), len(down),
+            )
+        return up, down
+    except Exception as e:
+        # 兜底源失败不得影响主任务：记日志后按「无数据」处理
+        logger.warning(f"⚠️ 同花顺涨跌停兜底失败: {e}")
+        return [], []
+
+
 def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) -> dict:
     """获取涨停跌停统计并保存。
 
     ``target_date`` 给定时改写该历史交易日（整日缺席回补入口）；缺省仍取
     ``get_expected_latest_trading_day()``。
 
-    源端限制：跌停股池 ``stock_zt_pool_dtgc_em`` 只提供最近约 30 个交易日，超窗抛错；
-    涨停股池 ``stock_zt_pool_em`` 超窗静默返回空表。这些都是「源端没有这一天的数据」，
-    因此两池皆空时返回 **no_data/skipped**（不是 failed）——窗口外的历史交易日永远
-    补不回来，不该让整日回补以非零退出码收场。只有当出现**非窗口类**异常（真正的
-    网络/接口故障）时才判 failed，交由 ``safe_task`` 重试。
+    源端限制：东财跌停股池 ``stock_zt_pool_dtgc_em`` 超窗直接抛错（文案写「最近 30 个
+    交易日」，但 2026-09-27 实测有效窗口只有约 16 个交易日），涨停股池
+    ``stock_zt_pool_em`` 超窗静默返回空表。两池皆空时**先用同花顺 HiThink 兜底**
+    （保留约近几个月，能覆盖东财窗口外的历史日）；兜底也为空才返回 **no_data/skipped**
+    （不是 failed）——不该让整日回补以非零退出码收场。只有当出现**非窗口类**异常
+    （真正的网络/接口故障）时才判 failed，交由 ``safe_task`` 重试。
     """
     logger.info("\n" + "=" * 60)
     logger.info("🚀 任务: 更新涨停跌停统计")
@@ -246,9 +271,13 @@ def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) 
     try:
         limit_up, up_err = _fetch_limit_up_down(trade_date)
         limit_down, down_err = _fetch_limit_down(trade_date)
+        if not limit_up and not limit_down:
+            # 东财两池皆空：可能是窗口外历史日/源端无数据（确定性），也可能是
+            # 真故障。二者都先试同花顺兜底——它保留约近几个月，覆盖东财窗口外的日子。
+            limit_up, limit_down = _fetch_limit_pools_hithink(trade_date)
         all_records = limit_up + limit_down
         if not all_records:
-            # 窗口限制是预期结果；其余异常才是真故障
+            # 兜底后仍为空：窗口限制是预期结果；其余异常才是真故障
             hard_errors = [
                 err
                 for err in (up_err, down_err)
@@ -261,12 +290,12 @@ def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) 
                     "error": "; ".join(hard_errors),
                     "error_kind": "network",
                 }
-            logger.warning("⚠️ 涨停跌停无数据（源端未提供该交易日数据，超窗属预期）")
+            logger.warning("⚠️ 涨停跌停无数据（东财两池皆空，同花顺兜底也为空）")
             return {
                 "skipped": True,
                 "reason": (
-                    "源端未返回该交易日的涨停/跌停数据"
-                    "（跌停股池仅提供最近约 30 个交易日）"
+                    "东财与该日的同花顺兜底均未返回涨停/跌停数据"
+                    "（东财涨跌停池只保留最近约 16 个交易日）"
                 ),
                 "total": 0,
             }
