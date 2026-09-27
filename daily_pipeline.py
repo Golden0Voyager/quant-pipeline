@@ -19,6 +19,9 @@ SmartMoney 日常数据管道（解耦版 + 断点续传）
     python daily_pipeline.py --task health_check
     python daily_pipeline.py --backfill-days                    # 回补登记册里仍缺的整日空洞
     python daily_pipeline.py --backfill-days 2026-09-14,2026-09-16
+    python daily_pipeline.py --backfill-table                     # 表格级：全部可回补表 × 登记册缺失日
+    python daily_pipeline.py --backfill-table limit_up_down       # 单表 × 登记册缺失日
+    python daily_pipeline.py --backfill-table limit_up_down 2026-09-14
 """
 from __future__ import annotations
 
@@ -44,7 +47,7 @@ from core._bootstrap import ensure_sibling_paths
 ensure_sibling_paths()
 
 # ── Core module re-exports ──
-from core.backfill import resolve_backfill_days
+from core.backfill import backfill_task_by_table, resolve_backfill_days, resolve_backfill_targets
 from core.calendar import get_expected_latest_trading_day
 from core.config import (
     BATCH_SIZE_VAL as BATCH_SIZE,  # noqa: F401
@@ -385,12 +388,12 @@ def _dispatch_indicators_force(
     return fn(db, engine, symbols_to_update=target_symbols)
 
 
-# ── 整日缺席回补（--backfill-days）──────────────────────────────────
+# ── 历史回补（--backfill-days 整日级 / --backfill-table 表格级）──────────────────────────
 # 只有**源端支持历史日期**的表才在这里；可回补/部分可回补/不可回补的分类与依据见
 # core/backfill.py 的模块 docstring，且由 tests/test_backfill.py 门禁保证该分类
 # 覆盖全部探针表（不留「没说过能不能补」的表）。limit_up_down 属部分可回补：
-# 跌停股池只留最近约 30 个交易日，窗口外的历史日补不回来，任务对此返回 no_data
-# 而非 failed（见 tasks/macro.py::update_limit_up_down）。
+# 东财涨跌停池只留最近约 16 个交易日，窗口外靠同花顺 HiThink 兜底，更早的日子
+# 补不回来，任务对此返回 no_data 而非 failed（见 tasks/macro.py::update_limit_up_down）。
 
 
 def _backfill_sector_valuation(db: DatabaseInterface, target_date: str) -> dict:
@@ -471,6 +474,77 @@ def run_backfill_days(db: DatabaseInterface, spec: str | None = None) -> dict:
     return {
         "days": list(plan.days),
         "skipped": [list(item) for item in plan.skipped],
+        "failed": len(failures),
+        "failures": failures,
+        "saved": total_saved,
+    }
+
+
+def run_backfill_table(db: DatabaseInterface, spec: str | None = None) -> dict:
+    """按 (表, 日) 粒度回补历史单表空洞（``--backfill-table``）。
+
+    与 ``run_backfill_days`` 的区别只在幂等门：这里看的是「该表当日是否有行」
+    而非「整天是否缺席」，专门解完日回补把混合形态的日子补齐之后，单表残留
+    空洞永远过不了整天门的死角（2026-09-27 实证：6 个登记缺口日补齐 3–4 张表后
+    再跑 ``--backfill-days`` 全部被跳过）。
+
+    逐 (表, 日) 对执行 ``safe_task`` 落审计；单个失败不打断其余，失败数由调用方
+    转成非零退出码。
+    """
+    conn = sqlite3.connect(str(db.db_path))
+    try:
+        plan = resolve_backfill_targets(conn.cursor(), spec)
+    finally:
+        conn.close()
+
+    tasks_by_table = backfill_task_by_table()
+    logger.info("\n" + "=" * 60)
+    logger.info("🧩 表格级回补（日期来源: %s）", plan.source)
+    logger.info("=" * 60)
+    for target, reason in plan.skipped:
+        label = "/".join(target) if isinstance(target, tuple) else str(target)
+        logger.info("  跳过 %s：%s", label, reason)
+
+    if not plan.targets:
+        logger.info("✅ 没有需要回补的 (表, 交易日) 对")
+        return {
+            "targets": [],
+            "skipped": [
+                ["/".join(item) if isinstance(item, tuple) else item, reason]
+                for item, reason in plan.skipped
+            ],
+            "failed": 0,
+            "saved": 0,
+        }
+
+    failures: list[str] = []
+    total_saved = 0
+    for table, day in plan.targets:
+        task_name = tasks_by_table.get(table)
+        if task_name is None:  # 防御：resolve 层不应产生未注册表
+            failures.append(f"{day}/{table}: 未知的回补表")
+            continue
+        result = _safe_task(task_name, _BACKFILL_TASK_CALLABLES[task_name], db, target_date=day)
+        status = result.get("status")
+        saved = result.get("saved") or 0
+        if isinstance(saved, int):
+            total_saved += saved
+        if status in ("failed", "degraded", "aborted"):
+            failures.append(f"{day}/{table}: {result.get('error') or status}")
+        logger.info("  %s %s (%s) → %s (saved=%s)", day, table, task_name, status, saved)
+
+    logger.info(
+        "🧩 表格级回补完成：%s 个 (表, 交易日) 对，合计 saved=%s，失败 %s 项",
+        len(plan.targets),
+        total_saved,
+        len(failures),
+    )
+    return {
+        "targets": [list(item) for item in plan.targets],
+        "skipped": [
+            ["/".join(item) if isinstance(item, tuple) else item, reason]
+            for item, reason in plan.skipped
+        ],
         "failed": len(failures),
         "failures": failures,
         "saved": total_saved,
@@ -1164,6 +1238,17 @@ def main():
             "不带值 = 自动取 core/known_gaps.py 里仍缺的日期，带值 = 指定日期"
         ),
     )
+    parser.add_argument(
+        "--backfill-table",
+        nargs="*",
+        default=None,
+        metavar="表名|YYYY-MM-DD",
+        help=(
+            "按 (表, 日) 粒度回补历史单表空洞（与 --task/--refresh-today/--backfill-days 互斥）："
+            "条目可以是回补表名（如 limit_up_down）或日期；条目可混写、逗号分隔；"
+            "不带值 = 全部可回补表 × 登记册缺失日。日期粒度幂等（该表当日已有行则跳过）"
+        ),
+    )
     parser.add_argument("--limit", type=int, default=None, help="测试模式：只处理前 N 只股票")
     parser.add_argument("--force", action="store_true", help="强制运行（忽略交易日检查）")
     parser.add_argument(
@@ -1202,6 +1287,10 @@ def main():
         parser.error("--task 不能与 --refresh-today 同时使用")
     if args.backfill_days is not None and (args.refresh_today or args.task is not None):
         parser.error("--task/--refresh-today 不能与 --backfill-days 同时使用")
+    if args.backfill_table is not None and (
+        args.refresh_today or args.task is not None or args.backfill_days is not None
+    ):
+        parser.error("--backfill-table 不能与 --task/--refresh-today/--backfill-days 同时使用")
     task = args.task if args.task is not None else "all"
 
     symbols_arg = args.symbols
@@ -1249,6 +1338,7 @@ def main():
     if (
         task in ("all", "daily", "update_daily_core")
         and args.backfill_days is None
+        and args.backfill_table is None
         and os.getenv("QUANT_ALLOW_OFFLINE", "0").lower() not in ("1", "true", "yes")
         and not is_online()
     ):
@@ -1289,6 +1379,10 @@ def main():
 
         if args.backfill_days is not None:
             results = run_backfill_days(db, args.backfill_days)
+            if results.get("failed"):
+                sys.exit(1)
+        elif args.backfill_table is not None:
+            results = run_backfill_table(db, " ".join(args.backfill_table))
             if results.get("failed"):
                 sys.exit(1)
         elif task in ("all", "daily", "update_daily_core"):

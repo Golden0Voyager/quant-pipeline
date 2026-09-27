@@ -48,6 +48,14 @@ PROBE_TABLES: tuple[tuple[str, str], ...] = (
 )
 
 
+def date_column(table: str, probe_tables: tuple[tuple[str, str], ...] = PROBE_TABLES) -> str | None:
+    """返回探针表的日期列名；非探针表返回 ``None``。"""
+    for probe_table, column in probe_tables:
+        if probe_table == table:
+            return column
+    return None
+
+
 def scan_window(start: str, expected_latest: str) -> tuple[str, str] | None:
     """返回巡检窗口 ``(start, end)``——**不含**最新交易日本身。
 

@@ -122,6 +122,10 @@ if _REPO_ROOT not in sys.path:
 - 回补入口：`uv run python daily_pipeline.py --backfill-days [YYYY-MM-DD,...]`
   （不带值 = 自动取登记册里**仍然**缺席的日期）。逐日跑并落 `ingestion_runs` 审计；
   已补上的日期幂等跳过；源端无数据（超窗历史日等）算 no_data 而非失败。
+- 表格级回补：`uv run python daily_pipeline.py --backfill-table [表名|日期 ...]`
+  ——幂等门下沉到 **(表, 日)** 粒度，专门补「整天已有数据、但单张表残留空洞」的日子
+  （整天级入口对这种日子会整日跳过）。条目可为表名或日期，可混写；裸旗标 =
+  全部可回补表 × 登记册缺失日；互斥与退出码语义同 `--backfill-days`。
 
 ### 3. 「这一轮没跑完」是可编程信号
 - `core/run_state.py` 在 `task_runs` 写 `in-progress:<date>` / `complete:<date>`；

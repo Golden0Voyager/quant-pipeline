@@ -65,6 +65,7 @@ quant_pipeline/
 - `uv run python daily_pipeline.py --task <name> [--force] [--resume]` — Direct CLI
 - `uv run python daily_pipeline.py --refresh-today [--force] [--resume]` — Close refresh; `--resume` continues an interrupted run
 - `uv run python daily_pipeline.py --backfill-days [YYYY-MM-DD,...]` — Re-fetch whole missing trading days for the tables whose source supports historical dates (see `core/backfill.py`; `limit_up_down` is only partially backfillable — East Money's pools keep ~16 trading days, with a HiThink/同花顺 fallback covering recent months); no value means auto-discover from `core/known_gaps.py`
+- `uv run python daily_pipeline.py --backfill-table [table|date ...]` — Table-granular backfill: same backfillable set, but the idempotence gate checks **(table, day)** pairs instead of whole days, so a single-table hole on an otherwise-filled day can still be refilled; entries may be table names and/or dates (bare flag = all backfillable tables × declared missing days)
 - `uv run python scripts/daemon.py [start|stop]` — Daemon management (TUI D/S keys)
 
 ## Close Refresh (`--refresh-today`)

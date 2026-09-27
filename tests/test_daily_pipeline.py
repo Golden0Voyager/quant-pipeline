@@ -1971,6 +1971,116 @@ class TestBackfillDaysCLI:
             daily_pipeline.main()  # 不抛 SystemExit
 
 
+class TestBackfillTableCLI:
+    """表格级回补入口（--backfill-table）的 CLI 接线。"""
+
+    def test_conflicts_with_task(self, capsys):
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--task", "update_bars", "--backfill-table"]
+        ), pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--backfill-table" in capsys.readouterr().err
+
+    def test_conflicts_with_refresh_today(self, capsys):
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--refresh-today", "--backfill-table"]
+        ), pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--backfill-table" in capsys.readouterr().err
+
+    def test_conflicts_with_backfill_days(self, capsys):
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--backfill-days", "--backfill-table"]
+        ), pytest.raises(SystemExit) as exc_info:
+            daily_pipeline.main()
+        assert exc_info.value.code == 2
+        assert "--backfill-table" in capsys.readouterr().err
+
+    def test_dispatches_joined_spec_and_skips_run_all(self):
+        """nargs="*" 的多个条目拼成空格分隔 spec 传下去。"""
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--backfill-table", "limit_up_down", "2026-09-14"]
+        ), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}) as backfill, \
+             patch("daily_pipeline.update_daily_core") as daily_mock:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once_with(factory.get_db.return_value, "limit_up_down 2026-09-14")
+        daily_mock.assert_not_called()
+
+    def test_bare_flag_passes_empty_spec(self):
+        """裸旗标必须传空串（= declared × 全部可回补表），不得当成没给。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-table"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}) as backfill:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once_with(factory.get_db.return_value, "")
+
+    def test_comma_separated_entries_are_joined_verbatim(self):
+        """逗号分隔条目原样保留：core.backfill 负责拆分，CLI 不抢它的活。"""
+        with patch.object(
+            sys, "argv", ["daily_pipeline.py", "--backfill-table", "limit_up_down,2026-09-14"]
+        ), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}) as backfill:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once_with(factory.get_db.return_value, "limit_up_down,2026-09-14")
+
+    def test_acquires_global_pipeline_lock(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-table"]), \
+             patch("daily_pipeline._acquire_lock") as lock, \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        lock.assert_called_once_with()
+
+    def test_failures_exit_nonzero(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-table"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 2}), \
+             pytest.raises(SystemExit) as exc_info:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        assert exc_info.value.code == 1
+
+    def test_all_success_exits_cleanly(self):
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-table"]), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}):
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()  # 不抛 SystemExit
+
+    def test_offline_bypass_applies(self, capsys):
+        """离线时 --backfill-table 不做联网预检跳过（与 --backfill-days 同口径）。"""
+        with patch.object(sys, "argv", ["daily_pipeline.py", "--backfill-table"]), \
+             patch("daily_pipeline.is_online", return_value=False), \
+             patch("daily_pipeline.ProviderFactory") as factory, \
+             patch("daily_pipeline.run_backfill_table", return_value={"failed": 0}) as backfill:
+            factory.get_db.return_value = MagicMock()
+            factory.get_loader.return_value = MagicMock()
+            factory.get_indicator_engine.return_value = MagicMock()
+            daily_pipeline.main()
+        backfill.assert_called_once()
+
+
 class TestRefreshTodayCLI:
     def test_no_flags_still_runs_legacy_all(self, weekday_mock):
         with patch.object(sys, "argv", ["daily_pipeline.py"]), \
