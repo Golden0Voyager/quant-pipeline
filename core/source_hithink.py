@@ -21,7 +21,9 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -36,6 +38,10 @@ _CODE_RATE_LIMIT = 4001
 _CODE_FORBIDDEN = 2003
 
 _REQUEST_TIMEOUT = 15
+
+# 服务端按**上海交易日**理解日期，因此换算必须显式用上海时区；
+# 不能用 ``time.mktime``（取本机时区，CI 为 UTC 时整体偏移 8 小时甚至落到前一天）。
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 # 涨跌停池分页大小：单日涨停可过百（实测 2026-06-01 有 164 只），而服务端
 # 默认 size=50，故显式放大并按 pagination.total 循环取全。
@@ -65,9 +71,14 @@ def to_thscode(symbol: str) -> str | None:
 
 
 def _to_ms(date_str: str | None, default: str) -> int:
-    """``YYYYMMDD``/``YYYY-MM-DD`` → 毫秒时间戳（本地时区零点）。"""
+    """``YYYYMMDD``/``YYYY-MM-DD`` → 毫秒时间戳（Asia/Shanghai 零点）。
+
+    必须用上海时区而非本机时区：服务端按上海交易日解释日期，用 ``time.mktime``
+    在 UTC 机器（如 CI）上会整体偏移 8 小时，单日区间甚至会落到前一天。
+    """
     value = (date_str or default).replace("-", "")
-    return int(time.mktime(time.strptime(value, "%Y%m%d")) * 1000)
+    moment = datetime.strptime(value, "%Y%m%d").replace(tzinfo=_SHANGHAI_TZ)
+    return int(moment.timestamp() * 1000)
 
 
 class HithinkClient:
