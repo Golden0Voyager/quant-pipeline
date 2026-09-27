@@ -135,10 +135,10 @@ rtk uv run python daily_pipeline.py --backfill-days                          # �
 rtk uv run python daily_pipeline.py --backfill-days 2026-09-14,2026-09-16    # 指定日期
 ```
 
-- **只补 4 张表**：只有源端支持历史日期的表才补得回来 —— `index_daily`、`limit_up_down`、`block_trade`、`sector_valuation`。另外 6 张（`fundamentals`/`historical_valuation`/`ah_premium`/`fund_flow`/`sector_fund_flow`/`sector_industry`）源端只给实时值或本身是派生表，**补不回来**；逐表依据与门禁见 `core/backfill.py` 与 `tests/test_backfill.py`。
+- **能补的是 3+1 张表**：`index_daily`、`block_trade`、`sector_valuation` 源端支持历史日期，完整可补；`limit_up_down` 属**部分可补**——跌停股池只服务最近约 30 个交易日，超窗的历史日永远补不回来（2026-09-27 实测 6 个缺席日仅 2 天补上）。另外 6 张（`fundamentals`/`historical_valuation`/`ah_premium`/`fund_flow`/`sector_fund_flow`/`sector_industry`）源端只给实时值或本身是派生表，**补不回来**；逐表依据与门禁见 `core/backfill.py` 与 `tests/test_backfill.py`。
 - **幂等**：只处理**仍然**缺席的日期，已经补上的直接跳过，不会重复打源端。
 - **留痕**：每个任务经 `safe_task` 落 `ingestion_runs` 审计，与日常路径同一套。
-- **退出码**：任一任务 failed/degraded 时以非零码退出。
+- **退出码**：任一任务 failed/degraded 时以非零码退出；源端无数据（如超窗历史日）记为 no_data，不算失败。
 
 ---
 

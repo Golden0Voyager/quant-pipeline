@@ -386,9 +386,11 @@ def _dispatch_indicators_force(
 
 
 # ── 整日缺席回补（--backfill-days）──────────────────────────────────
-# 只有**源端支持历史日期**的表才在这里；可回补/不可回补的分类与依据见
+# 只有**源端支持历史日期**的表才在这里；可回补/部分可回补/不可回补的分类与依据见
 # core/backfill.py 的模块 docstring，且由 tests/test_backfill.py 门禁保证该分类
-# 覆盖全部探针表（不留「没说过能不能补」的表）。
+# 覆盖全部探针表（不留「没说过能不能补」的表）。limit_up_down 属部分可回补：
+# 跌停股池只留最近约 30 个交易日，窗口外的历史日补不回来，任务对此返回 no_data
+# 而非 failed（见 tasks/macro.py::update_limit_up_down）。
 
 
 def _backfill_sector_valuation(db: DatabaseInterface, target_date: str) -> dict:

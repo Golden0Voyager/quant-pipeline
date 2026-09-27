@@ -50,18 +50,20 @@
 推广到其余任务，是**独立工作项**（整日缺席的回补入口已于 2026-09-26 落地：
 ``daily_pipeline.py --backfill-days``，日期筛选与分类见 ``core/backfill.py``）。
 
-回补判定（2026-09-26 按**源端**重新逐一复核）：
+回补判定（2026-09-26 按**源端**重新逐一复核，2026-09-27 按实测回补结果修正）：
 
 * **不可回补**（源端只给实时值）：``fundamentals``/``historical_valuation``（雪球接口）、
   ``ah_premium``（``stock_zh_ah_spot_em``）、``fund_flow``（``get_market_fund_flow()``）。
   另有两张不是「抓不到」而是**派生**：``sector_fund_flow``（同花顺
   ``stock_fund_flow_industry`` 只有即时快照）、``sector_industry``（由 ``fundamentals``
   + ``stock_list`` 派生，上游本身就缺）。
-* **可回补（4 张）**：``index_daily``（``stock_zh_index_daily_tx`` 返回全历史，按日期选行）、
-  ``limit_up_down``（``stock_zt_pool_em``/``stock_zt_pool_dtgc_em`` 的 ``date=``）、
+* **可回补（3 张）**：``index_daily``（``stock_zh_index_daily_tx`` 返回全历史，按日期选行）、
   ``block_trade``（``stock_dzjy_mrmx`` 的 ``start_date``/``end_date``）、
   ``sector_valuation``（``stock_industry_pe_ratio_cninfo`` 的 ``date=``）。
-  这四张已接上 ``--backfill-days`` 入口。
+* **部分可回补（1 张）**：``limit_up_down``——跌停股池 ``stock_zt_pool_dtgc_em`` 只服务
+  最近约 30 个交易日（超窗报错），涨停股池 ``stock_zt_pool_em`` 超窗静默返回空表。
+  2026-09-27 实测回补 6 个缺席日仅 09-14/09-16 补上（08-03/08-19/08-21 超窗、09-02 窗口内
+  但源端无数据）。这三张 + 这张都已接上 ``--backfill-days`` 入口（窗口外的日子补不回来）。
 * 此前这里写的「``sector_*`` 走 ``stock_board_industry_hist_em``、``limit_up_down`` 走
   ``stock_lhb_detail_em``」是错的：前者是 ``sector_daily`` 的源（而该表源端返回全历史、
   实测从未真正缺过），后者是龙虎榜的源。分类以 ``core/backfill.py`` +

@@ -153,15 +153,22 @@ def update_north_hold(db: DatabaseInterface) -> dict:
 # ===========================================================================
 
 
-def _fetch_limit_up_down(trade_date: str) -> list[dict]:
-    """获取涨停跌停统计。"""
+# 东财跌停股池（stock_zt_pool_dtgc_em）只回放最近约 30 个交易日，超窗直接抛错；
+# 涨停股池（stock_zt_pool_em）超窗则静默返回空表。两者都是源端的**确定性窗口限制**，
+# 不是故障——识别它以免把永久无法回补的历史交易日误判为 failed
+# （分类见 core/backfill.py 的 PARTIAL_BACKFILLABLE_TABLES）。
+_LIMIT_POOL_WINDOW_ERROR = "30 个交易日"
+
+
+def _fetch_limit_up_down(trade_date: str) -> tuple[list[dict], str | None]:
+    """获取涨停统计，返回 ``(records, error)``；``error`` 为源端异常文本或 None。"""
     if ak is None:
-        return []
+        return [], None
     date_compact = trade_date.replace("-", "")
     try:
         df = ak.stock_zt_pool_em(date=date_compact)
         if df is None or df.empty:
-            return []
+            return [], None
         records = []
         for _, row in df.iterrows():
             records.append(
@@ -178,21 +185,21 @@ def _fetch_limit_up_down(trade_date: str) -> list[dict]:
                     "data_source": "akshare",
                 }
             )
-        return records
+        return records, None
     except Exception as e:
         logger.warning(f"⚠️ 涨停数据获取失败: {e}")
-        return []
+        return [], str(e)
 
 
-def _fetch_limit_down(trade_date: str) -> list[dict]:
-    """获取跌停统计。"""
+def _fetch_limit_down(trade_date: str) -> tuple[list[dict], str | None]:
+    """获取跌停统计，返回 ``(records, error)``；``error`` 为源端异常文本或 None。"""
     if ak is None:
-        return []
+        return [], None
     date_compact = trade_date.replace("-", "")
     try:
         df = ak.stock_zt_pool_dtgc_em(date=date_compact)
         if df is None or df.empty:
-            return []
+            return [], None
         records = []
         for _, row in df.iterrows():
             records.append(
@@ -209,18 +216,23 @@ def _fetch_limit_down(trade_date: str) -> list[dict]:
                     "data_source": "akshare",
                 }
             )
-        return records
+        return records, None
     except Exception as e:
         logger.warning(f"⚠️ 跌停数据获取失败: {e}")
-        return []
+        return [], str(e)
 
 
 def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) -> dict:
     """获取涨停跌停统计并保存。
 
     ``target_date`` 给定时改写该历史交易日（整日缺席回补入口）；缺省仍取
-    ``get_expected_latest_trading_day()``。源端 ``stock_zt_pool_em`` / ``stock_zt_pool_dtgc_em``
-    本就按 ``date`` 取数，因此回补无需额外适配。
+    ``get_expected_latest_trading_day()``。
+
+    源端限制：跌停股池 ``stock_zt_pool_dtgc_em`` 只提供最近约 30 个交易日，超窗抛错；
+    涨停股池 ``stock_zt_pool_em`` 超窗静默返回空表。这些都是「源端没有这一天的数据」，
+    因此两池皆空时返回 **no_data/skipped**（不是 failed）——窗口外的历史交易日永远
+    补不回来，不该让整日回补以非零退出码收场。只有当出现**非窗口类**异常（真正的
+    网络/接口故障）时才判 failed，交由 ``safe_task`` 重试。
     """
     logger.info("\n" + "=" * 60)
     logger.info("🚀 任务: 更新涨停跌停统计")
@@ -232,13 +244,32 @@ def update_limit_up_down(db: DatabaseInterface, target_date: str | None = None) 
 
     trade_date = target_date or get_expected_latest_trading_day()
     try:
-        limit_up = _fetch_limit_up_down(trade_date)
-        limit_down = _fetch_limit_down(trade_date)
+        limit_up, up_err = _fetch_limit_up_down(trade_date)
+        limit_down, down_err = _fetch_limit_down(trade_date)
         all_records = limit_up + limit_down
         if not all_records:
-            logger.warning("⚠️ 涨停跌停无数据")
-            # fetch 内部吞异常，空 records 无法区分合法零行与全失败，保持 failed 语义
-            return {"saved": 0, "total": 0}
+            # 窗口限制是预期结果；其余异常才是真故障
+            hard_errors = [
+                err
+                for err in (up_err, down_err)
+                if err and _LIMIT_POOL_WINDOW_ERROR not in err
+            ]
+            if hard_errors:
+                logger.error("❌ 涨停跌停获取失败: %s", "; ".join(hard_errors))
+                return {
+                    "saved": 0,
+                    "error": "; ".join(hard_errors),
+                    "error_kind": "network",
+                }
+            logger.warning("⚠️ 涨停跌停无数据（源端未提供该交易日数据，超窗属预期）")
+            return {
+                "skipped": True,
+                "reason": (
+                    "源端未返回该交易日的涨停/跌停数据"
+                    "（跌停股池仅提供最近约 30 个交易日）"
+                ),
+                "total": 0,
+            }
         saved = db.save_limit_up_down_batch(all_records)
         logger.info(f"✅ 涨停跌停保存完成: {saved} 条 (涨停 {len(limit_up)}, 跌停 {len(limit_down)})")
         return {"saved": saved, "total": len(all_records)}

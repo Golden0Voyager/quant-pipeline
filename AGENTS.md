@@ -104,19 +104,23 @@ if _REPO_ROOT not in sys.path:
   巡检窗口**不含**最新交易日（那天归新鲜度巡检；含进来就会在当天未跑完时连日报假空洞）。
 - 整日缺席分两种成因（登记册里逐日写明）：**部分运行**（启动过但只跑了一小部分就结束，
   如 09-02 只 12 条记录）与**完全未启动**（无日志、无记录，如 09-14/09-16）。
-- 回补判定按**源端**逐一复核（2026-09-26 修正，此前「其余表抓取层都支持历史日期」的说法是错的）：
-  **可回补** 4 张——`index_daily`（`stock_zh_index_daily_tx` 全历史，按日期选行）、
-  `limit_up_down`（`stock_zt_pool_em`/`stock_zt_pool_dtgc_em` 的 `date=`）、
+- 回补判定按**源端**逐一复核（2026-09-26 初核，2026-09-27 按实测回补结果修正）：
+  **可回补** 3 张——`index_daily`（`stock_zh_index_daily_tx` 全历史，按日期选行）、
   `block_trade`（`stock_dzjy_mrmx` 的 `start_date`/`end_date`）、
   `sector_valuation`（`stock_industry_pe_ratio_cninfo` 的 `date=`）；
+  **部分可回补** 1 张——`limit_up_down`：跌停股池 `stock_zt_pool_dtgc_em` 只服务最近约
+  30 个交易日（超窗报错），涨停股池 `stock_zt_pool_em` 超窗静默返回空表。2026-09-27 实测
+  回补 6 个缺席日只有 09-14/09-16 补上，08-03/08-19/08-21 超窗、09-02 窗口内但源端无数据。
+  该任务两池皆空时返回 no_data（不是 failed），否则回补会因永久补不回的日子每次非零退出；
   **不可回补** 6 张——`fundamentals`/`historical_valuation`/`ah_premium`（源只给实时值）、
   `fund_flow`（`get_market_fund_flow()` 只给实时值）、`sector_fund_flow`（同花顺只有即时快照）、
   `sector_industry`（由 `fundamentals`+`stock_list` 派生，上游本身缺失）。
-  分类与依据集中在 `core/backfill.py`，门禁 `tests/test_backfill.py` 要求它正好覆盖全部探针表
+  分类与依据集中在 `core/backfill.py`（`BACKFILLABLE_TABLES` / `PARTIAL_BACKFILLABLE_TABLES` /
+  `NOT_BACKFILLABLE_TABLES`），门禁 `tests/test_backfill.py` 要求三组正好覆盖全部探针表
   （新增探针表时必须写明能不能补）。
 - 回补入口：`uv run python daily_pipeline.py --backfill-days [YYYY-MM-DD,...]`
-  （不带值 = 自动取登记册里**仍然**缺席的日期）。只回补可回补的那 4 张，逐日跑并落
-  `ingestion_runs` 审计；已补上的日期幂等跳过。
+  （不带值 = 自动取登记册里**仍然**缺席的日期）。逐日跑并落 `ingestion_runs` 审计；
+  已补上的日期幂等跳过；源端无数据（超窗历史日等）算 no_data 而非失败。
 
 ### 3. 「这一轮没跑完」是可编程信号
 - `core/run_state.py` 在 `task_runs` 写 `in-progress:<date>` / `complete:<date>`；

@@ -1,7 +1,7 @@
 """整日缺席回补入口的门禁。
 
 三件事：日期解析/筛选语义；「仍缺才回补」的幂等行为；以及**分类覆盖**——
-可回补与不可回补的探针表必须正好拼成 ``day_coverage.PROBE_TABLES``，
+可回补、部分可回补与不可回补的探针表必须正好拼成 ``day_coverage.PROBE_TABLES``，
 不允许出现「没说过能不能补」的表。
 """
 from __future__ import annotations
@@ -124,23 +124,36 @@ def test_blank_spec_is_treated_as_auto_discovery(conn):
 
 
 def test_classification_covers_every_probe_table_exactly_once():
-    """每张探针表都必须被明确归类为可回补或不可回补——不允许沉默跳过。
+    """每张探针表都必须被明确归类为可回补/部分可回补/不可回补——不允许沉默跳过。
 
     探针集增删时这里先红，逼着同时更新分类（否则新表会悄悄落在两不管地带，
     而「为什么这张补不回来」将无从回答）。
     """
     backfillable = {table for table, _ in backfill.BACKFILLABLE_TABLES}
+    partial = {table for table, _, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
     not_backfillable = {table for table, _ in backfill.NOT_BACKFILLABLE_TABLES}
     probes = {table for table, _ in PROBE_TABLES}
 
-    assert backfillable | not_backfillable == probes
+    assert backfillable | partial | not_backfillable == probes
+    assert backfillable & partial == set()
     assert backfillable & not_backfillable == set()
+    assert partial & not_backfillable == set()
 
 
 def test_backfillable_tables_map_to_real_backfill_tasks():
-    """分类表里写的任务名必须真的在回补注册表里，避免文档与实现分叉。"""
-    assert {task for _, task in backfill.BACKFILLABLE_TABLES} == set(
-        daily_pipeline._BACKFILL_TASK_CALLABLES
+    """分类表里写的任务名必须真的在回补注册表里，避免文档与实现分叉。
+
+    部分可回补的表仍要尝试（仅受源端窗口限制），所以其任务也必须在注册表里。
+    """
+    declared = {task for _, task in backfill.BACKFILLABLE_TABLES}
+    declared |= {task for _, task, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}
+    assert declared == set(daily_pipeline._BACKFILL_TASK_CALLABLES)
+
+
+def test_partial_backfillable_entries_all_carry_a_reason():
+    assert all(reason.strip() for _, _, reason in backfill.PARTIAL_BACKFILLABLE_TABLES)
+    assert len({table for table, _, _ in backfill.PARTIAL_BACKFILLABLE_TABLES}) == len(
+        backfill.PARTIAL_BACKFILLABLE_TABLES
     )
 
 
