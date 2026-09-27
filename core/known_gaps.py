@@ -60,10 +60,11 @@
 * **可回补（3 张）**：``index_daily``（``stock_zh_index_daily_tx`` 返回全历史，按日期选行）、
   ``block_trade``（``stock_dzjy_mrmx`` 的 ``start_date``/``end_date``）、
   ``sector_valuation``（``stock_industry_pe_ratio_cninfo`` 的 ``date=``）。
-* **部分可回补（1 张）**：``limit_up_down``——跌停股池 ``stock_zt_pool_dtgc_em`` 只服务
-  最近约 30 个交易日（超窗报错），涨停股池 ``stock_zt_pool_em`` 超窗静默返回空表。
-  2026-09-27 实测回补 6 个缺席日仅 09-14/09-16 补上（08-03/08-19/08-21 超窗、09-02 窗口内
-  但源端无数据）。这三张 + 这张都已接上 ``--backfill-days`` 入口（窗口外的日子补不回来）。
+* **部分可回补（1 张）**：``limit_up_down``——东财涨跌停池只保留最近约 16 个交易日的
+  滚动窗口（2026-09-27 实测；跌停池超窗报错、涨停池超窗静默返回空表）。任务在两池皆空时
+  改用同花顺 HiThink 兜底（保留约近几个月），因此 2026-09-02 这类东财窗口外的历史日也能
+  补上（同花顺不提供 industry 与涨停池换手率）。这三张 + 这张都已接上 ``--backfill-days``
+  入口（更早的日子仍补不回来）。
 * 此前这里写的「``sector_*`` 走 ``stock_board_industry_hist_em``、``limit_up_down`` 走
   ``stock_lhb_detail_em``」是错的：前者是 ``sector_daily`` 的源（而该表源端返回全历史、
   实测从未真正缺过），后者是龙虎榜的源。分类以 ``core/backfill.py`` +
