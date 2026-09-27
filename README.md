@@ -140,6 +140,22 @@ rtk uv run python daily_pipeline.py --backfill-days 2026-09-14,2026-09-16    # �
 - **留痕**：每个任务经 `safe_task` 落 `ingestion_runs` 审计，与日常路径同一套。
 - **退出码**：任一任务 failed/degraded 时以非零码退出；源端无数据（如超窗历史日）记为 no_data，不算失败。
 
+### 7. 表格级回补（`--backfill-table`）
+
+`--backfill-days` 的幂等门是**整天级**的：某天只要任何一张表有行就整日跳过。部分运行
+遗留的日子在整日回补补齐后，任何**单表残留空洞**就永远过不了那道门。`--backfill-table`
+把幂等门下沉到 **(表, 日)** 粒度：
+
+```bash
+rtk uv run python daily_pipeline.py --backfill-table                        # 全部可回补表 × 登记册缺失日
+rtk uv run python daily_pipeline.py --backfill-table limit_up_down          # 单表 × 登记册缺失日
+rtk uv run python daily_pipeline.py --backfill-table limit_up_down 2026-09-14  # 表名与日期可混写
+```
+
+- 条目可以是回补表名（`index_daily`/`block_trade`/`sector_valuation`/`limit_up_down`）或
+  `YYYY-MM-DD` 日期，逗号/空白分隔；只给表名 = 该表 × 登记册缺失日，只给日期 = 全部可回补表 × 该日。
+- 幂等、留痕、退出码语义与 `--backfill-days` 一致；与 `--task`/`--refresh-today`/`--backfill-days` 互斥。
+
 ---
 
 ## 日线数据回填工具
