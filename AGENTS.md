@@ -95,6 +95,9 @@ if _REPO_ROOT not in sys.path:
 - `core/known_gaps.py` 是**已声明、已接受**的空洞登记册，含**两种形态**：
   ① **字段级**（`fundamentals.dividend_yield`，6 个日期）；② **整日缺席**（6 个交易日，
   当天对所有按交易日应有的表都没写）。`health_check` 只对**不在册**的空洞告警。
+- 整日缺口已**部分恢复**（2026-09-27）：4 张可回补表 × 6 天全部补齐（`limit_up_down`
+  走 HiThink 兜底），其余 6 张永久不可恢复。登记条目**保留**——成因是历史事实，
+  日期仍是回补入口的日期来源；恢复明细在 `core/known_gaps.py` 的 `RECOVERY_NOTES`。
 - 增删条目要过 `tests/test_known_gaps.py`（两组日期都被钉住）——为了让报告变绿而删条目会直接红。
 - 字段级那组的 6 个 `dividend_yield` 空洞为何回补不了：雪球接口只给实时值、
   `historical_valuation` 是 `fundamentals` 的副本（同样为空）、`dividend_summary` 无 `trade_date`。
