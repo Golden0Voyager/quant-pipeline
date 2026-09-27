@@ -297,6 +297,7 @@ def test_scripts_needing_the_preamble_rule_are_actually_found():
         # 接入 core.db_pragmas 之后它自动进入本规则，并从外部 cwd 跑 --help。
         "backfill_historical_valuation.py",
         "backfill_from_hithink_dump.py",
+        "compare_limit_pools.py",
         "migrate_database.py",
         "reconcile_with_akshare.py",
         "repair_turnover.py",
