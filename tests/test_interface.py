@@ -1,6 +1,7 @@
 """Tests for interface.py - ProviderFactory and Protocol interfaces."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import pandas as pd
@@ -296,6 +297,101 @@ def test_provider_factory_configure_smartmoney():
 
     engine = ProviderFactory.get_indicator_engine()
     assert engine is not None
+
+
+# ===========================================================================
+# ProviderFactory.configure locking / reset contract tests
+# ===========================================================================
+
+class _StubDBProvider:
+    """Lightweight stand-in for SmartMoneyDBProvider (avoids real DB IO in tests)."""
+
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path or ":memory:"
+
+
+class _StubLoaderProvider:
+    """Lightweight stand-in for SmartMoneyLoaderProvider."""
+
+    def __init__(self, use_cache: bool = True):
+        self.use_cache = use_cache
+
+
+class _StubIndicatorProvider:
+    """Lightweight stand-in for SmartMoneyIndicatorProvider."""
+
+
+def _patch_smartmoney_providers():
+    """Patch the providers module classes configure() instantiates, as a context manager."""
+    import providers
+
+    return (
+        patch.object(providers, "SmartMoneyDBProvider", _StubDBProvider),
+        patch.object(providers, "SmartMoneyLoaderProvider", _StubLoaderProvider),
+        patch.object(providers, "SmartMoneyIndicatorProvider", _StubIndicatorProvider),
+    )
+
+
+def test_provider_factory_reset_clears_configured_state():
+    # Given: factory configured with (patched, IO-free) smartmoney providers
+    db_patch, loader_patch, engine_patch = _patch_smartmoney_providers()
+    with db_patch, loader_patch, engine_patch:
+        ProviderFactory.configure(provider="smartmoney")
+        assert ProviderFactory.get_db() is not None
+
+        # When: reset() clears the configured state (test-only entry point)
+        ProviderFactory.reset()
+
+        # Then: all three slots are empty and getters fail closed
+        assert ProviderFactory._db_provider is None
+        assert ProviderFactory._loader_provider is None
+        assert ProviderFactory._indicator_provider is None
+        with pytest.raises(RuntimeError, match="Provider not configured"):
+            ProviderFactory.get_db()
+        with pytest.raises(RuntimeError, match="Provider not configured"):
+            ProviderFactory.get_loader()
+        with pytest.raises(RuntimeError, match="Provider not configured"):
+            ProviderFactory.get_indicator_engine()
+
+
+def test_provider_factory_reset_returns_to_unconfigured():
+    # Given: a factory that was never configured in this test
+    ProviderFactory.reset()
+
+    # When / Then: reset on an unconfigured factory is a safe no-op
+    ProviderFactory.reset()
+    assert ProviderFactory._db_provider is None
+    assert ProviderFactory._loader_provider is None
+    assert ProviderFactory._indicator_provider is None
+
+
+def test_provider_factory_concurrent_configure_stays_consistent():
+    # Contract test: many threads configure simultaneously; no exception escapes
+    # and the final state is a complete, coherent set of providers.
+    db_patch, loader_patch, engine_patch = _patch_smartmoney_providers()
+    with db_patch, loader_patch, engine_patch:
+        ProviderFactory._db_provider = None
+        ProviderFactory._loader_provider = None
+        ProviderFactory._indicator_provider = None
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [
+                    pool.submit(ProviderFactory.configure, provider="smartmoney")
+                    for _ in range(16)
+                ]
+                for future in futures:
+                    future.result(timeout=30)
+
+            db = ProviderFactory.get_db()
+            assert isinstance(db, _StubDBProvider)
+            assert isinstance(ProviderFactory.get_loader(), _StubLoaderProvider)
+            assert isinstance(ProviderFactory.get_indicator_engine(), _StubIndicatorProvider)
+            # 三个槽位来自同一次 configure：要么全都设置，要么全都未设置
+            assert ProviderFactory._db_provider is db
+        finally:
+            ProviderFactory._db_provider = None
+            ProviderFactory._loader_provider = None
+            ProviderFactory._indicator_provider = None
 
 
 def test_protocol_imports():
