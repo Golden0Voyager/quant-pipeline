@@ -387,6 +387,45 @@ class TestFetchKlineEm:
             assert "secid=0.000001" in str(call_kwargs["params"]) or \
                    call_kwargs["params"].get("secid") == "0.000001"
 
+    def test_failover_to_numbered_subdomain_on_error(self):
+        """首主机连接失败 → 下一次重试换编号子域名，成功即返回。
+
+        2026-08-01 push2 全端点 502 / 2026-09 本机 TUN 代理下 push2his
+        直连被重置：单主机重试只会撞同一堵墙。探测确认 21./29. 编号
+        子域名正常服务 kline API（push2hisdelay 返回 200 空载荷，不可用）。
+        """
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": {
+                "klines": [
+                    "2024-01-02,10.0,10.5,11.0,9.5,100000,1000000,2.0,5.0,0.5,3.0",
+                ]
+            }
+        }
+        with patch(
+            "core.stock_cyq_em.curl_get",
+            side_effect=[ConnectionError("reset"), mock_response],
+        ) as mock_get, patch("core.stock_cyq_em.time.sleep"):
+            result = _fetch_kline_em("000001")
+        assert result is not None and len(result) == 1
+        hosts = [c.args[0].split("/")[2] for c in mock_get.call_args_list]
+        assert hosts[0] == "push2his.eastmoney.com"
+        assert hosts[1] == "21.push2his.eastmoney.com"
+
+    def test_attempts_rotate_through_all_hosts(self):
+        """全部重试失败 → 三个主机各被试一次。"""
+        with patch(
+            "core.stock_cyq_em.curl_get",
+            side_effect=ConnectionError("down"),
+        ) as mock_get, patch("core.stock_cyq_em.time.sleep"):
+            assert _fetch_kline_em("000001") is None
+        hosts = [c.args[0].split("/")[2] for c in mock_get.call_args_list]
+        assert hosts == [
+            "push2his.eastmoney.com",
+            "21.push2his.eastmoney.com",
+            "29.push2his.eastmoney.com",
+        ]
+
 
 # ═══════════════════════════════════════════════════════════
 # 6. _fetch_kline_xueqiu
