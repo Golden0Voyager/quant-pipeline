@@ -238,3 +238,30 @@ if _REPO_ROOT not in sys.path:
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
 | P2-18 连续 `retained` 静默退化:`retained` 以 0 退出、只记 `warning`,而 `NOTIFICATION_LEVEL` 默认 `error` 恰好压掉它 → 任务连续多日「数据完全没更新」而整轮仍报「全部完成」 | P2 | ✅ 已修复 (PR #126):新增 `core/retained_streak.py` —— 同一任务**连续 3 个运行日**裁定均为 `retained` 即命中;一天只认最后一次**有结论**的运行(排除残留的 `status='running'` 父行)、按**上海运行日**聚合(`finished_at` 按 UTC 落库,UTC 16:00 后属上海次日)、没有运行的日子跳过而不打断、只报**仍在持续**的(恢复即清零,避免旧噪音天天重报)。刻意**不设豁免名单**:`known_gaps` 登记的是不可回补的历史空洞,连续 retained 是**正在发生、可修复**的退化,声明掉等于让它继续静默。`tasks/utility.py::health_check` 新增巡检段,命中进 `issues` → 本轮 `degraded` → `daily_pipeline` 收尾通知升为 **error 级**、退出码非 0(且 `ingestion_runs` 缺失时跳过并在报告里写明)。生产库验收(只读):改动前 `health_check` 对生产库返回 `success`/0 问题,改动后返回 `degraded` 且只命中 `update_concept_board`(连续 5 天 09-21~09-25;`update_fund_flow` 连续 3 天后已于 09-24 恢复故不报)。红证:还原 `tasks/utility.py` 会让 `tests/test_daily_pipeline.py::TestHealthCheck` 的 4 个新用例变红;去掉 `_run_day` 的时区折算 → 2 个用例红;把「只数最近连续段」改成「数全部 retained 日」→ 2 个用例红 |
 | P2-19 WAL 文件被单个巨型事务撑成**只涨不缩**的高水位线(生产库长期占着 2.39 GiB,而活跃日志只有 87 MB),且 `journal_size_limit` 不持久 → 上限必须每个写连接各设一次,内联写法散在 7 处 | P2 | ✅ 已修复 (PR #129):新增 `core/db_pragmas.py` 作为 WAL 与体积上限的**唯一出处**(`apply_write_pragmas` 默认 64 MiB、`QUANT_WAL_SIZE_LIMIT_MB` 可覆盖;`truncate_wal` 尽力而为、绝不抛异常),原 7 处内联写法全部收敛(`providers` ×2 / `core/migrations` / `scripts` ×3),`daily_pipeline` 收尾与 `scripts/reconcile_with_akshare.py` 收尾各回收一次。顺带修掉真缺陷:`scripts/backfill_historical_valuation.py` 此前**根本没有仓库根注入**(它只 import 第三方,还没 import 过仓库模块),接入后按 P2-16b 规则补上统一引导,并把该脚本纳入「外部 cwd 跑 `--help`」探针。生产库验收:`2.39 GiB → 0`(5.5 s,当时 TUI 与正在跑的 pipeline 都持有连接)、其后 `PRAGMA quick_check` = ok(289 s)、`page_count × page_size` 与文件字节精确一致、`freelist_count` = 0。红证:去掉 `journal_size_limit` → 3 个用例红;`providers._get_write_conn` 退回内联写法 → 2 个用例红(含「唯一出处」门禁);`daily_pipeline` 收尾去掉回收 → 1 个用例红(合计 6 个) |
+
+### 🔁 OCR 全量扫描分诊记录(2026-09-28,同工具重扫勿重复审理)
+
+全量 review(`ocr scan`)的分诊结论存档:**下次同工具重扫报出下列条目时,直接按本表结案,不重复审理**。
+编号 `OCR-N` 对应分诊清单第 N 条(源自另一次扫描,与上表 P 编号互不衔接)。
+
+**【已证误报,勿再报】**
+
+| 编号 | 条目 | 结论与依据 |
+|---|---|---|
+| OCR-1 | 「migrations 缺事务包装」 | ⛔ **已证误报**(分诊时已核实):`core/migrations.py` 的 `apply_pending` → `_apply_one` 用 `BEGIN IMMEDIATE` 包整个 migration,失败路径 `conn.rollback()`;`_TransactionalMigrationConnection` 禁止内部提交(`commit`/`rollback` 直接 raise `MigrationError`),SQL 侧再由 executescript 关键字拦截 `BEGIN`/`COMMIT`(「migration scripts must not control transactions」) |
+| OCR-2 | 「config.py 吞 KeyboardInterrupt」 | ⛔ **已证误报**:`core/config.py:82` 是 `except Exception:`,只接 Exception 体系——KeyboardInterrupt/SystemExit 属 BaseException,**抓不到**,原述与事实相反 |
+| OCR-3 | 「`_CALENDAR_FALLBACK_WARNED` 一次性告警」 | ⛔ **已证误报(设计有意)**:硬规则 #3 的配套——日历缓存不可用时退化周末逻辑只 WARNING 一次(单例防刷屏),**勿当 bug 修**。但该条目里「空 `trade_dates` 缓存被当有效」是真 bug,已在 **PR #150** 修复(空缓存判无效、与过期同等处理)——两者勿混淆 |
+
+**【不修决定,附理由】**
+
+| 编号 | 条目 | 处置与理由 |
+|---|---|---|
+| OCR-4 | eager f-string 日志(~40 处) | ⏸ **不修**:纯风格、行为零变化,改动面 20+ 文件收益微小。纪律改为:**改到哪个文件顺手改哪个,不开专项 PR** |
+| OCR-5 | SQL 标识符 f-string 插值 | ⏸ **不修**:现有调用方全部硬编码、本地 SQLite 无外部输入面;若未来出现外部输入,先加 `refresh_store._validate_identifier` 式白名单再改插值方式 |
+| OCR-6 | 「每文件 ≤400 行」 | ⏸ **不采纳**:目标武断,不设全仓行数硬顶;`providers.py` 的拆分走 mixin 分期计划的**第三批**,不以此条为门禁 |
+
+**【已修映射】**
+
+| 编号 | 条目 | 映射 |
+|---|---|---|
+| OCR-7 | 必修 3 项 + 低优先 6 项 | ✅ 必修 3 项 → **PR #150**(CI 加固 / 空日历缓存 / db_path 守卫);低优先 6 项 → **PR #151–#156**(retained 窗口过滤 / backfill 批查 / 边缘日期 no_data / natural_key 顺序 / ProviderFactory 锁 / netcheck 清理)。行为修复项均附 red-proof 并本机复现;无红证的项(PR #150 的 CI 配置项、#154 纯重构、#156 纯清理)按提交说明**如实标注无红证**,不虚称 |
