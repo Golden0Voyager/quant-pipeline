@@ -105,8 +105,12 @@ def update_indicators(
     logger.info("📊 任务: 计算技术指标")
     logger.info("=" * 60)
 
-    conn = sqlite3.connect(str(db.db_path))
-    cursor = conn.cursor()
+    # 仅在 db_path 为真实文件路径时打开连接；测试中的 mock db 直接跳过，
+    # 避免把 "None" / MagicMock repr 当成 SQLite 文件名在 cwd 生成垃圾文件
+    conn: sqlite3.Connection | None = None
+    if is_real_db_path(getattr(db, "db_path", None)):
+        conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor() if conn is not None else None
 
     if symbols_to_update is not None:
         symbols = symbols_to_update
@@ -114,7 +118,11 @@ def update_indicators(
     else:
         # 智能探测模式：只计算未计算过，或者有新行情数据的股票
         logger.info("🔍 智能探测需要更新指标的股票...")
-        cursor.execute("""
+        if cursor is None:
+            logger.warning("⚠️ db_path 非真实文件路径，无法智能探测，按无待更新处理")
+            symbols = []
+        else:
+            cursor.execute("""
             SELECT d.ts_code
             FROM (
                 SELECT ts_code, MAX(trade_date) as max_bar_date
@@ -130,10 +138,11 @@ def update_indicators(
             WHERE i.max_ind_date IS NULL OR d.max_bar_date > i.max_ind_date
             ORDER BY d.ts_code
         """)
-        symbols = [row[0] for row in cursor.fetchall()]
+            symbols = [row[0] for row in cursor.fetchall()]
         logger.info(f"💡 探测完成：共有 {len(symbols)} 只股票需要更新/计算指标")
 
-    conn.close()
+    if conn is not None:
+        conn.close()
 
     total = len(symbols)
     if total == 0:
@@ -529,15 +538,23 @@ def update_chip_distribution(
 
     import sqlite3
 
-    conn = sqlite3.connect(str(db.db_path))
-    cursor = conn.cursor()
+    # 仅在 db_path 为真实文件路径时打开连接；测试中的 mock db 直接跳过，
+    # 避免把 "None" / MagicMock repr 当成 SQLite 文件名在 cwd 生成垃圾文件
+    conn: sqlite3.Connection | None = None
+    if is_real_db_path(getattr(db, "db_path", None)):
+        conn = sqlite3.connect(str(db.db_path))
+    cursor = conn.cursor() if conn is not None else None
 
     if symbols_to_update is not None:
         symbols = symbols_to_update
         logger.info(f"指定模式: 计算 {len(symbols)} 只股票的筹码分布")
     else:
         logger.info("智能探测需要更新筹码分布的股票...")
-        cursor.execute("""
+        if cursor is None:
+            logger.warning("⚠️ db_path 非真实文件路径，无法智能探测，按无待更新处理")
+            symbols = []
+        else:
+            cursor.execute("""
             SELECT d.ts_code
             FROM (
                 SELECT ts_code, MAX(trade_date) as max_bar_date
@@ -553,10 +570,11 @@ def update_chip_distribution(
             WHERE c.max_chip_date IS NULL OR d.max_bar_date > c.max_chip_date
             ORDER BY d.ts_code
         """)
-        symbols = [row[0] for row in cursor.fetchall()]
+            symbols = [row[0] for row in cursor.fetchall()]
         logger.info(f"探测完成: 共有 {len(symbols)} 只股票需要更新筹码分布")
 
-    conn.close()
+    if conn is not None:
+        conn.close()
 
     total = len(symbols)
     if total == 0:
