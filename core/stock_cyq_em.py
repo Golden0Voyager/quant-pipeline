@@ -65,6 +65,16 @@ _RETRYABLE_EXCEPTIONS = (
     TimeoutError,
 )
 
+# EM 历史行情主机表（2026-09-28 实测：两个编号子域名均正常服务 kline API；
+# push2hisdelay 对该 API 返回 200 空载荷，不可作备用，故不入表）。
+# push2.eastmoney.com 全端点 502 事件（2026-08-01）同样可能波及 push2his ——
+# 单主机无 failover 会让筹码分布抓取整体失败，故每次重试轮换主机。
+_EM_KLINE_HOSTS = (
+    "push2his.eastmoney.com",
+    "21.push2his.eastmoney.com",
+    "29.push2his.eastmoney.com",
+)
+
 # 默认 DB 路径
 _DEFAULT_DB_PATH = Path.home() / "Code" / "quant_data" / "quant_core.db"
 
@@ -355,10 +365,9 @@ def _calc_one_day(kline: list[dict], index: int) -> dict:
 
 
 def _fetch_kline_em(symbol: str, adjust: str = "") -> list[dict] | None:
-    """通过 curl_cffi 从东方财富线上获取 K 线数据。"""
+    """通过 curl_cffi 从东方财富线上获取 K 线数据（多主机 failover）。"""
     adjust_dict = {"qfq": "1", "hfq": "2", "": "0"}
     market_code = 1 if symbol.startswith("6") else 0
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params: dict = {
         "secid": f"{market_code}.{symbol}",
         "fields1": "f1,f2,f3,f4,f5,f6",
@@ -369,6 +378,8 @@ def _fetch_kline_em(symbol: str, adjust: str = "") -> list[dict] | None:
         "lmt": "210",
     }
     for attempt in range(_RETRY_TIMES):
+        host = _EM_KLINE_HOSTS[attempt % len(_EM_KLINE_HOSTS)]
+        url = f"https://{host}/api/qt/stock/kline/get"
         try:
             r = curl_get(
                 url,
@@ -391,7 +402,7 @@ def _fetch_kline_em(symbol: str, adjust: str = "") -> list[dict] | None:
             break
         except _RETRYABLE_EXCEPTIONS:
             if attempt == _RETRY_TIMES - 1:
-                logger.debug("EM API 全部重试失败")
+                logger.debug("EM API 全部重试失败（含主机轮换）")
                 return None
             sleep_sec = min(
                 _RETRY_BASE_SLEEP * (2**attempt) * random.uniform(0.75, 1.25),
