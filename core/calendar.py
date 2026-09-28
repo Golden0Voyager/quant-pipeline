@@ -42,7 +42,11 @@ def _load_cached_calendar() -> list[str] | None:
         data = json.loads(CALENDAR_CACHE.read_text(encoding="utf-8"))
         cached_date = datetime.fromisoformat(data["cached_at"])
         if (datetime.now() - cached_date).days < CALENDAR_CACHE_DAYS:
-            return data["trade_dates"]
+            trade_dates = data["trade_dates"]
+            # 空列表不是有效缓存：一旦被判为「缓存命中」，
+            # is_trading_day 会把每个工作日都判为非交易日（d in [] 恒为 False）。
+            if isinstance(trade_dates, list) and trade_dates:
+                return trade_dates
     except (json.JSONDecodeError, KeyError, ValueError):
         pass
     return None
