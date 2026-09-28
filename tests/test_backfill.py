@@ -213,6 +213,63 @@ def test_table_has_rows_missing_table_is_not_treated_as_filled(conn):
         bare.close()
 
 
+# ── 幂等门批查：一次 SQL 取代逐 (表, 日) 轮询 ─────────────────────────
+
+
+class _CountingCursor(sqlite3.Cursor):
+    """统计 ``execute`` 调用次数的真实 cursor（sqlite3.Cursor 不可 monkeypatch）。"""
+
+    calls = 0
+
+    def execute(self, sql, parameters=(), /):
+        type(self).calls += 1
+        return super().execute(sql, parameters)
+
+
+def test_resolve_targets_probes_with_a_single_batch_query(conn):
+    """红证：旧实现逐 (表, 日) 轮询 = 表数 × 日数次 SELECT；批查后恰好 1 次。
+
+    还原 core/backfill.py 的批查实现（退回逐对 ``table_has_rows`` 轮询）会让
+    本用例变红：2 表 × 3 日 = 6 次 execute，而断言要求 1 次。
+    """
+    _CountingCursor.calls = 0
+    backfill.resolve_backfill_targets(
+        _CountingCursor(conn), "index_daily limit_up_down 2026-08-03 2026-08-04 2026-09-14"
+    )
+    assert _CountingCursor.calls == 1
+
+
+def test_resolve_targets_batch_result_matches_per_pair_polling(conn):
+    """批查的存在性判定与旧逐对轮询逐项等价：命中 (表, 日) → skipped，否则 → targets。"""
+    _fill(conn, "index_daily", "2026-08-03")
+    _fill(conn, "limit_up_down", "2026-09-14")
+    spec = "index_daily limit_up_down 2026-08-03 2026-08-04 2026-09-14"
+
+    plan = backfill.resolve_backfill_targets(conn.cursor(), spec)
+
+    expected_targets = []
+    expected_skipped = []
+    for day in ["2026-08-03", "2026-08-04", "2026-09-14"]:
+        for table in ["index_daily", "limit_up_down"]:
+            if backfill.table_has_rows(conn.cursor(), table, day):
+                expected_skipped.append(((table, day), "该表当日已有数据，无需回补"))
+            else:
+                expected_targets.append((table, day))
+    assert plan.targets == tuple(expected_targets)
+    assert plan.skipped == tuple(expected_skipped)
+
+
+def test_resolve_targets_falls_back_to_polling_when_a_table_is_missing():
+    """某张表不存在（OperationalError）→ 批查退回逐对轮询，该 (表, 日) 照旧进 targets。"""
+    bare = sqlite3.connect(":memory:")
+    try:
+        plan = backfill.resolve_backfill_targets(bare.cursor(), "index_daily 2026-08-03")
+    finally:
+        bare.close()
+    assert plan.targets == (("index_daily", "2026-08-03"),)
+    assert plan.skipped == ()
+
+
 # ── 分类覆盖门禁 ──────────────────────────────────────────────────────
 
 
