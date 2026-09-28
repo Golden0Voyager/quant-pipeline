@@ -1,6 +1,7 @@
 """Tests for core.netcheck - TCP-based offline detection."""
 from __future__ import annotations
 
+import logging
 import socket
 from unittest.mock import patch
 
@@ -70,11 +71,13 @@ def test_default_hosts_are_data_sources():
     assert all(port == 443 for _host, port in netcheck.DEFAULT_PROBE_HOSTS)
 
 
-def test_probe_failures_do_not_log():
+def test_probe_failures_do_not_log(caplog: pytest.LogCaptureFixture):
     """探测失败必须静默：不产生任何 error/warning 日志（入口预检的去噪要求）。"""
-    with patch.object(
-        socket, "create_connection", side_effect=OSError("offline")
-    ), patch("core.netcheck.logger") as mock_logger:
+    with (
+        patch.object(
+            socket, "create_connection", side_effect=OSError("offline")
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
         assert netcheck.is_online(hosts=[("a.example", 443)]) is False
-        mock_logger.error.assert_not_called()
-        mock_logger.warning.assert_not_called()
+    assert all(r.levelno < logging.WARNING for r in caplog.records)
