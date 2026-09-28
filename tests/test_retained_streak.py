@@ -1,11 +1,12 @@
 """连续「保留旧数据」检测的门禁。
 
 规则而非例举：只报**当前仍在持续**的退化、一天只认**最后一次有结论的裁决**、
-按**上海运行日**聚合、没有运行的日子跳过而不打断计数。
+按**上海运行日**聚合、没有运行的日子跳过而不打断计数、窗口外的历史记录不参与计数。
 """
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -254,6 +255,58 @@ def test_streaks_are_sorted_by_days_then_name(conn):
         ("update_also_bad", 3),
         ("update_bad", 3),
     ]
+
+
+# ── 时间窗口 ──────────────────────────────────────────────────────────
+
+
+def _stamp_days_ago(days: int) -> str:
+    """相对当前 UTC 时间的 ISO 时间戳（与 ``core.runner`` 落库格式一致）。"""
+    stamp = datetime.now(UTC) - timedelta(days=days)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+def test_records_outside_the_window_do_not_count(conn):
+    """窗口外的旧记录不参与连续计数。
+
+    红证：旧实现全表扫描 ``ingestion_runs``，把 40 天前的 retained 也聚合进来，
+    凑成「3 个运行日」误报；窗口过滤后只剩窗口内的 2 天，不足阈值。
+    """
+    _insert(conn, "update_x", "retained", _stamp_days_ago(40), "network")
+    _insert(conn, "update_x", "retained", _stamp_days_ago(2), "network")
+    _insert(conn, "update_x", "retained", _stamp_days_ago(1), "network")
+
+    assert retained_streaks(conn.cursor(), window_days=7) == []
+
+
+def test_window_boundary_records_still_count(conn):
+    """窗口内（含贴着窗口下界）的记录正常参与计数。"""
+    for days in (7, 6, 5):
+        _insert(conn, "update_x", "retained", _stamp_days_ago(days), "network")
+
+    streaks = retained_streaks(conn.cursor(), window_days=7)
+
+    assert len(streaks) == 1
+    assert streaks[0].days == 3
+
+
+def test_window_days_read_from_env_at_call_time(conn, monkeypatch):
+    """窗口默认取环境变量（调用时读，非导入期常量，见 P2-15）。"""
+    monkeypatch.setenv("QUANT_RETAINED_STREAK_WINDOW_DAYS", "7")
+    _insert(conn, "update_x", "retained", _stamp_days_ago(40), "network")
+    _insert(conn, "update_x", "retained", _stamp_days_ago(2), "network")
+    _insert(conn, "update_x", "retained", _stamp_days_ago(1), "network")
+
+    assert retained_streaks(conn.cursor()) == []
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-3", "3.5"])
+def test_window_env_must_be_a_positive_int(conn, monkeypatch, bad):
+    """窗口配置非法时 fail-closed（抛错），而不是静默退回一个假装可用的值。"""
+    monkeypatch.setenv("QUANT_RETAINED_STREAK_WINDOW_DAYS", bad)
+
+    with pytest.raises(ValueError, match="QUANT_RETAINED_STREAK_WINDOW_DAYS"):
+        retained_streaks(conn.cursor())
 
 
 # ── 告警文案 ──────────────────────────────────────────────────────────
