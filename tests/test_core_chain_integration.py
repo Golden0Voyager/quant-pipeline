@@ -21,6 +21,7 @@ from tasks.core_chain import (
     compute_chip_record_for_refresh,
     compute_indicator_record_for_refresh,
     update_chip_distribution,
+    update_indicators,
     update_stock_list,
 )
 
@@ -345,6 +346,66 @@ class TestUpdateChipDistribution:
             )
         assert r["total"] == 1
         assert r["success"] == 1
+
+
+# ===========================================================================
+# 非真实 db_path 守卫（red-proof：还原旧实现，下面的用例会创建名为
+# "None" 的 SQLite 垃圾文件 / 或直接抛 OperationalError）
+# ===========================================================================
+
+
+class TestNonRealDbPathGuards:
+    """mock db（db_path 非真实文件路径）不得创建 spurious SQLite 文件。"""
+
+    def test_update_indicators_explicit_symbols_with_mock_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """指定模式下连接本不会被使用；旧实现仍 connect(str(None)) 生成垃圾文件。"""
+        monkeypatch.chdir(tmp_path)
+        db = MagicMock()
+        db.db_path = None
+        db.get_daily_bars.return_value = pd.DataFrame()  # empty → insufficient
+        with patch("tasks.core_chain.logger"):
+            r = update_indicators(db, engine=MagicMock(), symbols_to_update=["000001.SZ"])
+        assert not (tmp_path / "None").exists()
+        assert r["total"] == 1
+        assert r["insufficient"] == 1
+
+    def test_update_indicators_probe_skipped_when_db_path_not_real(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """智能探测需要真实库；mock db 下按无待更新处理，而不是连上 "" 库后崩。"""
+        monkeypatch.chdir(tmp_path)
+        db = MagicMock()
+        db.db_path = None
+        with patch("tasks.core_chain.logger"):
+            r = update_indicators(db, engine=MagicMock(), symbols_to_update=None)
+        assert not (tmp_path / "None").exists()
+        assert r["total"] == 0
+
+    def test_update_chip_explicit_symbols_with_mock_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        db = MagicMock()
+        db.db_path = None
+        db.get_daily_bars.return_value = pd.DataFrame()  # empty → insufficient
+        with patch("tasks.core_chain.logger"):
+            r = update_chip_distribution(db, symbols_to_update=["000001"])
+        assert not (tmp_path / "None").exists()
+        assert r["total"] == 1
+        assert r["insufficient"] == 1
+
+    def test_update_chip_probe_skipped_when_db_path_not_real(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        db = MagicMock()
+        db.db_path = None
+        with patch("tasks.core_chain.logger"):
+            r = update_chip_distribution(db, symbols_to_update=None)
+        assert not (tmp_path / "None").exists()
+        assert r["total"] == 0
 
 
 # ===========================================================================

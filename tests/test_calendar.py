@@ -1,6 +1,7 @@
 """core.calendar 覆盖率测试：交易日判断与期望最新交易日计算。"""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -163,6 +164,30 @@ def test_load_calendar_covering_rejects_stale_cache(monkeypatch):
     assert cal._load_calendar_covering("2026-07-20") is None
     monkeypatch.setattr(cal, "_load_cached_calendar", lambda: None)
     assert cal._load_calendar_covering("2026-07-17") is None
+
+
+def test_load_cached_calendar_rejects_empty_trade_dates(monkeypatch, tmp_path):
+    """空 trade_dates 缓存必须判为无效：否则 is_trading_day 会把每个工作日都判为非交易日。"""
+    cache_file = tmp_path / "trading_calendar.json"
+    cache_file.write_text(
+        json.dumps({"cached_at": datetime.now().isoformat(), "trade_dates": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cal, "CALENDAR_CACHE", cache_file)
+    assert cal._load_cached_calendar() is None
+
+
+def test_is_trading_day_empty_cache_falls_back_to_fetch(monkeypatch, tmp_path):
+    """缓存文件存在但 trade_dates 为空 → 视为缓存缺失，走重新获取路径。"""
+    cache_file = tmp_path / "trading_calendar.json"
+    cache_file.write_text(
+        json.dumps({"cached_at": datetime.now().isoformat(), "trade_dates": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cal, "CALENDAR_CACHE", cache_file)
+    monkeypatch.setattr(cal, "_fetch_trading_calendar", lambda: ["2026-07-20"])
+    monkeypatch.setattr(cal, "_save_calendar_cache", lambda _dates: None)
+    assert cal.is_trading_day(date(2026, 7, 20)) is True
 
 
 def test_get_recent_trading_days_uses_calendar_and_skips_weekend():
