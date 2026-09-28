@@ -793,7 +793,7 @@ def test_keyed_upsert_updates_matches_and_keeps_unmentioned_rows(
             ("2026-07-27", "000001", "close"),
             ("2026-07-27", "600000", "new"),
         ),
-        natural_keys=("event_date", "stock_code"),
+        natural_keys=("stock_code", "event_date"),
         required_fields=("event_date", "stock_code", "detail"),
     )
 
@@ -815,7 +815,7 @@ def test_empty_keyed_upsert_requires_explicit_authorization(
         table="events",
         columns=("event_date", "stock_code", "detail"),
         rows=(),
-        natural_keys=("event_date", "stock_code"),
+        natural_keys=("stock_code", "event_date"),
         required_fields=("event_date", "stock_code", "detail"),
     )
     before = _rows(db_path, "SELECT * FROM events ORDER BY event_date, stock_code")
@@ -834,7 +834,7 @@ def test_explicit_empty_keyed_upsert_is_a_non_destructive_noop(
         table="events",
         columns=("event_date", "stock_code", "detail"),
         rows=(),
-        natural_keys=("event_date", "stock_code"),
+        natural_keys=("stock_code", "event_date"),
         required_fields=("event_date", "stock_code", "detail"),
         minimum_coverage=1.0,
         allow_empty=True,
