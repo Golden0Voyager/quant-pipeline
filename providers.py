@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -67,6 +68,8 @@ class SmartMoneyDBProvider:
         # 共享写连接 + 写锁：所有 batch 写入串行化，避免并发写导致 database is locked
         self._write_lock = threading.Lock()
         self._write_conn: sqlite3.Connection | None = None
+        # 批内主键去重的 PRAGMA 缓存（实例级：随库文件走，避免跨实例污染）
+        self._pk_cache: dict[str, tuple[str, ...] | None] = {}
 
     def _run_versioned_migrations(self) -> None:
         """Run the versioned migration system in-place.
@@ -122,6 +125,74 @@ class SmartMoneyDBProvider:
         """提交事务并返回本次事务产生的变更数。"""
         conn.commit()
         return conn.total_changes - before_changes
+
+    # ── 批内主键去重 ────────────────────────────────────────────
+    # INSERT OR REPLACE 撞批内重复主键时，每条重复都会各计一次
+    # total_changes（实测 SQLite 3.47：3 行批 2 个不同键 → delta=3、
+    # 表内 2 行）。「saved」虚高来自上游分页重叠/多端点合并产生的批内
+    # 重复；executemany 前按真实主键去重（后写优先），使 delta 等于
+    # 实际落表行数。
+    _INSERT_TARGET_RE = re.compile(
+        r"INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    def _table_pk_columns(self, conn: sqlite3.Connection, table: str) -> tuple[str, ...] | None:
+        """查表真实主键列（PRAGMA，小写；实例级缓存）。
+
+        缓存按实例隔离：PRAGMA 结果取决于连接指向的库文件，不同实例
+        （临时库/生产库/legacy 建表路径）同名表的 PK 可能不同，类级缓存
+        会被跨实例污染。
+
+        返回 None 表示表不存在；无显式主键（含 INTEGER rowid 表）返回空元组。
+        """
+        if table in self._pk_cache:
+            return self._pk_cache[table]
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not rows:
+            pk: tuple[str, ...] | None = None
+        else:
+            pk_cols = [r[1].lower() for r in sorted((r for r in rows if r[5]), key=lambda r: r[5])]
+            pk = tuple(pk_cols)
+        self._pk_cache[table] = pk
+        return pk
+
+    def _dedupe_rows_by_pk(
+        self,
+        conn: sqlite3.Connection,
+        sql: str,
+        rows: list[tuple[Any, ...]],
+    ) -> list[tuple[Any, ...]]:
+        """按 INSERT 目标表的真实主键对批内行去重（后写优先）。
+
+        仅当 INSERT 列覆盖表的全部主键列时才去重（否则主键由库端生成/默认，
+        批内可见列无法判定冲突，原样返回）。任何解析/查询异常都降级为不去重：
+        去重只是计数修正，绝不能成为写入失败的理由。
+        """
+        try:
+            m = self._INSERT_TARGET_RE.search(sql)
+            if not m:
+                return rows
+            table = m.group(1)
+            insert_cols = [c.strip().strip('"\'`').lower() for c in m.group(2).split(",")]
+            pk = self._table_pk_columns(conn, table)
+            if pk is None or not pk or not set(pk).issubset(insert_cols):
+                return rows
+            pk_idx = [insert_cols.index(c) for c in pk]
+            seen: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+            for row in rows:
+                seen[tuple(row[i] for i in pk_idx)] = row
+            return list(seen.values())
+        except Exception:
+            return rows
+
+    def _executemany_dedup(
+        self,
+        conn: sqlite3.Connection,
+        sql: str,
+        rows: list[tuple[Any, ...]],
+    ) -> None:
+        """批内主键去重后 executemany（所有 INSERT OR REPLACE 批量写入口）。"""
+        conn.executemany(sql, self._dedupe_rows_by_pk(conn, sql, rows))
 
     def _ensure_wal_mode(self) -> None:
         """启用 WAL 模式以提升并发读写性能。"""
@@ -797,7 +868,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO indicators (
                         ts_code, trade_date, close, volume,
@@ -889,7 +961,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO dragon_tiger
                         (source_record_key, ts_code, trade_date, close_price,
@@ -1060,7 +1133,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO block_trade
                         (source_record_key, ts_code, trade_date, deal_price,
@@ -1110,7 +1184,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO placement_announcements
                         (source_record_key, ts_code, symbol, name,
@@ -1173,7 +1248,8 @@ class SmartMoneyDBProvider:
         with self._write_lock:
             conn = self._get_write_conn()
             before_changes = conn.total_changes
-            conn.executemany(
+            self._executemany_dedup(
+            conn,
                 """
                 INSERT OR REPLACE INTO historical_valuation (
                     ts_code, trade_date, pe_ttm, pb, ps_ttm, dividend_yield
@@ -1235,7 +1311,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO us_macro_daily (
                         trade_date, effr, dgs2, dgs3mo, dgs10, t10yie, icsa,
@@ -1280,7 +1357,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO hk_tech_index_daily (
                         trade_date, open, high, low, close, change_pct,
@@ -1320,7 +1398,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO stock_comment (
                         trade_date, code, name, close_price, change_pct,
@@ -1367,7 +1446,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO stock_hot_rank (
                         trade_date, code, name, rank, rank_change, prev_rank,
@@ -1419,7 +1499,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO cftc_cot_weekly (
                         trade_date, market, instrument,
@@ -1472,7 +1553,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO eia_petroleum_weekly (
                         week_date, series_id, series_name, value, units, data_source
@@ -1523,7 +1605,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO lithium_spot_daily (
                         spot_date, spot_price, near_contract, near_contract_price,
@@ -1595,7 +1678,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO chip_distribution (
                         ts_code, trade_date, profit_ratio, avg_cost,
@@ -1635,7 +1719,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO chip_distribution_em (
                         ts_code, trade_date, profit_ratio, avg_cost,
@@ -1675,7 +1760,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO macro_monthly (
                         date, cpi_yoy, cpi_mom, cpi_core_yoy,
@@ -1747,7 +1833,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO macro_quarterly (date, gdp, gdp_yoy, gdp_qoq, gdp_primary, gdp_secondary, gdp_tertiary, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r["date"], r.get("gdp"), r.get("gdp_yoy"), r.get("gdp_qoq"), r.get("gdp_primary"), r.get("gdp_secondary"), r.get("gdp_tertiary"), r.get("data_date"))
@@ -1768,7 +1855,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO money_market (date, shibor_on, shibor_1w, shibor_2w, shibor_1m, shibor_3m, shibor_6m, shibor_9m, shibor_1y, fr001, fr007, fr014, pboc_policy_rate, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r["date"], r.get("shibor_on"), r.get("shibor_1w"), r.get("shibor_2w"), r.get("shibor_1m"), r.get("shibor_3m"), r.get("shibor_6m"), r.get("shibor_9m"), r.get("shibor_1y"), r.get("fr001"), r.get("fr007"), r.get("fr014"), r.get("pboc_policy_rate"), r.get("data_date"))
@@ -1789,7 +1877,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO central_bank_balance (date, total_assets, reserve_money, currency_issue, claims_on_other_deposit, claims_on_gov, gov_deposits, foreign_assets, fx_reserve, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r["date"], r.get("total_assets"), r.get("reserve_money"), r.get("currency_issue"), r.get("claims_on_other_deposit"), r.get("claims_on_gov"), r.get("gov_deposits"), r.get("foreign_assets"), r.get("fx_reserve"), r.get("data_date"))
@@ -1810,7 +1899,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO market_valuation (date, pe_median, pe_quantile, pe_lyr_median, pb_median, pb_quantile, equity_bond_spread, ebs_ma, csi300_close, data_source, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r["date"], r.get("pe_median"), r.get("pe_quantile"), r.get("pe_lyr_median"), r.get("pb_median"), r.get("pb_quantile"), r.get("equity_bond_spread"), r.get("ebs_ma"), r.get("csi300_close"), r.get("data_source", "legu"), r.get("data_date"))
@@ -1831,7 +1921,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO market_breadth (date, close, high20, low20, high60, low60, high120, low120, below_net_asset, total_company, below_net_asset_ratio, up_count, down_count, flat_count, limit_up, limit_down, real_limit_up, real_limit_down, st_limit_up, st_limit_down, suspended, activity_ratio, data_source, data_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
@@ -1877,7 +1968,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO concept_board (trade_date, concept_code, concept_name, pct_change, turnover, up_count, down_count, data_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r.get("trade_date"), r.get("concept_code"), r.get("concept_name"), r.get("pct_change"), r.get("turnover"), r.get("up_count"), r.get("down_count"), r.get("data_source", "ths"))
@@ -1898,7 +1990,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO concept_member (concept_code, concept_name, ts_code) VALUES (?, ?, ?)",
                     [
                         (r.get("concept_code"), r.get("concept_name"), r.get("ts_code"))
@@ -1934,7 +2027,8 @@ class SmartMoneyDBProvider:
                         (valid_to, valid_from),
                     )
                     # insert new snapshot (upsert on PK, idempotent for same-day reruns)
-                    conn.executemany(
+                    self._executemany_dedup(
+                    conn,
                         """INSERT INTO concept_member_history
                            (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
                            VALUES (?, ?, ?, ?, NULL, ?, ?)
@@ -1980,7 +2074,8 @@ class SmartMoneyDBProvider:
                         (valid_to, valid_from),
                     )
                     # insert new snapshot (upsert on PK, idempotent for same-day reruns)
-                    conn.executemany(
+                    self._executemany_dedup(
+                    conn,
                         """INSERT INTO index_member_history
                            (index_code, index_name, ts_code, weight, valid_from, valid_to, source, snapshot_run_id)
                            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
@@ -2012,7 +2107,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO south_flow (
                         trade_date, market, net_buy_amount, buy_amount, sell_amount,
@@ -2046,7 +2142,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO ah_premium (
                         trade_date, ts_code, h_code, name, a_price, h_price,
@@ -2082,7 +2179,8 @@ class SmartMoneyDBProvider:
             conn = self._get_write_conn()
             try:
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO cb_quotation (
                         ts_code, bond_name, price, premium,
@@ -2110,7 +2208,8 @@ class SmartMoneyDBProvider:
                     try:
                         conn.execute("ALTER TABLE cb_quotation ADD COLUMN updated_at DATETIME")
                         before_changes = conn.total_changes
-                        conn.executemany(
+                        self._executemany_dedup(
+                        conn,
                             "INSERT OR REPLACE INTO cb_quotation (ts_code, bond_name, price, premium, double_low, expire_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                             [(r["ts_code"], r.get("bond_name"), r.get("price"), r.get("premium"), r.get("double_low"), r.get("expire_date"), r.get("data_source"), now) for r in records],
                         )
@@ -2132,7 +2231,8 @@ class SmartMoneyDBProvider:
             conn = self._get_write_conn()
             try:
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO cb_redeem (
                         ts_code, bond_name, redeem_flag,
@@ -2159,7 +2259,8 @@ class SmartMoneyDBProvider:
                     try:
                         conn.execute("ALTER TABLE cb_redeem ADD COLUMN updated_at DATETIME")
                         before_changes = conn.total_changes
-                        conn.executemany(
+                        self._executemany_dedup(
+                        conn,
                             "INSERT OR REPLACE INTO cb_redeem (ts_code, bond_name, redeem_flag, redeem_price, redeem_date, data_source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             [(r["ts_code"], r.get("bond_name"), r.get("redeem_flag"), r.get("redeem_price"), r.get("redeem_date"), r.get("data_source"), now) for r in records],
                         )
@@ -2180,7 +2281,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO cb_index (
                         trade_date, index_code, index_name,
@@ -2216,7 +2318,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO etf_daily (
                         ts_code, name, trade_date, open, high, low, close,
@@ -2253,7 +2356,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO restricted_share (
                         ts_code, name, release_date, actual_release,
@@ -2287,7 +2391,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO earnings_forecast (
                         ts_code, name, end_date, forecast_type,
@@ -2321,7 +2426,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO sector_daily (
                         sector_name, trade_date,
@@ -2358,7 +2464,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO sector_valuation (
                         sector_name, trade_date, pe, pb, total_mv, data_source
@@ -2390,7 +2497,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT OR REPLACE INTO index_futures_basis (
                         trade_date, futures_code, futures_price, index_price,
@@ -2430,7 +2538,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     "INSERT OR REPLACE INTO option_sentiment (trade_date, qvix, pcr, put_volume, call_volume, put_oi, call_oi, implied_vol_avg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (r.get("trade_date"), r.get("qvix"), r.get("pcr"),
@@ -2455,7 +2564,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO stock_repurchase
                         (source_record_key, trade_date, stock_code, stock_name,
@@ -2489,7 +2599,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO institution_survey
                         (source_record_key, trade_date, stock_code, stock_name,
@@ -2519,7 +2630,8 @@ class SmartMoneyDBProvider:
             with self._write_lock:
                 conn = self._get_write_conn()
                 before_changes = conn.total_changes
-                conn.executemany(
+                self._executemany_dedup(
+                conn,
                     """
                     INSERT INTO stock_pledge
                         (source_record_key, trade_date, stock_code, stock_name,

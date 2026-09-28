@@ -1289,3 +1289,94 @@ class TestLoaderAndIndicator:
         p = SmartMoneyIndicatorProvider()
         result = p.calculate_all_indicators(__import__("pandas").DataFrame({"close": [10.0, 11.0]}))
         assert result is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 批内主键去重（saved == 实际落表行数）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBatchDedupe:
+    """INSERT OR REPLACE 批内重复主键：去重后 saved 等于表内实际行数。
+
+    背景：executemany 撞批内重复主键时每条重复各计一次 total_changes
+    （实测 SQLite 3.47：3 行批 2 个不同键 → delta=3、表内 2 行）。上游
+    分页重叠/多端点合并会产生这种批次，导致「saved」虚高。
+    """
+
+    def test_market_valuation_dedupes_in_batch(self, provider):
+        """同 date 三行（一 fresh + 两重复）→ 返回 2，表内 2 行，后写优先。"""
+        records = [
+            {"date": "2026-09-01", "pe_median": 10.0, "data_source": "legu"},
+            {"date": "2026-09-01", "pe_median": 11.0, "data_source": "legu"},
+            {"date": "2026-09-02", "pe_median": 12.0, "data_source": "legu"},
+        ]
+        saved = provider.save_market_valuation_batch(records)
+        assert saved == 2
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                "SELECT date, pe_median FROM market_valuation ORDER BY date"
+            ).fetchall()
+        assert rows == [("2026-09-01", 11.0), ("2026-09-02", 12.0)]
+
+    def test_option_sentiment_dedupes_in_batch(self, provider):
+        """复合场景同上，option_sentiment（trade_date 单列 PK）。"""
+        records = [
+            {"trade_date": "2026-09-01", "qvix": 20.0},
+            {"trade_date": "2026-09-01", "qvix": 21.0},
+        ]
+        saved = provider.save_option_sentiment_batch(records)
+        assert saved == 1
+        with sqlite3.connect(provider.db_path) as conn:
+            rows = conn.execute(
+                "SELECT trade_date, qvix FROM option_sentiment"
+            ).fetchall()
+        assert rows == [("2026-09-01", 21.0)]
+
+    def test_unique_batch_returns_full_count(self, provider):
+        """无重复批次行为不变：返回数 == 行数（回归）。"""
+        records = [
+            {"date": f"2026-09-0{i}", "pe_median": float(i), "data_source": "legu"}
+            for i in range(1, 4)
+        ]
+        assert provider.save_market_valuation_batch(records) == 3
+
+    def test_dedupe_helper_skips_id_pk_table(self, provider):
+        """INSERT 列不含自增 id → 主键库端生成，helper 必须原样透传。"""
+        rows = [("2026-09-01", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, "x")]
+        out = provider._dedupe_rows_by_pk(
+            provider._get_write_conn(),
+            "INSERT OR REPLACE INTO hk_tech_index_daily (trade_date, open, high, low, close, change_pct, volume, data_source) VALUES (?,?,?,?,?,?,?,?)",
+            rows * 2,
+        )
+        assert out == rows * 2
+
+    def test_dedupe_helper_missing_table_passthrough(self, provider):
+        """表不存在 → 降级透传，绝不因去重检查而失败。"""
+        rows = [("a", 1)]
+        out = provider._dedupe_rows_by_pk(
+            provider._get_write_conn(),
+            "INSERT OR REPLACE INTO no_such_table (k, v) VALUES (?, ?)",
+            rows,
+        )
+        assert out == rows
+
+    def test_dedupe_helper_ignores_non_pk_insert(self, provider):
+        """INSERT 列未覆盖全部主键列 → 原样透传（无法判定冲突）。"""
+        rows = [("2026-09-01", 20.0)]
+        out = provider._dedupe_rows_by_pk(
+            provider._get_write_conn(),
+            "INSERT OR REPLACE INTO option_sentiment (trade_date) VALUES (?)",
+            rows,
+        )
+        assert out == rows
+
+    def test_pk_lookup_caches_per_table(self, provider):
+        """PRAGMA 主键查询按表缓存（第二次不再打库）。"""
+        conn = provider._get_write_conn()
+        assert provider._table_pk_columns(conn, "market_valuation") == ("date",)
+        with patch.object(
+            provider, "_table_pk_columns", wraps=provider._table_pk_columns
+        ) as spy:
+            assert provider._table_pk_columns(conn, "market_valuation") == ("date",)
+            assert spy.call_count == 1
