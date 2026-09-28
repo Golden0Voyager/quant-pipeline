@@ -464,7 +464,7 @@ class FundFlowRefreshAdapter:
                     rows=_as_store_rows(rows, _FUND_FLOW_COLUMNS),
                     date_column="trade_date",
                     date_value=target,
-                    natural_keys=("trade_date", "ts_code"),
+                    natural_keys=("ts_code", "trade_date"),
                     minimum_coverage=self.minimum_coverage,
                 )
             )
@@ -1011,7 +1011,7 @@ class MarginTradingRefreshAdapter:
                     table="margin_trading",
                     columns=_MARGIN_COLUMNS,
                     rows=_as_store_rows(rows, _MARGIN_COLUMNS),
-                    natural_keys=("trade_date", "ts_code"),
+                    natural_keys=("ts_code", "trade_date"),
                 )
             )
         else:
@@ -1022,7 +1022,7 @@ class MarginTradingRefreshAdapter:
                     rows=_as_store_rows(rows, _MARGIN_COLUMNS),
                     date_column="trade_date",
                     date_value=as_of,
-                    natural_keys=("trade_date", "ts_code"),
+                    natural_keys=("ts_code", "trade_date"),
                     minimum_coverage=self.minimum_coverage,
                 )
             )
@@ -1093,7 +1093,7 @@ class SouthFlowRefreshAdapter:
                 rows=_as_store_rows(rows, _SOUTH_FLOW_COLUMNS),
                 date_column="trade_date",
                 date_value=as_of,
-                natural_keys=("trade_date", "market"),
+                natural_keys=("market", "trade_date"),
                 minimum_coverage=self.minimum_coverage,
             )
         )
@@ -1187,7 +1187,7 @@ class IndexDailyRefreshAdapter:
                 rows=_as_store_rows(rows, _INDEX_DAILY_COLUMNS),
                 date_column="trade_date",
                 date_value=as_of,
-                natural_keys=("trade_date", "index_code"),
+                natural_keys=("index_code", "trade_date"),
                 required_fields=("close",),
                 minimum_coverage=self.minimum_coverage,
             )
@@ -1331,7 +1331,7 @@ class CbIndexRefreshAdapter:
                 rows=_as_store_rows(rows, _CB_INDEX_COLUMNS),
                 date_column="trade_date",
                 date_value=as_of,
-                natural_keys=("trade_date", "index_code"),
+                natural_keys=("index_code", "trade_date"),
                 required_fields=("close",),
                 minimum_coverage=self.minimum_coverage,
             )
@@ -1661,7 +1661,7 @@ class LimitUpDownRefreshAdapter:
                 rows=_as_store_rows(rows, _LIMIT_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "ts_code"),
+                natural_keys=("ts_code", "trade_date"),
                 allow_empty=not rows,
             )
         )
@@ -1959,7 +1959,7 @@ class SectorFundFlowRefreshAdapter:
                 rows=_as_store_rows(rows, _SECTOR_FUND_FLOW_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "sector_name"),
+                natural_keys=("sector_name", "trade_date"),
                 required_fields=("sector_name",),
             )
         )
@@ -2023,7 +2023,7 @@ class AhPremiumRefreshAdapter:
                 rows=_as_store_rows(rows, _AH_PREMIUM_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "ts_code"),
+                natural_keys=("ts_code", "trade_date"),
                 required_fields=("ts_code",),
             )
         )
@@ -2087,7 +2087,7 @@ class ConceptBoardRefreshAdapter:
                 rows=_as_store_rows(rows, _CONCEPT_BOARD_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "concept_code"),
+                natural_keys=("concept_code", "trade_date"),
                 required_fields=("concept_code",),
             )
         )
@@ -2157,7 +2157,7 @@ class StockCommentRefreshAdapter:
                 rows=_as_store_rows(rows, _STOCK_COMMENT_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "code"),
+                natural_keys=("code", "trade_date"),
                 required_fields=("code",),
             )
         )
@@ -2218,7 +2218,7 @@ class HotRankRefreshAdapter:
                 rows=_as_store_rows(rows, _STOCK_HOT_RANK_COLUMNS),
                 date_column="trade_date",
                 date_value=target,
-                natural_keys=("trade_date", "code"),
+                natural_keys=("code", "trade_date"),
                 required_fields=("code", "rank"),
             )
         )
@@ -2574,7 +2574,7 @@ class SectorDerivativesRefreshAdapter:
                     rows=_as_store_rows(basis_rows, _INDEX_FUTURES_BASIS_COLUMNS),
                     date_column="trade_date",
                     date_value=target,
-                    natural_keys=("trade_date", "futures_code"),
+                    natural_keys=("futures_code", "trade_date"),
                     required_fields=("basis",),
                 ),
             ))

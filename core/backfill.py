@@ -237,6 +237,43 @@ def table_has_rows(cursor: sqlite3.Cursor, table: str, day: str) -> bool | None:
     return row is not None
 
 
+# 批查的参数预算：一次 execute 里全部 UNION ALL 片段共用的绑定参数上限。
+# SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER = 999，按 500 留足余量；超出才按日期分块
+# （多轮 execute）。现实规模（4 张回补表 × 登记册缺失日）总是恰好 1 次。
+_PROBE_PARAM_BUDGET = 500
+
+
+def _probe_existing_pairs(
+    cursor: sqlite3.Cursor,
+    tables: list[str],
+    days: list[str],
+    column_by_table: dict[str, str],
+) -> set[tuple[str, str]] | None:
+    """一次批查全部 (表, 日) 组合里哪些已有行（UNION ALL + IN，逐表一段）。
+
+    返回已有行的 ``(表, 日)`` 集合；任一张表不存在（``OperationalError``）时返回
+    ``None`` 表示「无法批查」，调用方退回逐对 ``table_has_rows`` 轮询——与旧实现的
+    语义逐位等价（表不存在 = 无法判定 = 不当成已有行）。
+    """
+    found: set[tuple[str, str]] = set()
+    per_chunk = max(1, _PROBE_PARAM_BUDGET // len(tables))
+    for start in range(0, len(days), per_chunk):
+        chunk = days[start : start + per_chunk]
+        placeholders = ", ".join("?" for _ in chunk)
+        query = " UNION ALL ".join(
+            f"SELECT '{table}' AS table_name, {column_by_table[table]} AS trade_date "
+            f"FROM {table} WHERE {column_by_table[table]} IN ({placeholders})"
+            for table in tables
+        )
+        params = [day for _ in tables for day in chunk]
+        try:
+            rows = cursor.execute(query, params).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        found.update((row[0], row[1]) for row in rows)
+    return found
+
+
 def resolve_backfill_targets(
     cursor: sqlite3.Cursor,
     spec: str | None,
@@ -251,7 +288,8 @@ def resolve_backfill_targets(
     * 什么都没给（裸旗标）→ 全部可回补表 × 登记册缺失日。
 
     日期来源自动判定：给了日期 = explicit，没给 = declared。幂等门在
-    **(表, 日)** 粒度：该表当日已有行就跳过（表不存在时视为仍然缺失，照样尝试）。
+    **(表, 日)** 粒度：该表当日已有行就跳过。存在性判定一次批查完成；
+    表不存在（无法判定）时退回逐对轮询、视为仍然缺失，照样尝试回补。
     """
     tasks_by_table = backfill_task_by_table()
     all_tables = tuple(tasks_by_table)
@@ -288,11 +326,27 @@ def resolve_backfill_targets(
     if not tables:
         tables = list(all_tables)
 
+    column_by_table: dict[str, str] = {}
+    for table in tables:
+        column = date_column(table)
+        if column is None:
+            raise ValueError(f"未知回补表：{table}")
+        column_by_table[table] = column
+
+    existing = _probe_existing_pairs(cursor, tables, days, column_by_table)
+    if existing is None:
+        # 批查失败（某张表不存在等）：退回逐对轮询，语义与旧实现一致。
+        existing = {
+            (table, day)
+            for day in days
+            for table in tables
+            if table_has_rows(cursor, table, day)
+        }
+
     targets: list[tuple[str, str]] = []
     for day in days:
         for table in tables:
-            has_rows = table_has_rows(cursor, table, day)
-            if has_rows:
+            if (table, day) in existing:
                 skipped.append(((table, day), "该表当日已有数据，无需回补"))
             else:
                 targets.append((table, day))
