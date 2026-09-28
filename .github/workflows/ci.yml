@@ -6,9 +6,19 @@ on:
   pull_request:
     branches: [main]
 
+# 同一分支上的新推送取消还在跑的旧 CI，避免排队浪费 runner。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: ubuntu-latest
+    # 全量套件（含 TUI e2e）约 12 分钟；挂死时 30 分钟兜底，不让 runner 空转。
+    timeout-minutes: 30
+    # 最小权限：本工作流只读代码、发 PR 状态，默认 GITHUB_TOKEN 降为只读。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
