@@ -317,7 +317,7 @@ class CompositeSectorAdapter:
                         rows=((target, "IF2608", self.basis_value),),
                         date_column="trade_date",
                         date_value=target,
-                        natural_keys=("trade_date", "futures_code"),
+                        natural_keys=("futures_code", "trade_date"),
                         required_fields=("basis",),
                     ),
                 )

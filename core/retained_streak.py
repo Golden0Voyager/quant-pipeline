@@ -41,15 +41,22 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from core.market_time import SHANGHAI
 
 # 阈值取 3：单次 retained 正常（网络重试已吸收一次瞬断），2 次仍可能是连续两次源端
 # 抖动；连续 3 个运行日说明这个任务已连续三天没产出任何数据。
 RETAINED_STREAK_THRESHOLD = 3
+
+# 连续计数只看最近这么多个自然日的审计记录：ingestion_runs 只增不减，全表扫描既慢又让
+# 窗口外的历史残留（如已恢复的 old streak 尾巴）参与聚合。默认 30 显著大于阈值 3。
+# 注意：环境变量必须在**调用时**读取（P2-15 的教训），不能做成导入期模块常量。
+DEFAULT_WINDOW_DAYS = 30
+_WINDOW_ENV_VAR = "QUANT_RETAINED_STREAK_WINDOW_DAYS"
 
 
 @dataclass(frozen=True)
@@ -105,8 +112,40 @@ def _run_day(finished_at: object) -> str | None:
     return stamp.astimezone(SHANGHAI).strftime("%Y-%m-%d")
 
 
+def _resolve_window_days(explicit: int | None) -> int:
+    """窗口天数：显式参数优先，否则调用时读环境变量（非法值 fail-closed）。"""
+    if explicit is not None:
+        days = explicit
+    else:
+        raw = os.environ.get(_WINDOW_ENV_VAR)
+        if raw is None:
+            days = DEFAULT_WINDOW_DAYS
+        else:
+            try:
+                days = int(raw)
+            except ValueError:
+                raise ValueError(
+                    f"{_WINDOW_ENV_VAR} 必须是正整数，得到 {raw!r}"
+                ) from None
+    if days < 1:
+        source = "window_days" if explicit is not None else _WINDOW_ENV_VAR
+        raise ValueError(f"{source} 必须 >= 1，得到 {days}")
+    return days
+
+
+def _window_cutoff(window_days: int) -> str:
+    """窗口下界（UTC ISO 字符串，秒精度）。
+
+    ``finished_at`` 按 UTC 落库（``core.runner`` 用 ``datetime.now(UTC).isoformat``），
+    同格式字符串按字典序即按时间序，SQL 里直接做字符串比较。
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
+    return cutoff.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
 def _latest_verdict_per_day(
     cursor: sqlite3.Cursor,
+    window_days: int,
 ) -> dict[str, dict[str, tuple[str, str | None]]]:
     """``{task_name: {运行日: (status, error_kind)}}``，每天只留最后一次裁定。
 
@@ -114,10 +153,14 @@ def _latest_verdict_per_day(
     ``run_id`` 覆盖）。残留的 running 行**不带结论**，若拿它当「当天最后状态」，一个
     崩溃日就会被误判成「非 retained」而打断计数。这里显式排除它，让每天的裁定来自
     最后一次**有结论**的运行。
+
+    只取 ``finished_at`` 落在窗口内的行：``ingestion_runs`` 只增不减，全表扫描既慢
+    又让窗口外早已无关的历史记录参与连续计数。
     """
     rows = cursor.execute(
         "SELECT task_name, status, finished_at, error_kind FROM ingestion_runs "
-        "WHERE status != 'running' ORDER BY finished_at"
+        "WHERE status != 'running' AND finished_at >= ? ORDER BY finished_at",
+        (_window_cutoff(window_days),),
     ).fetchall()
 
     per_task: dict[str, dict[str, tuple[str, str | None]]] = {}
@@ -139,6 +182,7 @@ def retained_streaks(
     cursor: sqlite3.Cursor,
     *,
     threshold: int = RETAINED_STREAK_THRESHOLD,
+    window_days: int | None = None,
 ) -> list[RetainedStreak]:
     """返回**仍在持续中**的连续 retained 退化，按天数降序、任务名升序。
 
@@ -147,14 +191,21 @@ def retained_streaks(
     处理的告警正是这个机理）。因此从最近的运行日往回数，遇到第一个非 retained 的裁定
     即停止，不足 *threshold* 的一律不报。
 
+    连续计数只看最近 *window_days* 个自然日的审计记录（默认
+    ``DEFAULT_WINDOW_DAYS``，可用环境变量 ``QUANT_RETAINED_STREAK_WINDOW_DAYS``
+    覆盖，**调用时读取**；显式传参优先于环境变量）。窗口只需显著大于 *threshold*：
+    本检测只关心「最近的连续段」，更老的历史既不影响仍在持续的判定，也不该让
+    ``ingestion_runs`` 的全表扫描越来越慢。
+
     ``ingestion_runs`` 表不存在时由 ``sqlite3`` 抛 ``OperationalError``，由调用方决定
     是跳过还是失败（``health_check`` 记一行「跳过」并在报告里说明）。
     """
     if threshold < 1:
         raise ValueError("threshold 必须 >= 1")
+    days = _resolve_window_days(window_days)
 
     streaks: list[RetainedStreak] = []
-    for task_name, by_day in _latest_verdict_per_day(cursor).items():
+    for task_name, by_day in _latest_verdict_per_day(cursor, days).items():
         # 日期字符串按字典序即按时间序；倒序 = 从最新的一天往回数。
         kept: list[tuple[str, str | None]] = []
         for day, (status, error_kind) in sorted(by_day.items(), reverse=True):

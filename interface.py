@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Protocol
 
 import pandas as pd
@@ -570,6 +571,9 @@ class ProviderFactory:
     _db_provider: DatabaseInterface | None = None
     _loader_provider: DataLoaderInterface | None = None
     _indicator_provider: IndicatorEngineInterface | None = None
+    # 保护三个槽位的读改写（configure 的三连赋值、reset 的清空）。
+    # 单锁、无嵌套获取：provider 构造（含 DB IO）在锁外完成，锁内只做引用赋值。
+    _lock = threading.Lock()
 
     @classmethod
     def configure(
@@ -578,18 +582,34 @@ class ProviderFactory:
         provider: str = "smartmoney",
     ) -> None:
         """配置全局 provider。"""
-        if provider == "smartmoney":
-            from providers import (
-                SmartMoneyDBProvider,
-                SmartMoneyIndicatorProvider,
-                SmartMoneyLoaderProvider,
-            )
-            cls._db_provider = SmartMoneyDBProvider(db_path=db_path)
-            cls._loader_provider = SmartMoneyLoaderProvider()
-            cls._indicator_provider = SmartMoneyIndicatorProvider()
-            logger.info("🛡️ AkShare 防限流监控已注入")
-        else:
+        if provider != "smartmoney":
             raise ValueError(f"Unknown provider: {provider}")
+        from providers import (
+            SmartMoneyDBProvider,
+            SmartMoneyIndicatorProvider,
+            SmartMoneyLoaderProvider,
+        )
+        # 构造含 DB IO，放在锁外；临界区只覆盖三个槽位的成组赋值
+        db = SmartMoneyDBProvider(db_path=db_path)
+        loader = SmartMoneyLoaderProvider()
+        engine = SmartMoneyIndicatorProvider()
+        with cls._lock:
+            cls._db_provider = db
+            cls._loader_provider = loader
+            cls._indicator_provider = engine
+        logger.info("🛡️ AkShare 防限流监控已注入")
+
+    @classmethod
+    def reset(cls) -> None:
+        """清空已配置状态，使工厂回到未配置。
+
+        仅供测试隔离使用：生产路径（daily_pipeline / core.context）
+        在进程启动时 configure 一次，不得调用本方法。
+        """
+        with cls._lock:
+            cls._db_provider = None
+            cls._loader_provider = None
+            cls._indicator_provider = None
 
     @classmethod
     def get_db(cls) -> DatabaseInterface:
