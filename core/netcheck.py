@@ -12,11 +12,8 @@
 """
 from __future__ import annotations
 
-import logging
 import socket
 from collections.abc import Iterable
-
-logger = logging.getLogger(__name__)
 
 # 默认探测目标：东财 / 新浪 / 腾讯行情域名（A 股各主数据源）。
 # 任一目标可达即视为联网；全部不可达判定为离线。
