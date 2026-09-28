@@ -31,7 +31,12 @@ logger = logging.getLogger(__name__)
 def _fetch_pe() -> list[dict]:
     """获取全市场 PE(TTM/LYR) 中位数及历史分位。"""
     resp = get_default_client().call("legu", lambda: ak.stock_a_ttm_lyr())
-    df = resp.data if resp.success else None
+    if not resp.success:
+        # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
+        # 任务只剩「zero rows without explanation」，现场无法分诊
+        logger.warning(f"⚠️ 全市场PE 源请求失败: {resp.metadata.error}")
+        return []
+    df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
@@ -65,7 +70,12 @@ def _fetch_pe() -> list[dict]:
 def _fetch_pb() -> list[dict]:
     """获取全市场 PB 中位数及历史分位。"""
     resp = get_default_client().call("legu", lambda: ak.stock_a_all_pb())
-    df = resp.data if resp.success else None
+    if not resp.success:
+        # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
+        # 任务只剩「zero rows without explanation」，现场无法分诊
+        logger.warning(f"⚠️ 全市场PB 源请求失败: {resp.metadata.error}")
+        return []
+    df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
@@ -97,7 +107,12 @@ def _fetch_pb() -> list[dict]:
 def _fetch_ebs() -> list[dict]:
     """获取股债利差（沪深300 vs 10年国债）。"""
     resp = get_default_client().call("legu", lambda: ak.stock_ebs_lg())
-    df = resp.data if resp.success else None
+    if not resp.success:
+        # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
+        # 任务只剩「zero rows without explanation」，现场无法分诊
+        logger.warning(f"⚠️ 股债利差 源请求失败: {resp.metadata.error}")
+        return []
+    df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
         return []
     col_map = {
@@ -176,7 +191,9 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
         logger.info(f"✅ 大盘估值保存完成: {saved} 条 / {len(daily_records)} 个交易日")
     else:
         saved = 0
-        logger.warning("⚠️ 大盘估值无数据")
+        # 附分源明细：三源各自是「0 条」还是「error: …」，上游断服时
+        # 日志里直接可见原因，不用再翻代码猜（2026-09-28 乐咕 504 教训）
+        logger.warning(f"⚠️ 大盘估值无数据（分源明细: {results}）")
     results["saved"] = saved
 
     return dict(results)
