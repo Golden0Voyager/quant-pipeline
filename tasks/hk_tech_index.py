@@ -29,8 +29,23 @@ _INDEX_NAME = "恒生科技指数"
 _OVERLAP_DAYS = 7
 
 
+def _is_valid_latest_date(value: str) -> bool:
+    """白名单：库内最新日期必须是真实存在的 YYYY-MM-DD 才会被用于增量窗口。"""
+    if len(value) != 10:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
 def _fetch_hk_tech_records(latest_date: str | None) -> list[dict]:
     """拉取恒生科技指数日线，只保留库内最新日期之后的增量部分。"""
+    if latest_date is not None and not _is_valid_latest_date(latest_date):
+        # 非法日期无法推导增量窗口，按既有 no_data 路径返回（上层转为 {"saved": 0, "total": 0}）
+        logger.warning(f"⚠️ 恒生科技指数库内最新日期非法（{latest_date!r}），按无新数据处理")
+        return []
     if ak is None:
         return []
     try:
