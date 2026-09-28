@@ -134,6 +134,22 @@ def _fetch_pboc_policy_rate() -> list[dict]:
 # ===========================================================================
 
 
+def _balance_month_to_date(t_str: str) -> str | None:
+    """白名单：统计时间仅接受 "YYYY.M" / "YYYY.MM" 且月界 1-12，其余视为不可用。"""
+    parts = t_str.split(".")
+    if len(parts) != 2:
+        return None
+    year, month = parts
+    if (
+        len(year) != 4
+        or not year.isdigit()
+        or not month.isdigit()
+        or not 1 <= int(month) <= 12
+    ):
+        return None
+    return f"{year}-{month.zfill(2)}-01"
+
+
 def _fetch_central_bank_balance() -> list[dict]:
     """获取央行（货币当局）资产负债表，按月发布。"""
     df = _try_get_ak_df(ak.macro_china_central_bank_balance)
@@ -145,11 +161,8 @@ def _fetch_central_bank_balance() -> list[dict]:
         t_str = str(row.get("统计时间", "")).strip()
         if not t_str:
             continue
-        parts = t_str.split(".")
-        if len(parts) == 2:
-            year, month = parts[0], parts[1].zfill(2)
-            date_str = f"{year}-{month}-01"
-        else:
+        date_str = _balance_month_to_date(t_str)
+        if date_str is None:
             continue
         records.append({
             "date": date_str,
