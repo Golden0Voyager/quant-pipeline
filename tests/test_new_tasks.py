@@ -9,6 +9,7 @@ point to raise line coverage above the 85% gate (PR #28).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1098,6 +1099,65 @@ def test_update_market_valuation_fetcher_exception():
     # SourceClient catches exception, _fetch_pe returns []
     assert result["全市场PE"] == 0
     assert result["saved"] == 0
+
+
+def _failed_legu_response(error: str) -> SourceResponse:
+    return SourceResponse(
+        success=False,
+        data=None,
+        metadata=FetchMetadata(source_name="legu", error=error),
+    )
+
+
+@pytest.mark.parametrize(
+    ("fetch_fn", "source_label"),
+    [
+        (market_valuation._fetch_pe, "全市场PE"),
+        (market_valuation._fetch_pb, "全市场PB"),
+        (market_valuation._fetch_ebs, "股债利差"),
+    ],
+)
+def test_fetch_legu_failure_reason_logged(fetch_fn, source_label, caplog):
+    """red-proof: 乐咕源失败时 ``resp.metadata.error`` 必须落日志。
+
+    还原 tasks/market_valuation.py 的源提交会让本用例变红：旧实现把
+    ``resp.success=False`` 静默吞成空列表，日志里没有任何 error 文本，
+    任务只剩「zero rows without explanation」现场无法分诊
+    （2026-09-28 乐咕全站 504 断服时实测如此）。
+    """
+    client = MagicMock()
+    client.call.return_value = _failed_legu_response(
+        "AttributeError: 'NoneType' object has no attribute 'attrs'"
+    )
+    with (
+        patch.object(market_valuation, "get_default_client", return_value=client),
+        caplog.at_level(logging.WARNING, logger=market_valuation.logger.name),
+    ):
+        assert fetch_fn() == []
+    assert source_label in caplog.text
+    assert "attrs" in caplog.text
+
+
+def test_update_market_valuation_empty_logs_per_source_detail(caplog):
+    """red-proof: 三源全空时日志须带分源明细，不能只报一句「无数据」。
+
+    还原 tasks/market_valuation.py 的源提交会让本用例变红：旧日志是固定
+    文案「⚠️ 大盘估值无数据」，不含「分源明细」字样与各源计数。
+    """
+    ak = MagicMock()
+    ak.stock_a_ttm_lyr.return_value = pd.DataFrame()
+    ak.stock_a_all_pb.return_value = pd.DataFrame()
+    ak.stock_ebs_lg.return_value = pd.DataFrame()
+    db = MagicMock()
+    with (
+        patch.object(market_valuation, "ak", ak),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = market_valuation.update_market_valuation(db)
+    assert result["saved"] == 0
+    assert "分源明细" in caplog.text
+    assert "全市场PE" in caplog.text
+
 
 
 # ===========================================================================
