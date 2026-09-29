@@ -545,15 +545,20 @@ def _fetch_kline_db(symbol: str, db_path: str) -> list[dict] | None:
     ts_code = symbol.replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
     try:
         conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            """SELECT trade_date, open, close, high, low, volume, turnover_rate
-               FROM daily_bars
-               WHERE ts_code = ?
-               ORDER BY trade_date ASC""",
-            (ts_code,),
-        ).fetchall()
-        conn.close()
-    except Exception:
+        try:
+            rows = conn.execute(
+                """SELECT trade_date, open, close, high, low, volume, turnover_rate
+                   FROM daily_bars
+                   WHERE ts_code = ?
+                   ORDER BY trade_date ASC""",
+                (ts_code,),
+            ).fetchall()
+        finally:
+            # 异常路径旧实现泄漏连接（close 不在 finally）；且与
+            # _fetch_kline_xueqiu 对齐，失败原因至少留 DEBUG 日志可追
+            conn.close()
+    except Exception as e:
+        logger.debug(f"本地 DB K 线读取失败（{symbol}）: {e}")
         return None
 
     if not rows:
