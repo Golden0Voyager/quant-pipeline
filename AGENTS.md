@@ -265,3 +265,31 @@ if _REPO_ROOT not in sys.path:
 | 编号 | 条目 | 映射 |
 |---|---|---|
 | OCR-7 | 必修 3 项 + 低优先 6 项 | ✅ 必修 3 项 → **PR #150**(CI 加固 / 空日历缓存 / db_path 守卫);低优先 6 项 → **PR #151–#156**(retained 窗口过滤 / backfill 批查 / 边缘日期 no_data / natural_key 顺序 / ProviderFactory 锁 / netcheck 清理)。行为修复项均附 red-proof 并本机复现;无红证的项(PR #150 的 CI 配置项、#154 纯重构、#156 纯清理)按提交说明**如实标注无红证**,不虚称 |
+
+**第二轮分诊(2026-09-29 全项目 review,编号顺延 OCR-8 起,规则同上:报出即按本表结案)**
+
+**【已证误报,勿再报】**
+
+| 编号 | 条目 | 结论与依据 |
+|---|---|---|
+| OCR-8 | 「migrations/013 缺事务包装」 | ⛔ **已证误报,与 OCR-1 同根源**:`apply_pending` → `_apply_one` 用 `BEGIN IMMEDIATE` 包整个 migration,脚本内部禁止自行 `BEGIN`/`COMMIT`(executescript 关键字拦截)。reviewer 建议的 `with conn:` 写法会在退出时调 `commit`/`rollback`,被 `_TransactionalMigrationConnection` 直接 raise `MigrationError`——**照建议改反而会炸** |
+| OCR-9 | 「新浪 turnover `<1.0` → ×100 启发式会错杀低换手股」 | ⛔ **单位假设错误**(2026-09-29 实测):`ak.stock_zh_a_daily` 返回的是**小数比率**(茅台中位数 0.003 = 0.3%),低换手股恰恰是需要 ×100 缩放的正确对象;A 股 T+1 下单日换手不可能 ≥100%,`max ≥ 1.0` 几乎不出现,启发式的判别方向无误(实现在 `core/stock_cyq_em.py:521`,注释「新浪换手率为小数比率」) |
+| OCR-10 | 「uv.lock 缺失/依赖无锁定」 | ⛔ **已证误报**:项目用 uv 管理,`uv.lock` 已锁定**全部传递依赖**的确切版本(327K);pyproject 只写下界是 uv 的标准做法,不是漏锁 |
+| OCR-11 | 「curl_cffi 未声明」 | ⛔ **已证误报**:纯传递依赖(随 akshare 装入);`pyproject.toml` 的 mypy override(`[tool.mypy]` 中 `curl_cffi` 豁免)只是**类型检查豁免登记**,不代表项目直接依赖它 |
+
+**【不修决定,附理由】**
+
+| 编号 | 条目 | 处置与理由 |
+|---|---|---|
+| OCR-12 | 「MiniRacer 非线程安全」 | ⏸ **不修**:理论风险、无现实调用方——`stock_cyq_em` 的全部调用方(`tasks/index_chain.py`、`scripts/recompute_chip_em.py`)都是**串行 for 循环**。若未来出现并发调用方,再回来加锁 |
+| OCR-13 | 「ts_code 后缀剥离不健壮(`000001sz`/`BJ000001`)」 | ⏸ **不修**:与 OCR-5 同类——所有调用方传规范格式(`"000001"` / `"000001.SZ"`),无畸形输入来源;出现外部输入时先加上界白名单 |
+| OCR-14 | 「pyproject 依赖加上界」 | ⏸ **不修**:akshare 上游经常发修复版,`<` 上界会挡住紧急修复;版本确定性由 `uv.lock` 承担(见 OCR-10),两层各司其职 |
+| OCR-15 | 「013 blind overwrite trade_date」 | ⏸ **不修**:one-shot migration **早已在生产库执行**(`schema_migrations` version=13,applied 2026-09-19,success=1,已只读核实);版本已记录**不会重跑**,改文件零实际效果 |
+| OCR-16 | 「tmux apt-get 冗余」 | ⏸ **不修**:无害;CI 显式声明依赖**优于**依赖 runner 镜像的预装状态(镜像换版时预装会静默消失) |
+
+**【已修映射】**
+
+| 编号 | 条目 | 映射 |
+|---|---|---|
+| OCR-17 | review 第一批 5 项 | ✅ → **PR #159**(已合):`validate_and_vacuum` 除零守卫/COUNT 提出循环/try-finally 关连接、`daemon.stop()` PIDFILE 竞态、`stock_cyq_em._fetch_kline_db` finally 关连接 + 失败 DEBUG 日志、`.gitignore` 补 `.env.*`、`ci.yml` setup-uv 钉 commit SHA。**3 项带旧码实测红证**(除零 / PIDFILE 竞态 / DEBUG 日志),其余为资源与配置改动、如实标注无红证 |
+| OCR-18 | review 第二批 2 项 | ✅ → **PR #160**(已合):`parallel_backfill` 全部 sqlite 连接 finally 关闭 + 主库连接 `timeout=30` + 失败输出 traceback;`migrate_database` 复用 `plan()` engine + `is_prod` 文件名精确匹配。**无红证**(资源卫生 + 等价重构,成功路径行为不变),由既有 53 个 `test_parallel_backfill.py` 用例 + CI 全量套件兜底 |
