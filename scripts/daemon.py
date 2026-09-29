@@ -213,7 +213,14 @@ def stop() -> None:
         PIDFILE.unlink(missing_ok=True)
         return
 
-    pid = int(PIDFILE.read_text().strip())
+    # 竞态窗口：上方 is_running() 与本次 read 之间，daemon 的 finally 可能
+    # 已 unlink PIDFILE——旧实现这里抛 FileNotFoundError 崩成 traceback
+    try:
+        pid = int(PIDFILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        print("ℹ️  守护进程未运行（PID 文件已失效）")
+        PIDFILE.unlink(missing_ok=True)
+        return
     # 身份二次校验：防止 PID 复用后误杀无关进程（与 TUI 判定口径一致）
     res = subprocess.run(
         ["ps", "-p", str(pid), "-o", "command="],
