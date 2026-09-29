@@ -50,15 +50,17 @@ def copy_schema(src_db: Path, dst_db: Path):
     shutil.copy(src_db, dst_db)
     # 清空数据表（保留 schema）
     conn = sqlite3.connect(dst_db)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [r[0] for r in cursor.fetchall()]
-    for t in tables:
-        if t not in ("sqlite_sequence",):
-            with contextlib.suppress(sqlite3.OperationalError):
-                cursor.execute(f"DELETE FROM {t}")  # VIEW 等跳过
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cursor.fetchall()]
+        for t in tables:
+            if t not in ("sqlite_sequence",):
+                with contextlib.suppress(sqlite3.OperationalError):
+                    cursor.execute(f"DELETE FROM {t}")  # VIEW 等跳过
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def prepare_worker_db(worker_id: int, stocks: list[str]) -> Path:
@@ -67,14 +69,16 @@ def prepare_worker_db(worker_id: int, stocks: list[str]) -> Path:
     copy_schema(MASTER_DB, worker_db)
 
     conn = sqlite3.connect(worker_db)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM stock_list")
-    cursor.executemany(
-        "INSERT INTO stock_list (code) VALUES (?)",
-        [(s,) for s in stocks]
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM stock_list")
+        cursor.executemany(
+            "INSERT INTO stock_list (code) VALUES (?)",
+            [(s,) for s in stocks]
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return worker_db
 
 
@@ -100,15 +104,21 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[Worker {worker_id}] 启动，处理 {len(stocks)} 只股票 -> {worker_db}")
-    with open(log_file, "w") as f:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(_REPO_ROOT),
-            env=env,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-        )
-        proc.wait()
+    try:
+        with open(log_file, "w") as f:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(_REPO_ROOT),
+                env=env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+            )
+            proc.wait()
+    except Exception as e:
+        # Popen 构造失败（解释器/权限/路径问题）旧实现直接以子进程 traceback 形式
+        # 冒出、日志里没有任何线索；至少把原因打到合并前的控制台
+        print(f"[Worker {worker_id}] ❌ 启动/运行失败: {e}")
+        return
 
     if proc.returncode == 0:
         print(f"[Worker {worker_id}] ✅ 完成")
@@ -119,36 +129,42 @@ def run_worker(worker_id: int, stocks: list[str], total_workers: int):
 def merge_worker_dbs(worker_ids: list[int]):
     """把所有 worker 的 daily_bars 合并回主库"""
     print("\n📦 开始合并数据到主库...")
-    master_conn = sqlite3.connect(str(MASTER_DB))
-    master_cursor = master_conn.cursor()
+    # timeout=30：合并时 daily pipeline 可能持有主库写锁，旧默认 5s 会
+    # 直接 OperationalError: database is locked；连接全部 finally 关闭
+    master_conn = sqlite3.connect(str(MASTER_DB), timeout=30)
+    try:
+        master_cursor = master_conn.cursor()
 
-    total_rows = 0
-    for wid in worker_ids:
-        worker_db = MASTER_DB.parent / f"quant_core_worker{wid}.db"
-        if not worker_db.exists():
-            continue
+        total_rows = 0
+        for wid in worker_ids:
+            worker_db = MASTER_DB.parent / f"quant_core_worker{wid}.db"
+            if not worker_db.exists():
+                continue
 
-        worker_conn = sqlite3.connect(str(worker_db))
-        worker_cursor = worker_conn.cursor()
-        # 查询时加入 data_source, updated_at
-        worker_cursor.execute(
-            "SELECT ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at FROM daily_bars"
-        )
-        rows = worker_cursor.fetchall()
-        worker_conn.close()
+            worker_conn = sqlite3.connect(str(worker_db))
+            try:
+                worker_cursor = worker_conn.cursor()
+                # 查询时加入 data_source, updated_at
+                worker_cursor.execute(
+                    "SELECT ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at FROM daily_bars"
+                )
+                rows = worker_cursor.fetchall()
+            finally:
+                worker_conn.close()
 
-        if rows:
-            master_cursor.executemany(
-                """INSERT OR REPLACE INTO daily_bars
-                (ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            total_rows += len(rows)
-            print(f"  Worker {wid}: {len(rows)} 行")
+            if rows:
+                master_cursor.executemany(
+                    """INSERT OR REPLACE INTO daily_bars
+                    (ts_code, trade_date, open, high, low, close, volume, amount, turnover_rate, pct_change, amplitude, data_source, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                total_rows += len(rows)
+                print(f"  Worker {wid}: {len(rows)} 行")
 
-    master_conn.commit()
-    master_conn.close()
+        master_conn.commit()
+    finally:
+        master_conn.close()
     print(f"\n✅ 合并完成，共 {total_rows} 行写入主库")
 
 
@@ -168,12 +184,14 @@ def cleanup(worker_ids: list[int]):
 def get_remaining_stocks() -> list[str]:
     """获取尚未写入 daily_bars 的股票"""
     conn = sqlite3.connect(str(MASTER_DB))
-    cursor = conn.cursor()
-    cursor.execute("SELECT code FROM stock_list")
-    all_stocks = [r[0] for r in cursor.fetchall()]
-    cursor.execute("SELECT DISTINCT ts_code FROM daily_bars")
-    done = {r[0] for r in cursor.fetchall()}
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT code FROM stock_list")
+        all_stocks = [r[0] for r in cursor.fetchall()]
+        cursor.execute("SELECT DISTINCT ts_code FROM daily_bars")
+        done = {r[0] for r in cursor.fetchall()}
+    finally:
+        conn.close()
     remaining = [s for s in all_stocks if s not in done]
     print(f"总股票: {len(all_stocks)} | 已完成: {len(done)} | 剩余: {len(remaining)}")
     return remaining
@@ -253,8 +271,12 @@ def main():
         ]
         subprocess.run(cmd_ind, cwd=str(_REPO_ROOT), check=True)
         print("✅ 技术指标计算完成！")
-    except Exception as e:
-        print(f"⚠️ 技术指标计算失败: {e}")
+    except Exception:
+        # 旧实现只 print(e)：解释器缺失/权限等总失败被当成一句轻告警，
+        # 无 traceback 可追
+        import traceback
+        print("⚠️ 技术指标计算失败（详情见下）:")
+        traceback.print_exc()
 
     # 最终统计
     remaining_after = get_remaining_stocks()
