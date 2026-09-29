@@ -39,144 +39,147 @@ def run_checks(db_path: Path) -> dict:
             results["warnings"] += 1
 
     conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
-    print(f"\n📊 数据库: {db_path}")
-    print(f"   大小: {db_path.stat().st_size / (1024*1024):.1f} MB")
-    print(f"   时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("\n" + "=" * 60)
+        print(f"\n📊 数据库: {db_path}")
+        print(f"   大小: {db_path.stat().st_size / (1024*1024):.1f} MB")
+        print(f"   时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("\n" + "=" * 60)
 
-    # ------------------------------------------------------------------
-    # 1. 物理完整性检查
-    # ------------------------------------------------------------------
-    cursor.execute("PRAGMA integrity_check")
-    integrity = cursor.fetchone()[0]
-    if integrity == "ok":
-        log("PASS", "SQLite 物理完整性: OK")
-    else:
-        log("FAIL", f"SQLite 物理完整性异常: {integrity}")
-
-    # ------------------------------------------------------------------
-    # 2. 表存在性
-    # ------------------------------------------------------------------
-    required_tables = [
-        "daily_bars", "indicators", "stock_list", "fundamentals",
-        "fund_flow", "historical_valuation", "scan_results", "chip_distribution",
-        "chip_distribution_em"
-    ]
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    existing = {r[0] for r in cursor.fetchall()}
-    for t in required_tables:
-        if t in existing:
-            log("PASS", f"表存在: {t}")
+        # ------------------------------------------------------------------
+        # 1. 物理完整性检查
+        # ------------------------------------------------------------------
+        cursor.execute("PRAGMA integrity_check")
+        integrity = cursor.fetchone()[0]
+        if integrity == "ok":
+            log("PASS", "SQLite 物理完整性: OK")
         else:
-            log("WARN", f"表缺失: {t}")
+            log("FAIL", f"SQLite 物理完整性异常: {integrity}")
 
-    # ------------------------------------------------------------------
-    # 3. 覆盖率: daily_bars / stock_list
-    # ------------------------------------------------------------------
-    cursor.execute("SELECT COUNT(*) FROM stock_list")
-    total_stocks = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_bars")
-    covered_stocks = cursor.fetchone()[0]
-    coverage_pct = covered_stocks / total_stocks * 100 if total_stocks else 0
+        # ------------------------------------------------------------------
+        # 2. 表存在性
+        # ------------------------------------------------------------------
+        required_tables = [
+            "daily_bars", "indicators", "stock_list", "fundamentals",
+            "fund_flow", "historical_valuation", "scan_results", "chip_distribution",
+            "chip_distribution_em"
+        ]
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing = {r[0] for r in cursor.fetchall()}
+        for t in required_tables:
+            if t in existing:
+                log("PASS", f"表存在: {t}")
+            else:
+                log("WARN", f"表缺失: {t}")
 
-    if coverage_pct >= 99:
-        log("PASS", f"覆盖率: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
-    elif coverage_pct >= 95:
-        log("WARN", f"覆盖率偏低: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
-    else:
-        log("FAIL", f"覆盖率严重不足: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
+        # ------------------------------------------------------------------
+        # 3. 覆盖率: daily_bars / stock_list
+        # ------------------------------------------------------------------
+        cursor.execute("SELECT COUNT(*) FROM stock_list")
+        total_stocks = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_bars")
+        covered_stocks = cursor.fetchone()[0]
+        coverage_pct = covered_stocks / total_stocks * 100 if total_stocks else 0
 
-    # ------------------------------------------------------------------
-    # 4. 重复行检查 (ts_code, trade_date)
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        SELECT COUNT(*) - COUNT(DISTINCT ts_code || '_' || trade_date)
-        FROM daily_bars
-    """)
-    dup_count = cursor.fetchone()[0]
-    if dup_count == 0:
-        log("PASS", "重复行检查: 0 条重复")
-    else:
-        log("FAIL", f"重复行检查: {fmt_num(dup_count)} 条重复")
+        if coverage_pct >= 99:
+            log("PASS", f"覆盖率: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
+        elif coverage_pct >= 95:
+            log("WARN", f"覆盖率偏低: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
+        else:
+            log("FAIL", f"覆盖率严重不足: {covered_stocks}/{total_stocks} ({coverage_pct:.1f}%)")
 
-    # ------------------------------------------------------------------
-    # 5. 日期范围
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        SELECT MIN(trade_date) as min_dt, MAX(trade_date) as max_dt,
-               COUNT(DISTINCT trade_date) as uniq_dates
-        FROM daily_bars
-    """)
-    row = cursor.fetchone()
-    min_dt, max_dt, uniq_dates = row
-    log("PASS", f"日期范围: {min_dt} ~ {max_dt} ({fmt_num(uniq_dates)} 个交易日)")
+        # ------------------------------------------------------------------
+        # 4. 重复行检查 (ts_code, trade_date)
+        # ------------------------------------------------------------------
+        cursor.execute("""
+            SELECT COUNT(*) - COUNT(DISTINCT ts_code || '_' || trade_date)
+            FROM daily_bars
+        """)
+        dup_count = cursor.fetchone()[0]
+        if dup_count == 0:
+            log("PASS", "重复行检查: 0 条重复")
+        else:
+            log("FAIL", f"重复行检查: {fmt_num(dup_count)} 条重复")
 
-    # ------------------------------------------------------------------
-    # 6. 每只股票的数据量分布
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        SELECT AVG(cnt) as avg_cnt, MIN(cnt) as min_cnt, MAX(cnt) as max_cnt
-        FROM (SELECT COUNT(*) as cnt FROM daily_bars GROUP BY ts_code)
-    """)
-    row = cursor.fetchone()
-    avg_cnt, min_cnt, max_cnt = row
-    if avg_cnt is not None:
-        log("PASS", f"每只股票平均 {avg_cnt:.0f} 条, 最少 {min_cnt}, 最多 {max_cnt}")
-    else:
-        log("WARN", "daily_bars 为空表，无数据量统计")
+        # ------------------------------------------------------------------
+        # 5. 日期范围
+        # ------------------------------------------------------------------
+        cursor.execute("""
+            SELECT MIN(trade_date) as min_dt, MAX(trade_date) as max_dt,
+                   COUNT(DISTINCT trade_date) as uniq_dates
+            FROM daily_bars
+        """)
+        row = cursor.fetchone()
+        min_dt, max_dt, uniq_dates = row
+        log("PASS", f"日期范围: {min_dt} ~ {max_dt} ({fmt_num(uniq_dates)} 个交易日)")
 
-    # 检查数据量异常少的股票（可能刚上市或长期停牌）
-    cursor.execute("""
-        SELECT ts_code, COUNT(*) as cnt FROM daily_bars
-        GROUP BY ts_code HAVING cnt < 100
-    """)
-    low_data = cursor.fetchall()
-    if len(low_data) <= 50:
-        log("PASS", f"数据量<100天的股票: {len(low_data)} 只（正常: 新股/停牌）")
-    else:
-        log("WARN", f"数据量<100天的股票: {len(low_data)} 只，建议排查")
+        # ------------------------------------------------------------------
+        # 6. 每只股票的数据量分布
+        # ------------------------------------------------------------------
+        cursor.execute("""
+            SELECT AVG(cnt) as avg_cnt, MIN(cnt) as min_cnt, MAX(cnt) as max_cnt
+            FROM (SELECT COUNT(*) as cnt FROM daily_bars GROUP BY ts_code)
+        """)
+        row = cursor.fetchone()
+        avg_cnt, min_cnt, max_cnt = row
+        if avg_cnt is not None:
+            log("PASS", f"每只股票平均 {avg_cnt:.0f} 条, 最少 {min_cnt}, 最多 {max_cnt}")
+        else:
+            log("WARN", "daily_bars 为空表，无数据量统计")
 
-    # ------------------------------------------------------------------
-    # 7. NULL 率统计
-    # ------------------------------------------------------------------
-    null_cols = ["open", "high", "low", "close", "volume", "amount", "turnover_rate", "pct_change", "amplitude"]
-    for col in null_cols:
-        cursor.execute(f"SELECT COUNT(*) FROM daily_bars WHERE {col} IS NULL")
-        null_count = cursor.fetchone()[0]
+        # 检查数据量异常少的股票（可能刚上市或长期停牌）
+        cursor.execute("""
+            SELECT ts_code, COUNT(*) as cnt FROM daily_bars
+            GROUP BY ts_code HAVING cnt < 100
+        """)
+        low_data = cursor.fetchall()
+        if len(low_data) <= 50:
+            log("PASS", f"数据量<100天的股票: {len(low_data)} 只（正常: 新股/停牌）")
+        else:
+            log("WARN", f"数据量<100天的股票: {len(low_data)} 只，建议排查")
+
+        # ------------------------------------------------------------------
+        # 7. NULL 率统计
+        # ------------------------------------------------------------------
+        null_cols = ["open", "high", "low", "close", "volume", "amount", "turnover_rate", "pct_change", "amplitude"]
+        # total_rows 与列无关：提出循环，避免对大表做 9 次全表 COUNT
         cursor.execute("SELECT COUNT(*) FROM daily_bars")
         total_rows = cursor.fetchone()[0]
-        null_pct = null_count / total_rows * 100 if total_rows else 0
+        for col in null_cols:
+            cursor.execute(f"SELECT COUNT(*) FROM daily_bars WHERE {col} IS NULL")
+            null_count = cursor.fetchone()[0]
+            null_pct = null_count / total_rows * 100 if total_rows else 0
 
-        if col == "turnover_rate":
-            # turnover_rate 从 yfinance 获取为 NULL 是预期行为
-            if null_pct > 90:
-                log("WARN", f"{col}: {null_pct:.1f}% 为 NULL (yfinance 不提供，预期)")
+            if col == "turnover_rate":
+                # turnover_rate 从 yfinance 获取为 NULL 是预期行为
+                if null_pct > 90:
+                    log("WARN", f"{col}: {null_pct:.1f}% 为 NULL (yfinance 不提供，预期)")
+                else:
+                    log("PASS", f"{col}: {null_pct:.1f}% 为 NULL")
+            elif null_pct > 1:
+                log("FAIL", f"{col}: {null_pct:.1f}% 为 NULL (异常)")
+            elif null_pct > 0:
+                log("WARN", f"{col}: {null_pct:.1f}% 为 NULL")
             else:
-                log("PASS", f"{col}: {null_pct:.1f}% 为 NULL")
-        elif null_pct > 1:
-            log("FAIL", f"{col}: {null_pct:.1f}% 为 NULL (异常)")
-        elif null_pct > 0:
-            log("WARN", f"{col}: {null_pct:.1f}% 为 NULL")
+                log("PASS", f"{col}: 0% 为 NULL")
+
+        # ------------------------------------------------------------------
+        # 8. 价格合理性检查
+        # ------------------------------------------------------------------
+        cursor.execute("""
+            SELECT COUNT(*) FROM daily_bars
+            WHERE close <= 0 OR close > 10000 OR volume < 0
+        """)
+        bad_prices = cursor.fetchone()[0]
+        if bad_prices == 0:
+            log("PASS", "价格合理性: 无异常")
         else:
-            log("PASS", f"{col}: 0% 为 NULL")
+            log("FAIL", f"价格合理性: {fmt_num(bad_prices)} 条异常价格")
 
-    # ------------------------------------------------------------------
-    # 8. 价格合理性检查
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        SELECT COUNT(*) FROM daily_bars
-        WHERE close <= 0 OR close > 10000 OR volume < 0
-    """)
-    bad_prices = cursor.fetchone()[0]
-    if bad_prices == 0:
-        log("PASS", "价格合理性: 无异常")
-    else:
-        log("FAIL", f"价格合理性: {fmt_num(bad_prices)} 条异常价格")
-
-    conn.close()
+    finally:
+        conn.close()
     return results
 
 
@@ -193,7 +196,9 @@ def do_vacuum(db_path: Path):
     size_after = db_path.stat().st_size
     saved = size_before - size_after
     print(f"   后: {size_after / (1024*1024):.1f} MB")
-    print(f"   节省: {saved / (1024*1024):.1f} MB ({saved/size_before*100:.1f}%)")
+    # size_before 为 0（零字节 SQLite 文件）时旧实现直接 ZeroDivisionError
+    pct = (saved / size_before * 100) if size_before else 0.0
+    print(f"   节省: {saved / (1024*1024):.1f} MB ({pct:.1f}%)")
     print("✅ VACUUM 完成")
 
 

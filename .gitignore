@@ -27,7 +27,11 @@ MagicMock*
 .worktrees/
 
 # Environment config (may contain secrets)
+# .env.* 覆盖 .env.local/.env.production 等变体，防凭证被提交；
+# !.env.example 保留模板可入库
 .env
+.env.*
+!.env.example
 
 # SQLite databases (test artifacts, scratch copies)
 *.db

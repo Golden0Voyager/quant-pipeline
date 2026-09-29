@@ -672,6 +672,24 @@ class TestFetchKlineDb:
         assert result is not None
         assert result[0]["turnover_rate"] == 0.0
 
+    def test_db_read_failure_logs_debug(self, tmp_path: Path, caplog):
+        """red-proof: 本地 DB 读取失败时须留 DEBUG 日志（含原因与代码）。
+
+        还原 core/stock_cyq_em.py 的 _fetch_kline_db 修复会让本用例变红：
+        旧实现 `except Exception: return None` 静默吞掉一切，日志为空——
+        DB 路径写错/表缺失与「该股无数据」无法区分。
+        """
+        import logging
+
+        # 目录而非文件：sqlite3.connect 成功、execute 抛 OperationalError
+        bad_path = str(tmp_path / "not_a_file")
+        (tmp_path / "not_a_file").mkdir()
+        with caplog.at_level(logging.DEBUG, logger="core.stock_cyq_em"):
+            result = _fetch_kline_db("000001", bad_path)
+        assert result is None
+        assert "本地 DB K 线读取失败" in caplog.text
+        assert "000001" in caplog.text
+
 
 # ═══════════════════════════════════════════════════════════
 # 9. stock_cyq_em 主级联

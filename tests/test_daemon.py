@@ -76,3 +76,26 @@ class TestTradingDayGate:
         """交易日历不可用时必须放行（fail-open），不能因为判断失败而停跑。"""
         with patch("scripts.daemon._is_trading_day_now", side_effect=Exception("boom")):
             assert daemon._should_run_pipeline() is True
+
+
+class TestStopRace:
+    def test_stop_handles_pidfile_disappearing_between_check_and_read(self, tmp_path: Path, capsys):
+        """red-proof: stop() 的 is_running() 与 read_text() 之间存在竞态窗口——
+        daemon 的 finally 可能恰在此时 unlink PIDFILE。旧实现未捕获
+        FileNotFoundError，直接以 traceback 崩出；应优雅退出。
+
+        还原 scripts/daemon.py 的 stop() 修复会让本用例变红。
+        """
+        pidfile = tmp_path / "daemon.pid"
+        pidfile.write_text("12345")
+        with (
+            patch.object(daemon, "PIDFILE", pidfile),
+            patch("scripts.daemon.is_running", return_value=True),
+            patch.object(Path, "read_text", side_effect=FileNotFoundError("vanished")),
+        ):
+            daemon.stop()  # 不得抛异常
+        out = capsys.readouterr().out
+        assert "未运行" in out
+        # 失效 PID 文件应被清理
+        assert not pidfile.exists()
+
