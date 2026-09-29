@@ -26,7 +26,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from core.migrations import MigrationEngine, run_migrations  # noqa: E402
+from core.migrations import MigrationEngine  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -108,18 +108,18 @@ def main() -> int:
         return 0
 
     # Ask for confirmation when applying to the real production DB
-    is_prod = "quant_core.db" in Path(db_path).name
+    # 精确匹配文件名：旧子串匹配会把 backup_quant_core.db / quant_core.db2
+    # 当成生产库（误弹确认），反之边缘命名会漏掉生产确认
+    is_prod = Path(db_path).name == "quant_core.db"
     if is_prod:
         answer = input(f"\n⚠️  This will modify: {db_path}\nContinue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             logger.info("Aborted by user.")
             return 1
 
-    results = run_migrations(
-        db_path=db_path,
-        migrations_dir=migrations_dir,
-        target_version=args.target,
-    )
+    # 复用上方 plan() 的 engine：run_migrations 内部就是「再建一个 engine +
+    # apply_pending」，双引擎两次连接且 preview 与执行可能不一致
+    results = engine.apply_pending(target_version=args.target)
 
     errors = [r for r in results if r.get("error")]
     if errors:
