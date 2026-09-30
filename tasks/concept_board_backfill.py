@@ -17,6 +17,15 @@
    ``INSERT OR REPLACE``，回补一旦覆盖到 ``expected`` 就会用 NULL 抹掉真值。
 2. **只补缺口，不做全量重写。** 单个概念失败即跳过并计数，不中断其余——
    回补是尽力而为，一次失败不该让 504 个概念白跑。
+
+同一个 ``INSERT OR REPLACE`` 还有另一侧的边界，而它比约束 1 更容易被忽略：
+**绝不能写一个「已经有行」的日子**。当天 ``up_count``/``down_count`` 是真值，
+历史行没有这两列，写上去就是拿 NULL 换掉真值并把 ``data_source`` 从 'em' 翻成
+'em_hist'。上侧由约束 1 的三道 ``< expected`` 日期闸门兜着；下侧靠两件事：
+``_stored_dates`` **读失败即放弃**（fail-closed，见它的 docstring），
+以及写入前的覆盖闸门（``MIN_BOARD_COVERAGE`` / ``MIN_BOARD_FLOOR``）——
+两者都因为 ``find_missing_days`` 只问「那天有没有行」，于是一个被写坏的残缺日
+会永久出局、无人复访。
 """
 
 from __future__ import annotations
@@ -70,6 +79,31 @@ DEFAULT_LOOKBACK_DAYS = 10
 # 是 495/504 ≈ 98.2%，0.8 在它下方 18 个百分点，正常响应碰不到；而熔断那种形态
 # 是 5/504 ≈ 1%，任何合理下界都拦得住。宁可误判重试，不可漏判丢失。
 MIN_BOARD_COVERAGE = 0.8
+
+
+# 绝对下界：比例下界的**分母自己也可能是残的**。
+#
+# ``_fetch_concept_list_em``（``tasks/concept_board.py:107``）先翻 ``push2``、失败
+# 退到 ``push2delay``，而它对「退回来的主机给了一个**非空但不足**的列表」没有意见
+# ——``tasks/concept_board.py:156`` 只要求 ``success and out``。少给 250 条时，回补
+# 拿到 250 个板块、只请求这 250 个、下界 = ``ceil(0.8 × 250) = 200``、实到
+# 250 ≥ 200，于是**通过**：写下一个 250 板块的日子并报 success，而
+# ``find_missing_days`` 只问「那天有没有行」（:100），那天从此永久出局。
+#
+# 取 **300** 的依据（三条，缺一条都换过数）：
+# 1. **实测**（2026-09-30 对生产库只读复核）：``concept_board`` 31 个交易日、
+#    15613 行、``data_source`` 全是 'em'，每天**不同** concept_code 数落在
+#    495–504 —— 实测最差的一天是 495。
+# 2. clist 接口每页只给 100 行（``tasks/concept_board.py:110`` 的 docstring），
+#    所以下界必须**远高于一页**：300 = 3 页，一页（100）或两页（200）被截断都
+#    过不去。
+# 3. 300 比实测最差的一天低 39%，给板块全集的自然增删留足余量——东财随时增删
+#    概念，把下界钉在 495 附近会变成「哪天东财少列了几个板块就整轮回补失败」的
+#    绊线。板块全集真要缩掉四成，那本身就是该让人看见的事件，不该被静默接受。
+#
+# 两侧都有门禁：被拦的是实测过的两个截短形态（250 / 100），而 320 个板块的合法
+# 小全集照常写入（tests 两条用例，一条钉截短被拒、一条钉下界不过高）。
+MIN_BOARD_FLOOR = 300
 
 
 def find_missing_days(
@@ -161,8 +195,9 @@ def _records_from_hist_df(
         )
         return []
     # 告警方向是「**已映射的列消失了**」，不是「来了没映射的列」：东财正常就多给
-    # 振幅/涨跌额（该接口实测 11 列，见本机 akshare 源码），按反向判据则每次健康
-    # 响应都告警——一次 504×9 的回补刷 4536 条一模一样的噪音，真漂移反而被淹没。
+    # 振幅/涨跌额（那 11 列是**读本机 akshare 源码**得到的，不是实测响应——设计文档
+    # 「待验证清单」第 1 条仍把真实列名列为未验证），按反向判据则每次健康响应都
+    # 告警——一次 504×9 的回补刷 4536 条一模一样的噪音，真漂移反而被淹没。
     missing = [c for c in _HIST_VALUE_COLS if c not in df.columns]
     if missing:
         logger.warning(f"⚠️ 概念板块历史缺少已映射列 {missing}，这几列写 None")
@@ -251,6 +286,7 @@ def fetch_day_records(
         return []
     compact = day.replace("-", "")
     records: list[dict] = []
+    breaker_misses = 0
     for code, name in boards:
         resp = get_default_client().call(
             "eastmoney",
@@ -260,6 +296,17 @@ def fetch_day_records(
             ),
         )
         if not resp.success:
+            # 熔断打开后，**每一个**剩下的板块都拿到同一条响应、连请求都不发
+            # （``core/source_client.py:229``）。逐条告警 = 默认窗口 9 天 × 约 499
+            # 个板块 ≈ 4491 条同义日志，与上面 :163-165 拒绝的方向警告同一形状：
+            # 真漂移会被埋在里面。改成计数、循环后发**一条**汇总。
+            #
+            # 判据是 ``FetchMetadata.circuit_breaker_triggered`` 这个标记位而不是
+            # 「失败」本身——非熔断的失败是某块概念自己的问题，逐板块告警才定位得到
+            # 是谁（``core/source_client.py:67`` 有这一项，``getattr`` 兜住测试替身）。
+            if getattr(resp.metadata, "circuit_breaker_triggered", False):
+                breaker_misses += 1
+                continue
             logger.warning(f"⚠️ 概念 {name}({code}) 历史获取失败: {resp.metadata.error}")
             continue
         # 映射这一步也必须按板块兜住，而不只是「请求失败」才兜。``SourceClient.call``
@@ -286,6 +333,14 @@ def fetch_day_records(
                 f"条非 {day} 的行（源端可能无视了 start/end），已丢弃"
             )
         records.extend(kept)
+    if breaker_misses:
+        # 一天一条。汇总必须带「少了几个 / 一共几个」，否则读日志的人不知道那天
+        # 废掉了多少；下面主任务的覆盖闸门会因这一条把那天判残缺、不写入。
+        logger.warning(
+            f"⚠️ 概念板块 {day} 有 {breaker_misses}/{len(boards)} 个板块因源熔断未取到"
+            "（每主机 5 次失败即冷却 120s，core/source_client.py:51-52），"
+            "已跳过、不中断其余"
+        )
     return records
 
 
@@ -294,21 +349,36 @@ def fetch_day_records(
 # ===========================================================================
 
 
-# 取不到库内已有日期时的**真实代价**：不是「白跑一遍」，而是数据损坏。``set()``
-# 会让 ``find_missing_days`` 把窗口内**已经有行**的日子也列进待补，而回补行不带
-# ``up_count``/``down_count``（历史接口没这两列），``INSERT OR REPLACE`` 落在
-# ``UNIQUE(trade_date, concept_code)`` 上就是把快照写的真值换成 NULL。
+# 取不到库内已有日期时的**真实代价**：不是「白跑一遍」，而是数据损坏。把它当成
+# 「库里没有数据」会让 ``find_missing_days`` 把窗口内**已经有行**的日子也列进待补，
+# 而回补行不带 ``up_count``/``down_count``（历史接口没这两列），
+# ``INSERT OR REPLACE`` 落在 ``UNIQUE(trade_date, concept_code)`` 上就是把快照写的
+# 真值换成 NULL。实测（本机对着真实 SmartMoneyDBProvider 与真实表）：回补前 504 行、
+# 504 行带 up_count、data_source='em'；强制读失败后任务报 success saved=504；回补后
+# 504 行、**0** 行带 up_count、data_source 全翻成 'em_hist'。数据没了，而那一轮还报
+# 成功——所以这个函数必须 fail-closed，失败与「真的空」是**两件事**。
 _STORED_DATES_GAP = (
     "缺口计算会把窗口内**已有数据**的日子也当成缺失，回补将用 NULL 覆盖"
     "它们由快照写入的涨跌家数并翻转 data_source（数据损坏，不是白跑一遍）"
 )
 
 
-def _stored_dates(db: DatabaseInterface) -> set[str]:
-    """库内 ``concept_board`` 已有的 trade_date。取不到时返回空集合。"""
+def _stored_dates(db: DatabaseInterface) -> set[str] | None:
+    """库内 ``concept_board`` 已有的 trade_date。
+
+    Returns:
+        ``set()`` = 读到了，表里**确实**没有数据（正常，新装机器就是这样）；
+        ``None`` = **读失败**（路径不可读、表不存在、URI 非法……）。
+
+    两者必须能分开，理由见 ``_STORED_DATES_GAP``。旧实现两者都返回 ``set()``，
+    于是读失败会顺着「库里没数据」这条语义走进写入循环——那是 fail-open，故障
+    概率再低也不能要。失败为什么仍只 WARNING 而不上抛：主任务紧接着就会返回
+    ``failed``（非零退出 + error 级通知），操作员看得见；上抛只会让 ``safe_task``
+    把它当未分类异常再包一层，丢掉我们写好的 ``error_kind``。
+    """
     path = getattr(db, "db_path", None)
     if not path:
-        return set()
+        return None
     try:
         # ``as_uri()`` 而不是 f-string 拼 ``file:`` URI：后者遇到路径里的 ``?`` 或
         # ``#`` 会被 sqlite3 当成 query/fragment 而抛错（生产路径两者都不含，属潜伏
@@ -318,16 +388,35 @@ def _stored_dates(db: DatabaseInterface) -> set[str]:
         )
     except (sqlite3.Error, ValueError, OSError) as exc:
         logger.warning(f"⚠️ 读取 concept_board 已有日期失败（{exc}）→ {_STORED_DATES_GAP}")
-        return set()
+        return None
     try:
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT trade_date FROM concept_board")
         return {str(r[0])[:10] for r in cur.fetchall() if r[0]}
     except sqlite3.Error as exc:
         logger.warning(f"⚠️ 读取 concept_board 已有日期失败（{exc}）→ {_STORED_DATES_GAP}")
-        return set()
+        return None
     finally:
         conn.close()
+
+
+def _failed(error: str, *, error_kind: str) -> dict[str, Any]:
+    """一个日子都没碰就返回的裁定：**零写入、非零退出、error 级通知**。
+
+    ``failed`` 而不是 ``retained``：``retained`` 以 0 退出（AGENTS.md 无人值守段
+    第 6 条），而下面两处成因——本地库读不到已有日期、硬依赖 akshare 没装——都**不是
+    网络问题**，标 ``error_kind=network`` 只会让 ``safe_task`` 白等 30s 重试一次，
+    再重试一次，每次结果都一样。
+    """
+    return {
+        "saved": 0,
+        "status": "failed",
+        "error_kind": error_kind,
+        "error": error,
+        # 三个日子清单照样给：审计读的就是 ``metadata``（见主任务 docstring），
+        # 空清单说清「一个日子都没进入待补」——读不到已有日期时连该补哪天都算不出来。
+        "metadata": {"requested_days": 0, "backfilled_days": [], "failed_days": []},
+    }
 
 
 def _target_days(target_date: str, *, expected: str, stored: set[str]) -> list[str]:
@@ -370,6 +459,10 @@ def update_concept_board_backfill(
 
     状态语义（按「有没有补上任何一天」分，不按「失败几天」分）：
 
+    * **硬依赖缺失**（``akshare`` 没装）→ ``failed`` + ``error_kind=internal``，零请求
+    * **读不到已有日期**（``_stored_dates`` 失败）→ ``failed`` + ``error_kind=database``，
+      零请求、零写入。这两条**故意先于**下面所有分支：它们一个是永久故障、一个
+      fail-open 就等于数据损坏，重试与「保留旧数据」都不是可接受的裁定
     * 无缺口 → ``success``, saved=0，零源端请求
     * 板块列表源端不可用（``None``）→ ``retained`` + ``error_kind=network``，
       让 ``core/runner.py`` 的 ``safe_task`` 在 30s 后重试
@@ -395,8 +488,30 @@ def update_concept_board_backfill(
     logger.info("🩹 任务: 概念板块缺口回补 (窗口 %d 个交易日)", lookback_days)
     logger.info("=" * 60)
 
+    # 缺硬依赖是**永久**故障：不进任何循环，直接 failed。旧实现让它跑完 days 循环、
+    # 每天 0 行、报 ``retained`` + ``error_kind=network``——退出码 0（retained 以 0
+    # 退出，AGENTS.md 无人值守段第 6 条）外加一次没有意义的 30s 重试，而重试多少次
+    # 结果都一样。``fetch_day_records`` 自己那道 ``ak is None`` 守卫留着，那是那个
+    # 函数的自我保护；这里补的是主任务这道「不进入写入循环」的短路。
+    if ak is None:
+        logger.error("❌ akshare 未安装，概念板块回补无法执行")
+        return _failed(
+            "akshare 未安装，无法回补（永久故障，重试无意义）", error_kind="internal"
+        )
+
     expected = get_expected_latest_trading_day()
     stored = _stored_dates(db)
+    if stored is None:
+        # fail-closed：三道 ``< expected`` 的日期闸门只管**上**侧，下侧原本只靠这个
+        # 读曾经 fail-open 的 ``set()`` 兜着。读不到 = 连「该补哪天」都算不出来，
+        # 于是窗口内**已经有行**的日子会被当成缺失，回补用 NULL 抹掉它们的涨跌家数
+        # （``_STORED_DATES_GAP``）。真表 + 真 provider 实测：504 行 → 504 行、
+        # 0 行带 up_count、data_source 全翻成 'em_hist'，而那一轮报的是 success。
+        logger.error("❌ 读不到 concept_board 已有日期，放弃回补")
+        return _failed(
+            f"读不到 concept_board 已有日期，已放弃回补（{_STORED_DATES_GAP}）",
+            error_kind="database",
+        )
     if target_date is not None:
         days = _target_days(target_date, expected=expected, stored=stored)
     else:
@@ -432,8 +547,10 @@ def update_concept_board_backfill(
         result["reason"] = "概念板块列表为空，无可回补板块"
         return result
 
-    # 下界由**本次**的板块数推出，不钉死任何数字。
-    min_boards = max(1, math.ceil(MIN_BOARD_COVERAGE * len(boards)))
+    # 下界由**本次**的板块数推出，**外加一个绝对下界**（``MIN_BOARD_FLOOR``）：
+    # 比例的分母自己也可能是残的——板块列表被 ``push2delay`` 静默截短时，
+    # 只按比例就等于按残缺的分母给自己发通行证，见那两个常量的注释。
+    min_boards = max(MIN_BOARD_FLOOR, math.ceil(MIN_BOARD_COVERAGE * len(boards)))
     for day in days:
         records = fetch_day_records(day, boards=boards)
         # 上界闸门：源端若返回 expected 当天或更晚的行，丢弃——快照已写 expected 且带
@@ -449,11 +566,14 @@ def update_concept_board_backfill(
             logger.warning(f"⚠️ 概念板块 {day} 回补 0 行，保留旧数据")
             continue
         # 覆盖闸门：数**不同板块**而不是记录条数（同一板块的重复行不该把覆盖率灌水）。
-        # 低于下界说明这天的源是残的——多半是熔断在循环中途打开了
-        # （core/source_client.py 每主机 5 次失败即冷却 120s），剩下几百个板块一个
-        # 请求都不发。**不写入**：写进去 ``find_missing_days`` 就认为那天齐了（它只看
-        # 有没有行），而 ``target_date`` 又会以「库内已有」拒掉重跑——那天从此永久残缺
-        # 且无人能修。留在缺口集里，下一轮自动重试才是真正的自愈。
+        # 低于下界有两种成因，处置相同（不写入、留在缺口集）：①这天的**源**是残的
+        # ——多半是熔断在循环中途打开了（core/source_client.py 每主机 5 次失败即冷却
+        # 120s），剩下几百个板块一个请求都不发；②**分母**本身是残的——板块列表被
+        # ``push2delay`` 静默截短（见 ``MIN_BOARD_FLOOR`` 的注释），那种形态下即使
+        # 源端完美，比例下界也会被残缺的分母拉到同样低，于是**放行**一个残缺的日子。
+        # 两种都**不写入**：写进去 ``find_missing_days`` 就认为那天齐了（它只看有没有
+        # 行），而 ``target_date`` 又会以「库内已有」拒掉重跑——那天从此永久残缺且
+        # 无人能修。留在缺口集里，下一轮自动重试才是真正的自愈。
         covered = len({r["concept_code"] for r in records})
         if covered < min_boards:
             meta["failed_days"].append(day)
