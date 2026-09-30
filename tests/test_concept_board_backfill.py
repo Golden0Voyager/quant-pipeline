@@ -448,3 +448,199 @@ def test_fetch_day_returns_empty_when_all_boards_fail(monkeypatch):
 
     monkeypatch.setattr(mod.ak, "stock_board_concept_hist_em", boom)
     assert mod.fetch_day_records("2026-09-28", boards=[("BK0001", "甲")]) == []
+
+
+# ===========================================================================
+# 主任务：状态语义 + 写入上界
+# ===========================================================================
+
+
+def _db():
+    from unittest.mock import MagicMock
+
+    db = MagicMock()
+    db.save_concept_board_batch = MagicMock(return_value=504)
+    return db
+
+
+def _one_board(monkeypatch, mod):
+    """给 ``_fetch_board_list`` 打桩，否则下面几条用例会真的发网络请求。
+
+    主任务是**先取列表再逐日抓取**，所以任何走到 days 循环的用例都必须桩掉它——
+    否则测试在离线时红、在联网时绿，而更糟的是本机东财通不通会改变 ``None`` 与
+    ``[]`` 的走向，让断言偶尔以另一种原因成立。**hermetic，不依赖真实源端状态。**
+    """
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: [("BK0001", "甲")])
+
+
+def _no_declared_gaps(monkeypatch, mod):
+    """把整日缺席登记册钉成空，否则下面几条的期望值会随**生产**登记册变动。
+
+    主任务不传 ``declared``（那正是生产路径），``find_missing_days`` 于是去读
+    ``core/known_gaps.py`` 的真实内容。今天 09-28/09-25 都不在册，所以这些用例今天
+    会过；但哪天 09-28 真被登记成整日缺席——**那恰恰是本功能存在的理由**——下面
+    六条会集体变红，且与它们各自要测的东西毫无关系。同本文件既有的 ``_NO_DECLARED``
+    约定（见其上方注释：生产登记册由 tests/test_known_gaps.py 单独钉住）。
+    """
+    monkeypatch.setattr(mod, "declared_missing_days", lambda: _NO_DECLARED)
+
+
+def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
+    """无缺口必须零请求零写入——这是日常手动跑时的常态路径。"""
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(
+        mod, "_stored_dates", lambda db: {"2026-09-28"}
+    )
+    def boom(*_a, **_k):
+        raise AssertionError("不应发起任何网络请求")
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    # 列表也要桩：它同样是一次网络请求，零请求的断言覆盖它。
+    monkeypatch.setattr(mod, "_fetch_board_list", boom)
+
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "success"
+    assert result["saved"] == 0
+    assert result["requested_days"] == 0
+    assert not db.save_concept_board_batch.called
+
+
+def test_all_days_backfilled_is_success(monkeypatch):
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "success"
+    assert result["saved"] == 504
+    assert result["backfilled_days"] == ["2026-09-28"]
+
+
+def test_partial_backfill_is_degraded(monkeypatch):
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: ([{"trade_date": day, "concept_code": "BK1"}]
+                                  if day == "2026-09-28" else []),
+    )
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "degraded"
+    assert result["backfilled_days"] == ["2026-09-28"]
+    assert result["failed_days"] == ["2026-09-25"]
+
+
+def test_nothing_backfilled_when_source_is_down_is_retained_network(monkeypatch):
+    """一天都没补上 = 源整体不可用，标 network 让 safe_task 的 30s 重试生效。
+
+    注意这条与上面两条**不是同一件事**：这里列表拿到了（``None`` vs ``[]`` 的分界已过），
+    失败发生在**逐日抓取**阶段——每一天都抓到 0 行。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "fetch_day_records", lambda day, boards=None: [])
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
+
+
+def test_board_list_source_down_is_retained_network_not_no_data(monkeypatch):
+    """``_fetch_board_list()`` 返回 ``None`` = 源挂了 = **可重试**故障。
+
+    折叠成 ``if not boards:`` 就会把它报成 ``no_data``（源正常但无数据），
+    ``safe_task`` 的 30s 重试不触发——一次网络抖动被静默吞成「本来就没数据」。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: None)
+
+    def boom(*_a, **_k):
+        raise AssertionError("列表不可用时不该开始逐日抓取")
+
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
+    assert result["requested_days"] == 1
+
+
+def test_board_list_legitimately_empty_is_no_data_not_a_network_failure(monkeypatch):
+    """``_fetch_board_list()`` 返回 ``[]`` = 源正常但确实没板块 = **事实**，不是故障。
+
+    这是 review 第二轮抓到的反向错误：一个**合法**的空结果被映射成
+    ``retained`` + ``error_kind=network``，于是 ``safe_task`` 把它当网络问题白等
+    30s 重试，而重试多少次结果都一样。``no_data`` 才是正确裁定。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: [])
+
+    def boom(*_a, **_k):
+        raise AssertionError("没有板块时不该发任何历史请求")
+
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "no_data"
+    assert "error_kind" not in result, "源正常，不该标成网络故障"
+    assert result["saved"] == 0
+
+
+def test_backfill_never_writes_expected_or_later(monkeypatch):
+    """写入上界闸门：源端若返回 expected 当天（或更晚）的行，必须被丢弃。"""
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    # 源端好心（或错乱）地把 09-29 也塞了回来
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [
+            {"trade_date": day, "concept_code": "BK1"},
+            {"trade_date": "2026-09-29", "concept_code": "BK2"},
+        ],
+    )
+    db = _db()
+    mod.update_concept_board_backfill(db)
+    written = db.save_concept_board_batch.call_args[0][0]
+    assert {r["trade_date"] for r in written} == {"2026-09-28"}
