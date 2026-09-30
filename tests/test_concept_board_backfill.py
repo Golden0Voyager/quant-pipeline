@@ -355,7 +355,12 @@ def test_fetch_board_list_reuses_the_snapshot_fetcher(monkeypatch):
 
 
 def test_fetch_day_makes_no_history_request_when_the_board_list_is_unavailable(monkeypatch):
-    """板块列表拿不到就别发 504 次历史请求——顺带覆盖 ``boards is None`` 的生产路径。"""
+    """板块列表拿不到就别发 504 次历史请求。
+
+    这里调的是 ``fetch_day_records(day)`` 的**默认参数**形态（``boards=None`` → 内部
+    取列表）。它不是生产的调用路径：Task 3 自己调 ``_fetch_board_list()`` 判完
+    ``None``/``[]`` 之后，永远显式传 ``boards=``。这条用例守的是公开默认值的可用性。
+    """
     import tasks.concept_board_backfill as mod
 
     def boom(*_a, **_k):
@@ -386,6 +391,53 @@ def test_fetch_day_skips_failed_board_and_keeps_the_rest(monkeypatch):
     monkeypatch.setattr(mod.ak, "stock_board_concept_hist_em", fake_hist)
     got = mod.fetch_day_records("2026-09-28", boards=boards)
     assert {r["concept_name"] for r in got} == {"甲", "丙"}
+
+
+def test_history_records_are_dropped_when_the_date_column_itself_is_renamed(caplog):
+    """``日期`` 自己被改名时必须弃掉该板块，而不是让它混进「值列全漂移」的告警里。
+
+    这是东财漂移的**第二种形态**：值列都认得出来、唯独日期列改名。两条守卫的
+    返回值都是 ``[]``（``row.get("trade_date")`` 拿不到就是 ``None``，被下一行的
+    ``raw_day is None`` 挡掉），所以真正可观测的差别只有**告警指向**：留着这道
+    守卫，说的是「缺日期列」；删掉它，落到的却是「值列全部漂移」——一个与事实
+    相反的诊断。删掉本守卫 → 本用例红。
+    """
+    import pandas as pd
+
+    from tasks.concept_board_backfill import _records_from_hist_df
+
+    df = pd.DataFrame({"时间": ["2026-09-28"], "收盘": [102.0]})
+    with caplog.at_level(logging.WARNING):
+        got = _records_from_hist_df(df, concept_code="BK0425", concept_name="算力")
+    assert got == []
+    assert "缺少日期列" in caplog.text
+
+
+def test_fetch_day_skips_board_with_unmappable_payload_and_keeps_the_rest(monkeypatch, caplog):
+    """载荷不是 DataFrame 时，按板块失败处理——不能炸掉整个 days 循环。
+
+    ``SourceClient.call`` 对任何非 HTTP 返回都判 ``success=True``（core/source_client.py:267），
+    于是 ``df.empty`` 上的 ``AttributeError`` 抛在 ``client.call`` 的 try **之外**。
+    模块 docstring 硬约束 2 要求「单个概念失败即跳过并计数，不中断其余」，而
+    ``sector_derivatives._retry`` 什么都吞所以那边免疫，这里没人吞：异常会一路
+    冒出 ``fetch_day_records``，丢掉已累积的记录**和**剩余所有待补的日子。
+    """
+    import pandas as pd
+
+    import tasks.concept_board_backfill as mod
+
+    def fake_hist(symbol, **_):
+        if symbol == "BK0002":
+            # 东财线路偶尔吐 JSON 错误信封而不是 DataFrame——不抛异常，
+            # 于是 SourceClient 会把它当成功结果原样交回来。
+            return {"code": 500, "data": None}
+        return pd.DataFrame({"日期": ["2026-09-28"], "收盘": [100.0]})
+
+    monkeypatch.setattr(mod.ak, "stock_board_concept_hist_em", fake_hist)
+    with caplog.at_level(logging.WARNING):
+        got = mod.fetch_day_records("2026-09-28", boards=[("BK0001", "甲"), ("BK0002", "乙")])
+    assert [r["concept_name"] for r in got] == ["甲"]
+    assert "乙" in caplog.text
 
 
 def test_fetch_day_returns_empty_when_all_boards_fail(monkeypatch):
