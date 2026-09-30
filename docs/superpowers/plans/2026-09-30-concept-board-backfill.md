@@ -32,9 +32,11 @@
 - Test: `tests/test_concept_board_backfill.py`
 
 **Interfaces:**
-- Consumes: `core.calendar.get_recent_trading_days(end_date: str, count: int) -> list[str]`（返回新到旧排列）；`core.known_gaps.declared_missing_days() -> frozenset[str]`
+- Consumes: `core.calendar.get_recent_trading_days(end_date: str, count: int) -> list[str]`（返回新到旧排列，**含 `end_date` 当天**）；`core.known_gaps.declared_missing_days() -> frozenset[str]`
 - Produces:
   ```python
+  DEFAULT_LOOKBACK_DAYS = 10
+
   def find_missing_days(
       have: Iterable[str],
       *,
@@ -44,6 +46,11 @@
   ) -> list[str]:
       """返回需要回补的交易日，升序。严格不含 expected 当天。"""
   ```
+  另**重新导出** `get_expected_latest_trading_day`：主任务（Task 3）直接调它算
+  `expected`，测试也打桩 `mod.get_expected_latest_trading_day`，所以它必须留在
+  本模块命名空间里（import 行带 `# noqa: F401` 与理由注释）。**不要**再包一层
+  `resolve_expected()`：那是一行零调用方的传声筒，而 Task 3 直接打桩这个名字，
+  效果完全一样。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -63,7 +70,11 @@ from tasks.concept_board_backfill import find_missing_days
 
 # 真实日历：2026-09-29 是周二，09-28 周一，**09-25 是中秋节休市、不在日历里**
 # （已对生产库只读核实：get_recent_trading_days("2026-09-29", 6) 不含它）。
-# 夹具里混入 09-25 会让回补任务去补一个根本不存在的交易日——504 次白跑的请求。
+#
+# ⚠️ 改动这份列表的人注意：**不要加进 2026-09-25**。整个模块没有任何「节假日」
+# 逻辑——休市日不进窗口，靠的是钉住的日历里根本没有它。加进去等于凭空造出一个
+# 不存在的交易日，回补会为它白跑 504 次请求。下面不再有用例守这条，因为任何
+# 断言只要日历里有它就必然通过，守不住；守它的责任在这个列表上。
 _TRADING_DAYS = [
     "2026-09-29", "2026-09-28", "2026-09-24", "2026-09-23", "2026-09-22",
     "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16", "2026-09-15",
@@ -109,7 +120,6 @@ def test_missing_days_are_returned_in_ascending_order(monkeypatch):
     assert got == [
         "2026-09-15", "2026-09-16", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-28",
     ]
-    assert got == sorted(got)
 
 
 def test_expected_day_is_never_included(monkeypatch):
@@ -123,10 +133,14 @@ def test_expected_day_is_never_included(monkeypatch):
 
 
 def test_declared_missing_days_are_skipped(monkeypatch):
-    """已登记的整日缺席是不可回补的，反复尝试只是浪费 504 次请求。"""
+    """已登记的整日缺席是不可回补的，反复尝试只是浪费 504 次请求。
+
+    ``have`` 传空：09-24 若同时出现在 ``have`` 里，「它没被返回」就是 ``present``
+    过滤的功劳，与 ``declared`` 无关——那样这条用例就白测了。
+    """
     _calendar(monkeypatch)
     got = find_missing_days(
-        ["2026-09-24"], expected="2026-09-29", lookback_days=10,
+        [], expected="2026-09-29", lookback_days=10,
         declared=frozenset({"2026-09-28", "2026-09-24"}),
     )
     assert "2026-09-28" not in got and "2026-09-24" not in got
@@ -136,24 +150,48 @@ def test_declared_missing_days_are_skipped(monkeypatch):
     ]
 
 
+def test_declared_default_comes_from_the_gap_registry(monkeypatch):
+    """**不传** ``declared`` 时必须真去查 ``declared_missing_days()``。
+
+    这是主任务（Task 3）实际走的路径——它不传 ``declared``。缺了这条查询，六个
+    已核实不可回补的整日缺席会各被请求 504 次，全部拿回空集。生产登记册的**内容**
+    由 ``tests/test_known_gaps.py`` 钉住；这里钉的是「默认路径确实去查它」，
+    因此打桩返回值而不是读真实登记册。
+    """
+    _calendar(monkeypatch)
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(
+        mod, "declared_missing_days",
+        lambda: frozenset({"2026-09-28", "2026-09-16"}),
+    )
+    got = find_missing_days([], expected="2026-09-29", lookback_days=10)
+    assert got == [
+        "2026-09-15", "2026-09-17", "2026-09-18", "2026-09-21",
+        "2026-09-22", "2026-09-23", "2026-09-24",
+    ]
+
+
 def test_lookback_window_is_truncated(monkeypatch):
     """窗口是成本上界：只看最近 lookback_days 个交易日。"""
     _calendar(monkeypatch)
     got = find_missing_days([], expected="2026-09-29", lookback_days=2, declared=_NO_DECLARED)
     assert got == ["2026-09-28"]
-
-
-def test_holiday_is_never_treated_as_a_gap(monkeypatch):
-    """09-25 是中秋节休市，钉住的日历里没有它，就绝不能被要求回补。"""
-    _calendar(monkeypatch)
-    assert find_missing_days(
-        _ALL_IN_WINDOW, expected="2026-09-29", lookback_days=10, declared=_NO_DECLARED
-    ) == []
-    assert "2026-09-25" not in find_missing_days(
-        [], expected="2026-09-29", lookback_days=10, declared=_NO_DECLARED)
-    assert "2026-09-25" not in find_missing_days(
-        [], expected="2026-09-29", lookback_days=11, declared=_NO_DECLARED)
 ```
+
+**已被 review 删掉的两处（勿加回）。**
+
+| 原内容 | 为什么是空的 |
+|---|---|
+| `test_holiday_is_never_treated_as_a_gap` | 断言「09-25 不在结果里」，而结果是用一份**根本不含 09-25** 的日历算出来的——那是夹具的属性，模块里没有任何节假日逻辑；它的第一条断言还是 `test_no_gap_returns_empty` 的逐字节副本。意图已移到上面 `_TRADING_DAYS` 的注释里 |
+| `assert got == sorted(got)` | 上一行的精确列表断言已把顺序钉死，这句只是复述 |
+
+**为什么 `test_declared_default_comes_from_the_gap_registry` 必须打桩模块属性。**
+`declared=None` 那条路径此前无覆盖，且按「全部显式传 declared」的写法**无法**被
+覆盖：Task 3 的日历桩只含 09-28/09-25/09-29，与六个登记日不相交，于是有没有这次
+查询它都是空操作——reviewer 实测把
+`skip = declared_missing_days() if declared is None else declared` 换成
+`skip = declared or frozenset()`，整个套件照样全绿。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -193,13 +231,23 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
-from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.calendar import (  # noqa: F401 — get_expected_latest_trading_day 重新导出
+    get_expected_latest_trading_day,
+    get_recent_trading_days,
+)
 from core.known_gaps import declared_missing_days
 
 logger = logging.getLogger(__name__)
 
-# 窗口默认值的含义：504 个概念 × 缺口天数 = 请求数，10 天即 5040 次、约 25 分钟。
-# 这是成本上界，超出窗口的缺口不会被自动发现——回补是手动任务，这是它的代价。
+# 上面那句 noqa 的理由：主任务（Task 3）直接调 get_expected_latest_trading_day()
+# 算 expected，测试也打桩本模块的这个属性。它必须留在模块命名空间里，删掉只会
+# 逼每个调用点各自再导一次。同 daily_pipeline.py 的既有做法。
+#
+# 窗口默认值的含义：504 个概念 × **可用**缺口天数 = 请求数。有效窗口比 lookback_days
+# 少一天——get_recent_trading_days 给的是「含 expected 在内」的 N 个交易日
+# （core/calendar.py 用 `d <= end_date`），而 expected 永不入窗（上面硬约束 1），
+# 于是默认 10 对应 9 个可用交易日 = 4536 次请求、约 22 分钟。这是成本上界，
+# 超出窗口的缺口不会被自动发现——回补是手动任务，这是它的代价。
 DEFAULT_LOOKBACK_DAYS = 10
 
 
@@ -218,7 +266,8 @@ def find_missing_days(
     Args:
         have: 库内 ``concept_board`` 已有的 ``trade_date`` 集合。
         expected: ``get_expected_latest_trading_day()``。
-        lookback_days: 窗口大小，单位是**交易日**。
+        lookback_days: 窗口大小，单位是**交易日**；``get_recent_trading_days`` 返回的
+            N 天**含** ``expected``，而它永不入窗，故实际可用窗口是 N-1 天。
         declared: 已登记的整日缺席日期；None 时取 ``declared_missing_days()``。
     """
     skip = declared_missing_days() if declared is None else declared
@@ -229,12 +278,11 @@ def find_missing_days(
         for day in recent
         if day < expected and day not in present and day not in skip
     )
-
-
-def resolve_expected() -> str:
-    """独立成函数便于测试打桩。"""
-    return get_expected_latest_trading_day()
 ```
+
+**不要加 `resolve_expected()`。** 它曾是一行零调用方的传声筒，docstring 声称
+「独立成函数便于测试打桩」——但 Task 3 的测试打桩的是模块上的
+`get_expected_latest_trading_day`，有没有这层包装效果完全一样。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -303,6 +351,11 @@ the price of keeping this manual.
   不自动发现，这是保持手动触发的代价
 MSG
 ```
+
+> 上面 Task 1 的两段 commit message 保留原样——它们是已经落库的历史记录
+> （`6ef9560` / `b786abe`），改写等于伪造。其中「5040 次请求（~25 分钟）」是
+> **当时就错的**：有效窗口是 N-1 而非 N，真实数字是 4536 次（约 22 分钟）。
+> 该数字已在 `c9038f7` 的实现注释与本文档 Task 4 的各处订正。
 
 ---
 
@@ -637,7 +690,7 @@ MSG
 - Test: `tests/test_concept_board_backfill.py`（追加）
 
 **Interfaces:**
-- Consumes: `find_missing_days`、`fetch_day_records`、`db.save_concept_board_batch(records) -> int`（`interface.DatabaseInterface`）
+- Consumes: `find_missing_days`、`get_expected_latest_trading_day`（直接调，**不要**再包一层）、`fetch_day_records`、`db.save_concept_board_batch(records) -> int`（`interface.DatabaseInterface`）
 - Produces:
   ```python
   def update_concept_board_backfill(
@@ -827,7 +880,7 @@ def update_concept_board_backfill(
         logger.error("❌ akshare 未安装")
         return {"status": "failed", "error": "akshare not installed", "saved": 0}
 
-    expected = resolve_expected()
+    expected = get_expected_latest_trading_day()
     stored = _stored_dates(db)
     if target_date is not None:
         days = [] if target_date >= expected else [target_date]
@@ -1035,7 +1088,7 @@ def _stage_task_names() -> set[str]:
 def test_task_is_not_wired_into_any_daily_stage():
     assert TASK not in _stage_task_names(), (
         f"{TASK} 出现在 run_all 的 stage 列表里：core/runner.py 的 cadence 过滤"
-        "不跳过 ON_DEMAND 任务，一旦接入就会每晚执行 5040 次请求"
+        "不跳过 ON_DEMAND 任务，一旦接入就会每晚执行 4536 次请求"
     )
 
 
@@ -1135,7 +1188,11 @@ from tasks.concept_board_backfill import update_concept_board_backfill
 ```python
     parser.add_argument(
         "--lookback", type=int, default=10,
-        help="回补窗口，单位是交易日（仅 update_concept_board_backfill 使用）",
+        help=(
+            "回补窗口，单位是交易日（仅 update_concept_board_backfill 使用）。"
+            "实际可用窗口比该值少一个交易日：窗口取的是「含 expected 在内」的 N 天，"
+            "而 expected 永不入窗（回补不写快照已写的那天），故 --lookback 1 不补任何一天。"
+        ),
     )
 ```
 
@@ -1204,7 +1261,7 @@ feat(concept_board): dispatch the backfill through --task and --lookback
 Registers the callable and adds a --lookback flag whose unit is trading
 days, so `--lookback 60` reaches the 23 days of historical debt in one
 run. Deliberately absent: any change to CATCH_UP_TASK_ORDER or to the
-run_all stage lists. Wiring it into the nightly pipeline would add 5040
+run_all stage lists. Wiring it into the nightly pipeline would add 4536
 requests to every run, and adding it to the catch-up order would route
 the button to the snapshot task forever.
 
@@ -1213,7 +1270,7 @@ the button to the snapshot task forever.
 - 注册 callable，新增 --lookback 开关，单位是交易日，`--lookback 60` 可一次
   覆盖 23 天历史欠账
 - 刻意不动 CATCH_UP_TASK_ORDER 与 run_all 的任何 stage 列表：接进夜跑会让每轮
-  多 5040 次请求；接进补齐清单会让按钮永远选到快照任务
+  多 4536 次请求；接进补齐清单会让按钮永远选到快照任务
 MSG
 ```
 
@@ -1239,7 +1296,7 @@ test(concept_board): gate the backfill against being wired into the run
 
 Cadence alone does not keep this task out of the nightly pipeline:
 core/runner.py's filter skips only non-ON_DEMAND tasks, so adding the task
-to a stage list would execute 5040 requests every night while still
+to a stage list would execute 4536 requests every night while still
 reading as ON_DEMAND in the registry. The gate parses daily_pipeline.py's
 stage assignments with ast and asserts the name is absent from all of them.
 
@@ -1255,7 +1312,7 @@ CATCH_UP_TASK_ORDER reddens test_task_is_absent_from_catch_up_order.
 门禁：回补任务不得被接进日常管道
 
 - cadence 本身挡不住：core/runner.py 只跳过非 ON_DEMAND 的任务，所以一旦
-  被加进任何 stage 列表，它会每晚跑 5040 次请求，而注册表里仍显示 ON_DEMAND。
+  被加进任何 stage 列表，它会每晚跑 4536 次请求，而注册表里仍显示 ON_DEMAND。
   门禁用 ast 静态解析 daily_pipeline.py 的 stage 赋值并断言名字不在其中
 - 补齐清单那条更隐蔽：compute_catch_up_tasks 用 claimed 集合把一张表只交给
   一个任务，所以排在 update_concept_board 之后的回补条目会让按钮只补今天、
