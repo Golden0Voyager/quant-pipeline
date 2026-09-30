@@ -431,11 +431,8 @@ _HIST_COL_MAP = {
     "成交额": "amount",
     "涨跌幅": "pct_change",
 }
-_HIST_KEEP = (
-    "trade_date", "concept_code", "concept_name", "open", "close",
-    "high", "low", "volume", "amount", "pct_change",
-    "up_count", "down_count", "data_source",
-)
+# 记录键集固定，缺列写 None。行与行之间键不一致会让下游按 key 取值踩 KeyError。
+_HIST_VALUE_COLS = ("open", "close", "high", "low", "volume", "amount", "pct_change")
 
 
 def _records_from_hist_df(
@@ -445,8 +442,7 @@ def _records_from_hist_df(
     if df is None or df.empty:
         return []
     df = df.rename(columns=_HIST_COL_MAP)
-    known = [c for c in ("open", "close", "high", "low", "volume", "amount", "pct_change")
-             if c in df.columns]
+    known = [c for c in _HIST_VALUE_COLS if c in df.columns]
     unknown = [c for c in df.columns if c not in _HIST_COL_MAP.values()]
     if unknown:
         logger.warning(
@@ -460,17 +456,23 @@ def _records_from_hist_df(
         day = str(row.get("trade_date", "")).strip()[:10]
         if not day:
             continue
-        record = {
+        # 键集固定：未识别的列写 None 而不是省略，否则同一批记录里有的行有
+        # pct_change、有的行没有，下游按 key 取值会踩 KeyError。
+        records.append({
             "trade_date": day,
             "concept_code": concept_code,
             "concept_name": concept_name,
+            "open": row.get("open"),
+            "close": row.get("close"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount"),
+            "pct_change": row.get("pct_change"),
             "up_count": None,
             "down_count": None,
             "data_source": HISTORY_SOURCE,
-        }
-        for col in known:
-            record[col] = row.get(col)
-        records.append({k: record[k] for k in _HIST_KEEP if k in record})
+        })
     return records
 
 
