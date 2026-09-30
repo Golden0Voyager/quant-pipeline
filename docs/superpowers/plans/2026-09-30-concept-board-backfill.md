@@ -61,11 +61,19 @@ from __future__ import annotations
 
 from tasks.concept_board_backfill import find_missing_days
 
-# 真实日历：2026-09-29 是周二，09-28 周一，09-25 是中秋节休市。
+# 真实日历：2026-09-29 是周二，09-28 周一，**09-25 是中秋节休市、不在日历里**
+# （已对生产库只读核实：get_recent_trading_days("2026-09-29", 6) 不含它）。
+# 夹具里混入 09-25 会让回补任务去补一个根本不存在的交易日——504 次白跑的请求。
 _TRADING_DAYS = [
-    "2026-09-29", "2026-09-28", "2026-09-25", "2026-09-24", "2026-09-23",
-    "2026-09-22", "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16",
-    "2026-09-15", "2026-09-14",
+    "2026-09-29", "2026-09-28", "2026-09-24", "2026-09-23", "2026-09-22",
+    "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16", "2026-09-15",
+    "2026-09-14",
+]
+
+# lookback=10 / expected=09-29 时，去掉 expected 之后的窗口内容（9 天）
+_ALL_IN_WINDOW = [
+    "2026-09-28", "2026-09-24", "2026-09-23", "2026-09-22", "2026-09-21",
+    "2026-09-18", "2026-09-17", "2026-09-16", "2026-09-15",
 ]
 
 
@@ -81,17 +89,18 @@ def _calendar(monkeypatch):
 
 def test_no_gap_returns_empty(monkeypatch):
     _calendar(monkeypatch)
-    have = ["2026-09-28", "2026-09-25", "2026-09-24", "2026-09-23", "2026-09-22",
-            "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16", "2026-09-15"]
-    assert find_missing_days(have, expected="2026-09-29", lookback_days=10) == []
+    assert find_missing_days(_ALL_IN_WINDOW, expected="2026-09-29", lookback_days=10) == []
 
 
 def test_missing_days_are_returned_in_ascending_order(monkeypatch):
     _calendar(monkeypatch)
-    # 库内实测形态：只有零星几天，窗口内缺 09-28/09-25/09-24
+    # 库内实测形态：只有零星几天。窗口 9 天里已有 3 天 → 缺 6 天。
     have = ["2026-09-21", "2026-09-18", "2026-09-17"]
     got = find_missing_days(have, expected="2026-09-29", lookback_days=10)
-    assert got == ["2026-09-24", "2026-09-25", "2026-09-28"]
+    assert got == [
+        "2026-09-15", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-28",
+    ]
+    assert got == sorted(got)
 
 
 def test_expected_day_is_never_included(monkeypatch):
@@ -106,10 +115,14 @@ def test_declared_missing_days_are_skipped(monkeypatch):
     """已登记的整日缺席是不可回补的，反复尝试只是浪费 504 次请求。"""
     _calendar(monkeypatch)
     got = find_missing_days(
-        ["2026-09-25"], expected="2026-09-29", lookback_days=10,
-        declared=frozenset({"2026-09-28", "2026-09-25"}),
+        ["2026-09-24"], expected="2026-09-29", lookback_days=10,
+        declared=frozenset({"2026-09-28", "2026-09-24"}),
     )
-    assert got == ["2026-09-24"]
+    assert "2026-09-28" not in got and "2026-09-24" not in got
+    assert got == [
+        "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
+        "2026-09-21", "2026-09-22", "2026-09-23",
+    ]
 
 
 def test_lookback_window_is_truncated(monkeypatch):
@@ -119,12 +132,12 @@ def test_lookback_window_is_truncated(monkeypatch):
     assert got == ["2026-09-28"]
 
 
-def test_holiday_is_not_treated_as_a_gap(monkeypatch):
-    """09-25 是中秋节休市，钉住的日历里没有它，就不能要求回补它。"""
+def test_holiday_is_never_treated_as_a_gap(monkeypatch):
+    """09-25 是中秋节休市，钉住的日历里没有它，就绝不能被要求回补。"""
     _calendar(monkeypatch)
-    have = ["2026-09-29", "2026-09-28", "2026-09-24", "2026-09-23", "2026-09-22",
-            "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16", "2026-09-15"]
-    assert find_missing_days(have, expected="2026-09-29", lookback_days=10) == []
+    assert find_missing_days(_ALL_IN_WINDOW, expected="2026-09-29", lookback_days=10) == []
+    assert "2026-09-25" not in find_missing_days([], expected="2026-09-29", lookback_days=10)
+    assert "2026-09-25" not in find_missing_days([], expected="2026-09-29", lookback_days=11)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
