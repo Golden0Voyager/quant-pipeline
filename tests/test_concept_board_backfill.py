@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from tasks.concept_board_backfill import find_missing_days
 
 # 真实日历：2026-09-29 是周二，09-28 周一，**09-25 是中秋节休市、不在日历里**
@@ -118,3 +120,75 @@ def test_lookback_window_is_truncated(monkeypatch):
     _calendar(monkeypatch)
     got = find_missing_days([], expected="2026-09-29", lookback_days=2, declared=_NO_DECLARED)
     assert got == ["2026-09-28"]
+
+
+def test_history_records_carry_em_hist_source_and_null_counts():
+    """历史 K 线没有涨跌家数，必须显式写 None 并标记来源，供下游区分。"""
+    import pandas as pd
+
+    from tasks.concept_board_backfill import HISTORY_SOURCE, _records_from_hist_df
+
+    df = pd.DataFrame({
+        "日期": ["2026-09-28", "2026-09-28"],
+        "开盘": [100.0, 100.0],
+        "收盘": [102.0, 102.0],
+        "最高": [103.0, 103.0],
+        "最低": [99.0, 99.0],
+        "成交量": [1000.0, 1000.0],
+        "成交额": [1.0e8, 1.0e8],
+        "涨跌幅": [2.0, 2.0],
+    })
+    got = _records_from_hist_df(df, concept_code="BK0425", concept_name="算力")
+    assert len(got) == 2
+    row = got[0]
+    assert row["trade_date"] == "2026-09-28"
+    assert row["concept_code"] == "BK0425"
+    assert row["concept_name"] == "算力"
+    assert row["close"] == 102.0
+    assert row["pct_change"] == 2.0
+    assert row["data_source"] == HISTORY_SOURCE
+    assert row["up_count"] is None
+    assert row["down_count"] is None
+
+
+def test_history_records_drop_unknown_columns(caplog):
+    """源端列名漂移时只写能识别的列并告警，不抛异常——否则整轮回补全废。"""
+    import pandas as pd
+
+    from tasks.concept_board_backfill import _records_from_hist_df
+
+    df = pd.DataFrame({"日期": ["2026-09-28"], "收盘": [102.0], "某个新字段": [1.0]})
+    with caplog.at_level(logging.WARNING):
+        got = _records_from_hist_df(df, concept_code="BK0425", concept_name="算力")
+    assert len(got) == 1
+    assert got[0]["close"] == 102.0
+    assert got[0]["pct_change"] is None
+    assert "列名" in caplog.text
+
+
+def test_fetch_day_skips_failed_board_and_keeps_the_rest(monkeypatch):
+    """单个板块失败不中断其余——一次失败不该让 504 个概念白跑。"""
+    import pandas as pd
+
+    import tasks.concept_board_backfill as mod
+
+    boards = [("BK0001", "甲"), ("BK0002", "乙"), ("BK0003", "丙")]
+
+    def fake_hist(symbol, **_):
+        if symbol == "乙":
+            raise ConnectionError("Connection closed abruptly")
+        return pd.DataFrame({"日期": ["2026-09-28"], "收盘": [100.0]})
+
+    monkeypatch.setattr(mod.ak, "stock_board_concept_hist_em", fake_hist)
+    got = mod.fetch_day_records("2026-09-28", boards=boards)
+    assert {r["concept_name"] for r in got} == {"甲", "丙"}
+
+
+def test_fetch_day_returns_empty_when_all_boards_fail(monkeypatch):
+    import tasks.concept_board_backfill as mod
+
+    def boom(*_a, **_k):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(mod.ak, "stock_board_concept_hist_em", boom)
+    assert mod.fetch_day_records("2026-09-28", boards=[("BK0001", "甲")]) == []
