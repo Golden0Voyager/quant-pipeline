@@ -687,6 +687,61 @@ def test_sector_derivatives_ak_none():
     assert "error" in result
 
 
+@pytest.mark.parametrize(
+    ("max_date", "expect_written", "expect_status"),
+    [
+        # 与期望日同一天：正常写入、整轮 success
+        ("2026-09-29", True, "success"),
+        # 只差一个交易日：源端盘后发布延迟 —— 写入已有数据，整轮 retained
+        ("2026-09-28", True, "retained"),
+        # 差两个交易日以上：源端真有问题，仍整批拒收
+        ("2026-09-25", False, "retained"),
+    ],
+)
+def test_sector_daily_writes_when_source_is_only_one_trading_day_behind(
+    max_date, expect_written, expect_status, caplog
+):
+    """red-proof: 源端只差一个交易日时，sector_daily 必须写入而不是整批丢弃。
+
+    实测 2026-09-29 晚 20:05：东财行业板块列表失败 → 同花顺兜底拿到 90 个行业、
+    最新只到 09-28，`check_task_freshness` 判 stale，于是**整批一行不写**，
+    sector_daily 卡在 09-24 不动。09-28 那批数据本身是好的、缺的正是它，
+    丢掉它没有任何好处，只让表每天原地踏步、每天进补齐清单。
+
+    分界取在「差一个交易日」而不是「差任意天数」：同花顺行业指数在盘后
+    确实会晚一根，多于此就说明源端真出问题了，那时才该整批拒收。
+    """
+    expected = "2026-09-29"
+    records = [
+        {"sector_name": "半导体", "trade_date": "2026-09-25", "close": 100.0, "pct_change": 1.0},
+        {"sector_name": "半导体", "trade_date": max_date, "close": 101.0, "pct_change": 1.5},
+    ]
+    db = MagicMock()
+    db.save_sector_daily_batch = MagicMock(return_value=len(records))
+    db.save_sector_valuation_batch = MagicMock(return_value=1)
+    db.save_index_futures_basis_batch = MagicMock(return_value=1)
+    with (
+        patch.object(sector_derivatives, "_fetch_sector_daily", return_value=records),
+        patch.object(sector_derivatives, "_fetch_sector_valuation", return_value=[]),
+        patch.object(sector_derivatives, "_fetch_index_futures_basis", return_value=[]),
+        patch.object(
+            sector_derivatives, "get_expected_latest_trading_day", return_value=expected
+        ),
+        patch.object(
+            sector_derivatives,
+            "get_recent_trading_days",
+            return_value=["2026-09-29", "2026-09-28", "2026-09-25"],
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = sector_derivatives.update_sector_derivatives(db)
+    assert db.save_sector_daily_batch.called is expect_written
+    assert result["sector_daily"] == (len(records) if expect_written else 0)
+    assert result["status"] == expect_status
+    if not expect_written:
+        assert "陈旧" in caplog.text
+
+
 # ===========================================================================
 # index_chain
 # ===========================================================================
