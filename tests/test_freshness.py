@@ -115,6 +115,25 @@ def test_status_for_table_newly_paneled_periodic_tables():
     assert status_for_table("index_member_history", "2026-07-29", "2026-07-31", None) == "按周更新"
 
 
+def test_gold_price_is_published_t_plus_one_not_daily():
+    """上金所基准金价按 T+1 发布，不得按交易日判滞后。
+
+    晚盘价的交易时段跨到次日凌晨 02:30，早盘价也要等当日 09:00 后才定，
+    所以「当天收盘后跑」时能拿到的最新一根天然早于当日交易日晚。
+    实测（2026-09-29）：源端 ``ak.spot_golden_benchmark_sge()`` 最新只到 09-27，
+    而 ``update_gold_price`` 每轮都返回 success/saved=10 却不推进日期——
+    面板据此把 ``update_gold_price`` 永久列进补齐清单，重跑多少次都不可能补上。
+    """
+    from core.freshness import DELAYED_PUBLISH_TABLES, status_for_table
+
+    assert "gold_price" in DELAYED_PUBLISH_TABLES
+    assert status_for_table("gold_price", "2026-07-30", "2026-07-31", None) == "T+1"
+    # 面板不再把它算作缺失 → 补齐清单里不出现该任务
+    latest = _fresh_latest_dates("2026-07-31")
+    latest["gold_price"] = "2026-07-29"  # 差 2 天，按日频判定会是「滞后」
+    assert "update_gold_price" not in compute_catch_up_tasks(latest, "2026-07-31")
+
+
 def test_non_daily_task_tables_must_be_classified_as_non_daily():
     """非日频任务写的表必须落在非日频集合里，否则会被按交易日误判。
 
