@@ -22,16 +22,20 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from core.calendar import (  # noqa: F401 — get_expected_latest_trading_day 重新导出
+from core.calendar import (
     get_expected_latest_trading_day,
     get_recent_trading_days,
 )
 from core.known_gaps import declared_missing_days
 from core.source_client import get_default_client
+from interface import DatabaseInterface
 from tasks.concept_board import _fetch_concept_list_em
 
 try:
@@ -41,12 +45,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# 上面那句 noqa 的理由：主任务（Task 3）在本模块内直接调 get_expected_latest_trading_day()
-# 算 expected，测试也打桩本模块的这个属性——五个 Task 3 用例的
-# monkeypatch.setattr(mod, "get_expected_latest_trading_day", ...) 要靠这个名字解析到它，
-# 所以它必须绑在模块对象上。同 daily_pipeline.py:37 的 timedelta（那里
-# tests/test_daily_pipeline.py:4468 真的 patch 了它）。
-#
 # 窗口默认值的含义：504 个概念 × **可用**缺口天数 = 请求数。有效窗口比 lookback_days
 # 少一天——get_recent_trading_days 给的是「含 expected 在内」的 N 个交易日
 # （core/calendar.py 用 `d <= end_date`），而 expected 永不入窗（上面硬约束 1），
@@ -270,3 +268,126 @@ def fetch_day_records(
             )
         records.extend(kept)
     return records
+
+
+# ===========================================================================
+# 主任务
+# ===========================================================================
+
+
+def _stored_dates(db: DatabaseInterface) -> set[str]:
+    """库内 ``concept_board`` 已有的 trade_date。取不到时返回空集合。"""
+    path = getattr(db, "db_path", None)
+    if not path:
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{Path(str(path)).resolve()}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error as exc:
+        logger.warning(f"⚠️ 读取 concept_board 已有日期失败: {exc}")
+        return set()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT trade_date FROM concept_board")
+        return {str(r[0])[:10] for r in cur.fetchall() if r[0]}
+    except sqlite3.Error as exc:
+        logger.warning(f"⚠️ 读取 concept_board 已有日期失败: {exc}")
+        return set()
+    finally:
+        conn.close()
+
+
+def update_concept_board_backfill(
+    db: DatabaseInterface,
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    target_date: str | None = None,
+    _task_run_id: str | None = None,
+) -> dict[str, Any]:
+    """回补 ``concept_board`` 已丢失的交易日。手动任务，不进日常管道。
+
+    状态语义（按「有没有补上任何一天」分，不按「失败几天」分）：
+
+    * 无缺口 → ``success``, saved=0，零网络请求
+    * 板块列表源端不可用（``None``）→ ``retained`` + ``error_kind=network``，
+      让 ``core/runner.py`` 的 ``safe_task`` 在 30s 后重试
+    * 板块列表**合法为空**（``[]``）→ ``no_data``：源正常、无事可做，重试无意义
+    * 全部补上 → ``success``
+    * 补上至少一天 → ``degraded``，未补足的日子列入 ``failed_days``
+    * **一天都没补上** → ``retained`` + ``error_kind=network``（同第一条：源整体不可用）
+
+    Args:
+        db: 数据库接口。
+        lookback_days: 窗口大小，单位**交易日**。
+        target_date: 指定只补这一天；None 时按窗口算缺口。
+        _task_run_id: 由 ``safe_task`` 注入。
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("🩹 任务: 概念板块缺口回补 (窗口 %d 个交易日)", lookback_days)
+    logger.info("=" * 60)
+
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return {"status": "failed", "error": "akshare not installed", "saved": 0}
+
+    expected = get_expected_latest_trading_day()
+    stored = _stored_dates(db)
+    if target_date is not None:
+        days = [] if target_date >= expected else [target_date]
+    else:
+        days = find_missing_days(stored, expected=expected, lookback_days=lookback_days)
+
+    result: dict[str, Any] = {
+        "saved": 0,
+        "requested_days": len(days),
+        "backfilled_days": [],
+        "failed_days": [],
+    }
+    if not days:
+        logger.info("✅ 概念板块无缺口，无需回补")
+        result["status"] = "success"
+        return result
+
+    logger.info(f"📋 待补 {len(days)} 个交易日: {', '.join(days)}")
+    boards = _fetch_board_list()
+    if boards is None:
+        # 源端不可用 = **故障**，值得 safe_task 30s 后重试。
+        result["status"] = "retained"
+        result["error_kind"] = "network"
+        result["retained_old_data"] = True
+        result["error"] = "概念板块列表不可用（源端故障），未回补任何一天"
+        return result
+    if not boards:
+        # 源端正常但确实没有板块 = **事实**，不是故障。报 retained + error_kind=network
+        # 会让 safe_task 白等一轮 30s 重试，而重试多少次结果都一样。
+        logger.warning("⚠️ 概念板块列表为空，源正常但无可回补板块")
+        result["status"] = "no_data"
+        result["reason"] = "概念板块列表为空，无可回补板块"
+        return result
+
+    for day in days:
+        records = fetch_day_records(day, boards=boards)
+        # 上界闸门：源端若返回 expected 当天或更晚的行，丢弃。
+        # 快照已写 expected 且带涨跌家数，INSERT OR REPLACE 会用 NULL 覆盖它。
+        records = [r for r in records if r["trade_date"] < expected]
+        if not records:
+            result["failed_days"].append(day)
+            logger.warning(f"⚠️ 概念板块 {day} 回补 0 行，保留旧数据")
+            continue
+        saved = db.save_concept_board_batch(records)
+        result["saved"] = saved
+        result["backfilled_days"].append(day)
+        logger.info(f"✅ 概念板块 {day} 回补完成: {saved} 条")
+
+    if not result["backfilled_days"]:
+        result["status"] = "retained"
+        result["error_kind"] = "network"
+        result["retained_old_data"] = True
+        result["error"] = f"源不可用，{len(days)} 个交易日全部未补上"
+        logger.warning(f"⚠️ 概念板块回补未补上任何一天，保留旧数据: {days}")
+    elif result["failed_days"]:
+        result["status"] = "degraded"
+        result["reason"] = f"partially backfilled; failed days: {', '.join(result['failed_days'])}"
+        result["retained_old_data"] = True
+    else:
+        result["status"] = "success"
+    return result
