@@ -121,9 +121,10 @@ def _records_from_hist_df(
 
     ``df is None`` 这道守卫静态上不可达（``SourceClient.call`` 只在 operation 返回时
     才给 ``success=True``，而该 operation 返回 DataFrame 或抛异常），但它是**第三手**
-    不可信载荷前唯一的闸：真走到时，代价是 ``df.empty`` 的 AttributeError 抛在
-    ``client.call`` 之外，会中断当天余下 500 个板块。为一个词点代价不值的取舍：
-    留下。返回类型写非 Optional 是因为那才是**约定**，不是对未类型化上游的断言。
+    不可信载荷前唯一的闸。真走到时，代价只是白白遍历一次空表——本函数的所有调用方
+    （``fetch_day_records`` 的 per-board try）都已把异常边界兜住，所以这里**不必**再
+    自己吞异常：职责分层是「循环按板块兜住」，不是每层都吞一遍。返回类型写非 Optional
+    是因为那才是**约定**，不是对未类型化上游的断言。
     """
     if df is None or df.empty:
         return []
@@ -224,9 +225,11 @@ def fetch_day_records(
         return []
     if boards is None:
         boards = _fetch_board_list()
-    if boards is None:
-        logger.warning(f"⚠️ 概念板块列表不可用，{day} 整日跳过")
-        return []
+    # ``not boards`` 一次覆盖 ``None``（源端不可用）与 ``[]``（源端正常但确实没有
+    # 板块）——本函数对两者**一律**返回空，没有第三种答案可给。「源挂了」还是
+    # 「没板块」的分界归主任务：它自己调 ``_fetch_board_list()``、在 ``None`` 时
+    # 判 ``retained`` + ``error_kind=network``，之后总是显式传 ``boards=``（Task 3
+    # 的 Interfaces 约定）。这里再判一次只会多打一行无人断言的告警。
     if not boards:
         return []
     compact = day.replace("-", "")
@@ -242,9 +245,23 @@ def fetch_day_records(
         if not resp.success:
             logger.warning(f"⚠️ 概念 {name}({code}) 历史获取失败: {resp.metadata.error}")
             continue
-        board_records = _records_from_hist_df(
-            resp.data, concept_code=code, concept_name=name
-        )
+        # 映射这一步也必须按板块兜住，而不只是「请求失败」才兜。``SourceClient.call``
+        # 对任何非 HTTP 返回都判 ``success=True``（core/source_client.py:267），于是既
+        # 不是 DataFrame 也不抛异常的载荷（东财偶尔吐 JSON 错误信封）会在这里触发
+        # ``df.empty`` 的 AttributeError——而它抛在 ``client.call`` 的 try **之外**，
+        # 一路冒出本函数，带走已累积的记录**和**剩余所有待补的日子，直接违反硬约束 2。
+        # 四个类型正是对一个未类型化载荷做 df.empty / rename / 列成员判断 / iterrows
+        # 会抛的（收窄而非 Exception，同 P2-11 的纪律：不吞 MemoryError 与中断）。
+        try:
+            board_records = _records_from_hist_df(
+                resp.data, concept_code=code, concept_name=name
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                f"⚠️ 概念 {name}({code}) 历史载荷无法映射"
+                f"（{type(exc).__name__}: {exc}），跳过该板块"
+            )
+            continue
         kept = [r for r in board_records if r["trade_date"] == day]
         if len(kept) != len(board_records):
             logger.warning(
