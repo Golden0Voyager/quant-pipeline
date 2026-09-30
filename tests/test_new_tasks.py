@@ -695,7 +695,8 @@ def test_sector_derivatives_ak_none():
         # 只差一个交易日：源端盘后发布延迟 —— 写入已有数据，整轮 retained
         ("2026-09-28", True, "retained"),
         # 差两个交易日以上：源端真有问题，仍整批拒收
-        ("2026-09-25", False, "retained"),
+        # 09-24 才是 09-29 之前第二个交易日（09-25 是中秋节休市，别用）
+        ("2026-09-24", False, "retained"),
     ],
 )
 def test_sector_daily_writes_when_source_is_only_one_trading_day_behind(
@@ -710,10 +711,13 @@ def test_sector_daily_writes_when_source_is_only_one_trading_day_behind(
 
     分界取在「差一个交易日」而不是「差任意天数」：同花顺行业指数在盘后
     确实会晚一根，多于此就说明源端真出问题了，那时才该整批拒收。
+
+    日历取自真实缓存：09-29(Tue) → 09-28(Mon) → 09-24(Thu)，
+    09-25 是中秋节休市，夹具里不能拿它当交易日。
     """
     expected = "2026-09-29"
     records = [
-        {"sector_name": "半导体", "trade_date": "2026-09-25", "close": 100.0, "pct_change": 1.0},
+        {"sector_name": "半导体", "trade_date": "2026-09-23", "close": 100.0, "pct_change": 1.0},
         {"sector_name": "半导体", "trade_date": max_date, "close": 101.0, "pct_change": 1.5},
     ]
     db = MagicMock()
@@ -730,7 +734,7 @@ def test_sector_daily_writes_when_source_is_only_one_trading_day_behind(
         patch.object(
             sector_derivatives,
             "get_recent_trading_days",
-            return_value=["2026-09-29", "2026-09-28", "2026-09-25"],
+            return_value=["2026-09-29", "2026-09-28", "2026-09-24"],
         ),
         caplog.at_level(logging.WARNING),
     ):
