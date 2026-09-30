@@ -24,13 +24,23 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
-from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
+from core.calendar import (  # noqa: F401 — get_expected_latest_trading_day 重新导出
+    get_expected_latest_trading_day,
+    get_recent_trading_days,
+)
 from core.known_gaps import declared_missing_days
 
 logger = logging.getLogger(__name__)
 
-# 窗口默认值的含义：504 个概念 × 缺口天数 = 请求数，10 天即 5040 次、约 25 分钟。
-# 这是成本上界，超出窗口的缺口不会被自动发现——回补是手动任务，这是它的代价。
+# 上面那句 noqa 的理由：主任务（Task 3）直接调 get_expected_latest_trading_day()
+# 算 expected，测试也打桩本模块的这个属性。它必须留在模块命名空间里，删掉只会
+# 逼每个调用点各自再导一次。同 daily_pipeline.py 的既有做法。
+#
+# 窗口默认值的含义：504 个概念 × **可用**缺口天数 = 请求数。有效窗口比 lookback_days
+# 少一天——get_recent_trading_days 给的是「含 expected 在内」的 N 个交易日
+# （core/calendar.py 用 `d <= end_date`），而 expected 永不入窗（上面硬约束 1），
+# 于是默认 10 对应 9 个可用交易日 = 4536 次请求、约 22 分钟。这是成本上界，
+# 超出窗口的缺口不会被自动发现——回补是手动任务，这是它的代价。
 DEFAULT_LOOKBACK_DAYS = 10
 
 
@@ -49,7 +59,8 @@ def find_missing_days(
     Args:
         have: 库内 ``concept_board`` 已有的 ``trade_date`` 集合。
         expected: ``get_expected_latest_trading_day()``。
-        lookback_days: 窗口大小，单位是**交易日**。
+        lookback_days: 窗口大小，单位是**交易日**；``get_recent_trading_days`` 返回的
+            N 天**含** ``expected``，而它永不入窗，故实际可用窗口是 N-1 天。
         declared: 已登记的整日缺席日期；None 时取 ``declared_missing_days()``。
     """
     skip = declared_missing_days() if declared is None else declared
@@ -60,8 +71,3 @@ def find_missing_days(
         for day in recent
         if day < expected and day not in present and day not in skip
     )
-
-
-def resolve_expected() -> str:
-    """独立成函数便于测试打桩。"""
-    return get_expected_latest_trading_day()
