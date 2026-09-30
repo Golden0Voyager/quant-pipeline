@@ -368,7 +368,7 @@ MSG
 - Test: `tests/test_concept_board_backfill.py`（追加）
 
 **Interfaces:**
-- Consumes: `get_default_client()`（`core/source_client.py`）的 `call("eastmoney", op)`；akshare 的 `stock_board_concept_name_em()` 与 `stock_board_concept_hist_em(symbol, period, start_date, end_date, adjust)`
+- Consumes: `get_default_client()`（`core/source_client.py`）的 `call("eastmoney", op)`；akshare 的 `stock_board_concept_hist_em(symbol, period, start_date, end_date, adjust)`；**以及 `tasks.concept_board._fetch_concept_list_em`**（板块列表取自它，不自己调 `stock_board_concept_name_em`）
 - Produces:
   ```python
   HISTORY_SOURCE = "em_hist"
@@ -376,11 +376,17 @@ MSG
   def _records_from_hist_df(df, *, concept_code: str, concept_name: str) -> list[dict]:
       """东财历史 K 线 → concept_board 记录。up/down_count 恒为 None。"""
 
+  def _fetch_board_list() -> list[tuple[str, str]] | None:
+      """(code, name) 列表；None = 源端不可用，[] = 确实没有板块。"""
+
   def fetch_day_records(day: str, *, boards: list[tuple[str, str]] | None = None) -> list[dict]:
       """取某个交易日的全部概念板块记录。单个板块失败即跳过。"""
   ```
-  `boards` 是 `(concept_code, concept_name)` 列表；None 时内部调
-  `stock_board_concept_name_em()` 取得。
+  `boards` 是 `(concept_code, concept_name)` 列表；None 时内部调 `_fetch_board_list()`
+  取得。**`None` 与 `[]` 必须能分开**：`[]` 是**事实**（源端正常、当天没有板块可补），
+  `None` 是**故障**（网络/熔断/协议错）。Task 3 靠这个区分决定是 `no_data` 还是
+  `retained` + `error_kind=network` —— 两者混同会让一个正常的空结果被当成可重试的
+  网络故障去等 30s 重试。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -513,30 +519,57 @@ _HIST_COL_MAP = {
     "成交量": "volume",
     "成交额": "amount",
     "涨跌幅": "pct_change",
+    # 换手率：源给、``concept_board.turnover REAL`` 也存（providers.py:373），
+    # 漏映射 → 回补行的 turnover 恒 NULL，白丢一个可用字段。
+    "换手率": "turnover",
 }
 # 记录键集固定，缺列写 None。行与行之间键不一致会让下游按 key 取值踩 KeyError。
-_HIST_VALUE_COLS = ("open", "close", "high", "low", "volume", "amount", "pct_change")
+# ⚠️ 这张表与上面那张字典、以及下面 records.append 的键集是**三处必须同步**的：
+#    tests/test_concept_board_backfill.py 的键集断言直接引用本表，改一处就红。
+# open/close/high/low/volume/amount 映射着但 ``save_concept_board_batch`` 的 INSERT
+# 不写它们——保留是为了与 tasks/sector_derivatives.py 的先例一致（sector_daily 真存），
+# 将来 concept_board 加列时它们已经就位。
+_HIST_VALUE_COLS = (
+    "open", "close", "high", "low", "volume", "amount", "pct_change", "turnover",
+)
 
 
 def _records_from_hist_df(
-    df: "pd.DataFrame", *, concept_code: str, concept_name: str
+    df: pd.DataFrame, *, concept_code: str, concept_name: str
 ) -> list[dict]:
     """东财历史 K 线 → concept_board 记录。``up_count``/``down_count`` 恒为 None。"""
     if df is None or df.empty:
         return []
     df = df.rename(columns=_HIST_COL_MAP)
-    known = [c for c in _HIST_VALUE_COLS if c in df.columns]
-    unknown = [c for c in df.columns if c not in _HIST_COL_MAP.values()]
-    if unknown:
-        logger.warning(
-            f"⚠️ 概念板块历史列名漂移，未识别 {sorted(unknown)}，只写 {known}"
-        )
     if "trade_date" not in df.columns:
         logger.warning("⚠️ 概念板块历史缺少日期列，跳过该板块")
         return []
+    # 一列值都没认出来 → 这个板块**一条都不产出**（同 tasks/sector_derivatives.py:110）。
+    # 「宽松映射」只该容忍**多**出来的列，不该容忍**全**缺失：照旧放行的话，源端把
+    # 「涨跌幅」改名后 504 个板块每个仍返回 1 条记录，而 pct_change/turnover/… 全是
+    # None——``save_concept_board_batch`` 照收、任务报 success，而 ``find_missing_days``
+    # 下次看到那天「已经有了」就再也不会回来。那正是 2026-08-12 P2-12 的空洞形状。
+    available = [c for c in _HIST_VALUE_COLS if c in df.columns]
+    if not available:
+        logger.warning(
+            f"⚠️ 概念板块历史值列全部漂移，实到列 {list(df.columns)}，跳过该板块"
+        )
+        return []
+    # 告警方向是「**已映射的列消失了**」，不是「来了没映射的列」：东财正常就多给
+    # 振幅/涨跌额（该接口实测 11 列），按反向判据则每次健康响应都告警——一次 504×9
+    # 的回补刷 4536 条一模一样的噪音，真漂移反而被淹没。
+    missing = [c for c in _HIST_VALUE_COLS if c not in df.columns]
+    if missing:
+        logger.warning(f"⚠️ 概念板块历史缺少已映射列 {missing}，这几列写 None")
     records: list[dict] = []
     for _, row in df.iterrows():
-        day = str(row.get("trade_date", "")).strip()[:10]
+        raw_day = row.get("trade_date")
+        # pd.isna 守卫：str(None) 是 'None'、str(nan) 是 'nan'，两个都 truthy，
+        # `if not day` 抓不住，而 concept_board.trade_date 是 DATE NOT NULL 也不管用
+        # ——SQLite 不做类型检查，'None' 会真的落库并污染 find_missing_days 的 have。
+        if raw_day is None or pd.isna(raw_day):
+            continue
+        day = str(raw_day).strip()[:10]
         if not day:
             continue
         # 键集固定：未识别的列写 None 而不是省略，否则同一批记录里有的行有
@@ -552,6 +585,7 @@ def _records_from_hist_df(
             "volume": row.get("volume"),
             "amount": row.get("amount"),
             "pct_change": row.get("pct_change"),
+            "turnover": row.get("turnover"),
             "up_count": None,
             "down_count": None,
             "data_source": HISTORY_SOURCE,
@@ -559,36 +593,55 @@ def _records_from_hist_df(
     return records
 
 
-def _fetch_board_list() -> list[tuple[str, str]]:
-    """概念板块列表，返回 ``(code, name)``。取不到时返回空列表。"""
-    if ak is None:
-        return []
-    resp = get_default_client().call("eastmoney", ak.stock_board_concept_name_em)
-    if not resp.success or resp.data is None:
+def _fetch_board_list() -> list[tuple[str, str]] | None:
+    """概念板块列表，返回 ``(code, name)``。
+
+    **委托**给 ``tasks.concept_board._fetch_concept_list_em``，不自己再实现一遍：
+    那个函数已经解决了本机反复踩到的两件事——①东财 WAF 会间歇性掐掉
+    ``push2.eastmoney.com``（``tasks/concept_board.py:225`` 记着这条），它按短页翻完
+    ``push2`` → ``push2delay``；②它用 ``fs=m:90+t:3``，与实时快照同一个板块全集。
+    本模块若自己调 ``stock_board_concept_name_em``，拿到的是单主机 + 另一套筛选，
+    回补的板块范围会和快照写入的那批对不上。
+    跨模块 import 一个下划线名是本仓库既有做法（``tasks/utility.py:44`` 从
+    ``tasks.bars`` import ``_detect_suspended_symbols`` 等）：下划线只表示「模块私有」，
+    不表示「模块禁入」；两者同属 ``tasks/``、依赖方向单一、无环。
+
+    Returns:
+        ``None`` = 源端不可用（网络/熔断/协议错）；``[]`` = 源端正常但确实没有板块。
+        两者必须能分开：前者是**故障**（该日回补整体作废、值得重试），后者是**事实**
+        （无事可做）。旧实现两者都返回 ``[]``，调用方分不出「东财挂了」和「没板块」。
+    """
+    resp = get_default_client().call("eastmoney", _fetch_concept_list_em)
+    if not resp.success:
         logger.warning(f"⚠️ 概念板块列表获取失败: {resp.metadata.error}")
+        return None
+    items: list[dict] = resp.data
+    if not items:
         return []
-    df = resp.data
-    if "板块代码" not in df.columns or "板块名称" not in df.columns:
-        logger.warning(f"⚠️ 概念板块列表列名不符，可用列: {list(df.columns)}")
-        return []
-    out: list[tuple[str, str]] = []
-    for _, row in df.iterrows():
-        code = str(row.get("板块代码", "")).strip()
-        name = str(row.get("板块名称", "")).strip()
-        if code and name:
-            out.append((code, name))
-    return out
+    return [(item["concept_code"], item["concept_name"]) for item in items]
 
 
 def fetch_day_records(
     day: str, *, boards: list[tuple[str, str]] | None = None
 ) -> list[dict]:
-    """取某个交易日的全部概念板块记录。单个板块失败即跳过，不中断其余。"""
+    """取某个交易日的全部概念板块记录。单个板块失败即跳过，不中断其余。
+
+    第二道日期闸：只留 ``trade_date == day`` 的行。``find_missing_days`` 的
+    ``day < expected`` 只约束**请求哪些天**，管不到**回来的是哪几天**——源端若无视
+    ``start_date``/``end_date`` 把整段历史（含 expected 当天）吐回来，Task 3 就会
+    照写，而 ``INSERT OR REPLACE`` 会用历史行的 NULL ``up_count``/``down_count``
+    盖掉快照那天的真值：模块 docstring 硬约束 1 要防的正是这个。
+    """
     if ak is None:
         logger.error("❌ akshare 未安装")
         return []
     if boards is None:
         boards = _fetch_board_list()
+    # ``not boards`` 一次覆盖 ``None``（源端不可用）与 ``[]``（源端正常但确实没有
+    # 板块）——本函数对两者**一律**返回空，没有第三种答案可给。「源挂了」还是
+    # 「没板块」的分界归主任务：它自己调 ``_fetch_board_list()``、在 ``None`` 时
+    # 判 ``retained`` + ``error_kind=network``，之后总是显式传 ``boards=``（Task 3
+    # 的 Interfaces 约定）。这里再判一次只会多打一行无人断言的告警。
     if not boards:
         return []
     compact = day.replace("-", "")
@@ -604,16 +657,59 @@ def fetch_day_records(
         if not resp.success:
             logger.warning(f"⚠️ 概念 {name}({code}) 历史获取失败: {resp.metadata.error}")
             continue
-        records.extend(_records_from_hist_df(resp.data, concept_code=code, concept_name=name))
+        # 映射这一步也必须按板块兜住，而不只是「请求失败」才兜。``SourceClient.call``
+        # 对任何非 HTTP 返回都判 ``success=True``（core/source_client.py:267），于是既
+        # 不是 DataFrame 也不抛异常的载荷（东财偶尔吐 JSON 错误信封）会在这里触发
+        # ``df.empty`` 的 AttributeError——而它抛在 ``client.call`` 的 try **之外**，
+        # 一路冒出本函数，带走已累积的记录**和**剩余所有待补的日子，直接违反硬约束 2。
+        # 四个类型正是对一个未类型化载荷做 df.empty / rename / 列成员判断 / iterrows
+        # 会抛的（收窄而非 Exception，同 P2-11 的纪律：不吞 MemoryError 与中断）。
+        try:
+            board_records = _records_from_hist_df(
+                resp.data, concept_code=code, concept_name=name
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                f"⚠️ 概念 {name}({code}) 历史载荷无法映射"
+                f"（{type(exc).__name__}: {exc}），跳过该板块"
+            )
+            continue
+        kept = [r for r in board_records if r["trade_date"] == day]
+        if len(kept) != len(board_records):
+            logger.warning(
+                f"⚠️ 概念 {name}({code}) 历史混入 {len(board_records) - len(kept)} "
+                f"条非 {day} 的行（源端可能无视了 start/end），已丢弃"
+            )
+        records.extend(kept)
     return records
 ```
+
+> **第三处刻意偏离 spec，与已落库的实现一致**：上面「限速机制」那段已经说明不引入
+> `_retry` 的理由，此处只补另外两条同样偏离、但此前只存在于代码注释里的约定：
+>
+> 1. **告警方向是「已映射的列消失了」**，不是「来了没映射的列」。东财正常就多给
+>    `振幅`/`涨跌额`（该接口实测 11 列），按反向判据则每次健康响应都告警——一次
+>    504×9 的回补刷 4536 条一模一样的噪音，真漂移反而被淹没。
+> 2. **`_records_from_hist_df` 的宽松映射只容忍「多出来的列」，不容忍「全缺失」。**
+>    一列值都没认出来时该板块**一条都不产出**——照旧放行的话，源端把「涨跌幅」改名后
+>    504 个板块每个仍返回 1 条记录，而 `pct_change`/`turnover` 全是 `None`，
+>    `save_concept_board_batch` 照收、任务报 `success`，而 `find_missing_days` 下次看到
+>    那天「已经有了」就再也不会回来。那正是 2026-08-12 P2-12 空洞的形状。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
 uv run pytest tests/test_concept_board_backfill.py -q
 ```
-Expected: `10 passed`
+Expected: `22 passed`
+
+> 上面 Step 1 贴的用例是本任务**开工时**的清单，不是落库后的全集。实际提交（`bfce735`
+> / `926381f` / `a7030ab` / `ed75579` / 本轮 review 第二轮）按 review 结论重写了这一段：
+> `test_history_records_drop_unknown_columns` 被两条方向相反的用例取代
+> （「多出来的列不告警」+「已映射的列消失要告警」），另加了值列全漂移、`日期` 列自身
+> 改名、`None`/`nan` 日期行、写入上界、`turnover` 映射、委托给快照 fetcher 等。
+> **`tests/test_concept_board_backfill.py` 是这些断言的真相**，上面那段按原样保留只为
+> 说明当初写了什么——两处不一致时以测试文件为准。
 
 - [ ] **Step 5: 提交（两个文件分开）**
 
@@ -692,7 +788,7 @@ MSG
 - Test: `tests/test_concept_board_backfill.py`（追加）
 
 **Interfaces:**
-- Consumes: `find_missing_days`、`get_expected_latest_trading_day`（直接调，**不要**再包一层）、`fetch_day_records`、`db.save_concept_board_batch(records) -> int`（`interface.DatabaseInterface`）
+- Consumes: `find_missing_days`、`get_expected_latest_trading_day`（直接调，**不要**再包一层）、**`_fetch_board_list()`（返回 `list | None`，本任务自行判 `None`）**、`fetch_day_records`（**总是显式传 `boards=`**）、`db.save_concept_board_batch(records) -> int`（`interface.DatabaseInterface`）
 - Produces:
   ```python
   def update_concept_board_backfill(
@@ -705,6 +801,22 @@ MSG
   ```
   返回含 `status` / `saved` / `requested_days` / `backfilled_days` / `failed_days`。
 
+- [ ] **Step 0: 板块列表的 `None` / `[]` 必须分开判（本任务的语义核心）**
+
+  `_fetch_board_list()` 用 `None` 与 `[]` 编码两种**完全不同**的情况，本任务是唯一
+  能把它们分开的地方——`fetch_day_records` 对两者一律返回 `[]`，区分在这里丢掉就再也
+  捡不回来：
+
+  | 返回 | 含义 | 本任务该报 |
+  |---|---|---|
+  | `None` | 源端不可用（网络 / 熔断 / 协议错） | `retained` + `error_kind="network"`，**可重试** |
+  | `[]` | 源端正常、但确实一个板块都没有 | `no_data`，**不可重试**——重试多少次结果都一样，只会白等 30s |
+
+  写成 `if not boards:` 就把两者折叠了，后果有二：①「东财挂了」报成 `no_data`，
+  `safe_task` 的 30s 重试不触发，故障被静默吞掉；②**一个合法的空结果被当成可重试的
+  网络故障**去白等一轮重试——而 `no_data` 按 `safe_task` 的语义是「源正常但无数据」，
+  是正确裁定，不该被降级成故障。
+
 - [ ] **Step 1: 写失败测试**
 
 追加到 `tests/test_concept_board_backfill.py`：
@@ -715,6 +827,16 @@ def _db():
     db = MagicMock()
     db.save_concept_board_batch = MagicMock(return_value=504)
     return db
+
+
+def _one_board(monkeypatch, mod):
+    """给 ``_fetch_board_list`` 打桩，否则下面几条用例会真的发网络请求。
+
+    主任务是**先取列表再逐日抓取**，所以任何走到 days 循环的用例都必须桩掉它——
+    否则测试在离线时红、在联网时绿，而更糟的是本机东财通不通会改变 ``None`` 与
+    ``[]`` 的走向，让断言偶尔以另一种原因成立。**hermetic，不依赖真实源端状态。**
+    """
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: [("BK0001", "甲")])
 
 
 def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
@@ -730,6 +852,8 @@ def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
     def boom(*_a, **_k):
         raise AssertionError("不应发起任何网络请求")
     monkeypatch.setattr(mod, "fetch_day_records", boom)
+    # 列表也要桩：它同样是一次网络请求，零请求的断言覆盖它。
+    monkeypatch.setattr(mod, "_fetch_board_list", boom)
 
     db = _db()
     result = mod.update_concept_board_backfill(db)
@@ -742,6 +866,7 @@ def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
 def test_all_days_backfilled_is_success(monkeypatch):
     import tasks.concept_board_backfill as mod
 
+    _one_board(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -759,6 +884,7 @@ def test_all_days_backfilled_is_success(monkeypatch):
 def test_partial_backfill_is_degraded(monkeypatch):
     import tasks.concept_board_backfill as mod
 
+    _one_board(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -775,9 +901,14 @@ def test_partial_backfill_is_degraded(monkeypatch):
 
 
 def test_nothing_backfilled_when_source_is_down_is_retained_network(monkeypatch):
-    """一天都没补上 = 源整体不可用，标 network 让 safe_task 的 30s 重试生效。"""
+    """一天都没补上 = 源整体不可用，标 network 让 safe_task 的 30s 重试生效。
+
+    注意这条与上面两条**不是同一件事**：这里列表拿到了（``None`` vs ``[]`` 的分界已过），
+    失败发生在**逐日抓取**阶段——每一天都抓到 0 行。
+    """
     import tasks.concept_board_backfill as mod
 
+    _one_board(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -789,10 +920,61 @@ def test_nothing_backfilled_when_source_is_down_is_retained_network(monkeypatch)
     assert result["retained_old_data"] is True
 
 
+def test_board_list_source_down_is_retained_network_not_no_data(monkeypatch):
+    """``_fetch_board_list()`` 返回 ``None`` = 源挂了 = **可重试**故障。
+
+    折叠成 ``if not boards:`` 就会把它报成 ``no_data``（源正常但无数据），
+    ``safe_task`` 的 30s 重试不触发——一次网络抖动被静默吞成「本来就没数据」。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: None)
+
+    def boom(*_a, **_k):
+        raise AssertionError("列表不可用时不该开始逐日抓取")
+
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "retained"
+    assert result["error_kind"] == "network"
+    assert result["retained_old_data"] is True
+    assert result["requested_days"] == 1
+
+
+def test_board_list_legitimately_empty_is_no_data_not_a_network_failure(monkeypatch):
+    """``_fetch_board_list()`` 返回 ``[]`` = 源正常但确实没板块 = **事实**，不是故障。
+
+    这是 review 第二轮抓到的反向错误：一个**合法**的空结果被映射成
+    ``retained`` + ``error_kind=network``，于是 ``safe_task`` 把它当网络问题白等
+    30s 重试，而重试多少次结果都一样。``no_data`` 才是正确裁定。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: [])
+
+    def boom(*_a, **_k):
+        raise AssertionError("没有板块时不该发任何历史请求")
+
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] == "no_data"
+    assert "error_kind" not in result, "源正常，不该标成网络故障"
+    assert result["saved"] == 0
+
+
 def test_backfill_never_writes_expected_or_later(monkeypatch):
     """写入上界闸门：源端若返回 expected 当天（或更晚）的行，必须被丢弃。"""
     import tasks.concept_board_backfill as mod
 
+    _one_board(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -863,10 +1045,12 @@ def update_concept_board_backfill(
     状态语义（按「有没有补上任何一天」分，不按「失败几天」分）：
 
     * 无缺口 → ``success``, saved=0，零网络请求
+    * 板块列表源端不可用（``None``）→ ``retained`` + ``error_kind=network``，
+      让 ``core/runner.py`` 的 ``safe_task`` 在 30s 后重试
+    * 板块列表**合法为空**（``[]``）→ ``no_data``：源正常、无事可做，重试无意义
     * 全部补上 → ``success``
     * 补上至少一天 → ``degraded``，未补足的日子列入 ``failed_days``
-    * **一天都没补上** → ``retained`` + ``error_kind=network``，
-      让 ``core/runner.py`` 的 ``safe_task`` 在 30s 后重试
+    * **一天都没补上** → ``retained`` + ``error_kind=network``（同第一条：源整体不可用）
 
     Args:
         db: 数据库接口。
@@ -902,11 +1086,19 @@ def update_concept_board_backfill(
 
     logger.info(f"📋 待补 {len(days)} 个交易日: {', '.join(days)}")
     boards = _fetch_board_list()
-    if not boards:
+    if boards is None:
+        # 源端不可用 = **故障**，值得 safe_task 30s 后重试。
         result["status"] = "retained"
         result["error_kind"] = "network"
         result["retained_old_data"] = True
-        result["error"] = "概念板块列表不可用，未回补任何一天"
+        result["error"] = "概念板块列表不可用（源端故障），未回补任何一天"
+        return result
+    if not boards:
+        # 源端正常但确实没有板块 = **事实**，不是故障。报 retained + error_kind=network
+        # 会让 safe_task 白等一轮 30s 重试，而重试多少次结果都一样。
+        logger.warning("⚠️ 概念板块列表为空，源正常但无可回补板块")
+        result["status"] = "no_data"
+        result["reason"] = "概念板块列表为空，无可回补板块"
         return result
 
     for day in days:
@@ -943,7 +1135,7 @@ def update_concept_board_backfill(
 ```bash
 uv run pytest tests/test_concept_board_backfill.py -q
 ```
-Expected: `15 passed`
+Expected: `29 passed`（Task 2 的 22 条 + 本任务新增的 7 条）
 
 - [ ] **Step 5: 提交（两个文件分开）**
 
@@ -964,12 +1156,29 @@ landed and the source is down — and error_kind is what makes
 core/runner.py's 30s retry fire. A run that backfilled nothing must not
 report success; that is the silent-degradation shape P2-18 documents.
 
+Two of them pin the None-vs-[] split on the board list, which is the one
+place the distinction can still be made. None is a dead source and must be
+retryable; [] is a healthy source with nothing to say and must be no_data —
+mapping that to retained + error_kind=network would make safe_task sit
+through a 30s backoff for a result that cannot change. Both cases also
+assert the loop never starts (fetch_day_records is replaced by a raising
+stub), so a regression that reaches the day loop fails loudly instead of
+passing on whatever the real network happened to return. The helper
+_one_board() stubs the list fetch everywhere else too: without it the
+existing status cases would make real network calls, and which branch they
+land in would depend on whether eastmoney is reachable from this machine.
+
 Red-proof: dropping the write-ceiling filter reddens
 test_backfill_never_writes_expected_or_later; returning success when
 nothing landed reddens
-test_nothing_backfilled_when_source_is_down_is_retained_network.
+test_nothing_backfilled_when_source_is_down_is_retained_network; collapsing
+the two board-list branches back into `if not boards:` reddens
+test_board_list_legitimately_empty_is_no_data_not_a_network_failure
+(status is `retained`, not `no_data`) and
+test_board_list_source_down_is_retained_network_not_no_data (no
+error_kind on the no_data path, and the loop is never entered).
 
-钉住状态语义与写入上界：
+钉住状态语义、写入上界与板块列表的 None/[] 分界：
 
 - 上界用例最要紧：源端若把 expected 当天的行也返回，必须丢弃——快照已写过
   那天且带涨跌家数，INSERT OR REPLACE 会用 NULL 覆盖真值。这是本功能里唯一
@@ -978,9 +1187,21 @@ test_nothing_backfilled_when_source_is_down_is_retained_network.
   retained + error_kind=network = 一天都没补上、源挂了——而 error_kind 正是
   core/runner.py 的 30s 重试能触发的原因
 - 什么都没补上时不得报 success，否则就是 P2-18 记述的静默退化形态
+- 其中两条钉住板块列表的 None/[] 分界，这是**唯一还能做区分的地方**：
+  None = 源挂了 = 必须可重试；[] = 源正常但没东西说 = no_data——把它映成
+  retained + error_kind=network 会让 safe_task 为一个不可能改变的结果白等
+  30s。两条都断言 days 循环没被进入（fetch_day_records 换成会抛的桩），
+  这样「误入循环」的回归会当场响，而不是碰巧靠真实网络返回值蒙混过关
+- 其余用例一律走 _one_board() 桩掉列表：否则它们会真发网络请求，且落在哪条
+  分支取决于本机到东财通不通——测试结果与真实源端状态解耦
 - 红证：去掉上界过滤 → test_backfill_never_writes_expected_or_later 变红；
   没补上任何一天时返回 success →
-  test_nothing_backfilled_when_source_is_down_is_retained_network 变红
+  test_nothing_backfilled_when_source_is_down_is_retained_network 变红；
+  把两个分支折回 `if not boards:` →
+  test_board_list_legitimately_empty_is_no_data_not_a_network_failure 变红
+  （status 是 retained 而非 no_data）且
+  test_board_list_source_down_is_retained_network_not_no_data 变红
+  （no_data 路径上没有 error_kind，且循环被进入）
 MSG
 ```
 
@@ -999,6 +1220,17 @@ error_kind=network when nothing landed at all. The error_kind is what
 makes safe_task retry after 30s; without it a dead source would be
 indistinguishable from a healthy one that had nothing to do.
 
+The board list is the one place None and [] can still be told apart, and
+this task is the one that has to do it. None means the source is down, so
+the run is retained + error_kind=network and safe_task retries. [] means
+the source answered normally and there is genuinely nothing to fetch, so
+the run is no_data — the correct verdict for "healthy source, no data".
+Collapsing the two into `if not boards:` gets both directions wrong: a
+dead source would be reported as no_data and its 30s retry would never
+fire, while a legitimately empty list would sit through a 30s backoff for
+a result that cannot change. fetch_day_records cannot help here — it
+returns [] for both.
+
 Every batch passes through a `trade_date < expected` filter before the
 write. That filter is the feature's data-safety guarantee — the snapshot
 task owns `expected` and carries the up/down counts the history interface
@@ -1011,6 +1243,12 @@ does not have.
 - 状态按「有没有补上任何一天」分：部分进展 = degraded 并列出 failed_days；
   一天都没补上 = retained + error_kind=network。error_kind 正是让 safe_task
   在 30s 后重试的开关，没有它「源挂了」与「没活干」无法区分
+- 板块列表是 None 与 [] **唯一还能分开**的地方，分开判是这个任务的核心职责：
+  None = 源挂了 = retained + error_kind=network，让 safe_task 重试；
+  [] = 源正常但确实没板块 = no_data，这才是「源正常、无数据」的正确裁定。
+  折成 `if not boards:` 会两个方向都错：源挂时报成 no_data、30s 重试永不触发，
+  而合法的空列表则为不可能改变的结果白等一轮退避。fetch_day_records 帮不上忙——
+  它对两者一律返回 []
 - 每批写入前都过 `trade_date < expected` 过滤。这是本功能的数据安全保证——
   expected 归快照任务所有，而涨跌家数是历史接口给不出的
 MSG
