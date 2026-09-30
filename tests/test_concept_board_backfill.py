@@ -174,8 +174,12 @@ def test_fetch_day_skips_failed_board_and_keeps_the_rest(monkeypatch):
 
     boards = [("BK0001", "甲"), ("BK0002", "乙"), ("BK0003", "丙")]
 
+    # 按**代码**（"BK0002"）而不是名称（"乙"）判定失败：akshare 的
+    # stock_board_concept_hist_em 收到 `BK\d+` 时直接当板块代码用，收到名称才会
+    # 自己去查一遍名称→代码（`__stock_board_concept_name_em()`，每个板块一次请求）。
+    # 传代码既是对的（concept_code 存的也是 f12 代码），也让 504 次请求不翻倍。
     def fake_hist(symbol, **_):
-        if symbol == "乙":
+        if symbol == "BK0002":
             raise ConnectionError("Connection closed abruptly")
         return pd.DataFrame({"日期": ["2026-09-28"], "收盘": [100.0]})
 
