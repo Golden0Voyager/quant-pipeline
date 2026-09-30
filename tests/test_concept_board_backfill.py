@@ -455,12 +455,28 @@ def test_fetch_day_returns_empty_when_all_boards_fail(monkeypatch):
 # ===========================================================================
 
 
-def _db():
+def _db(saved: int = 504):
     from unittest.mock import MagicMock
 
     db = MagicMock()
-    db.save_concept_board_batch = MagicMock(return_value=504)
+    db.save_concept_board_batch = MagicMock(return_value=saved)
     return db
+
+
+def _boards(n: int) -> list[tuple[str, str]]:
+    return [(f"BK{i:04d}", f"概念{i}") for i in range(1, n + 1)]
+
+
+def _records_for(day: str, boards: list[tuple[str, str]]) -> list[dict]:
+    return [
+        {"trade_date": day, "concept_code": code, "concept_name": name}
+        for code, name in boards
+    ]
+
+
+def _meta(result: dict) -> dict:
+    """结果里那一份日子清单——``metadata`` 是**唯一**存放处，也是审计表读的那份。"""
+    return result["metadata"]
 
 
 def _one_board(monkeypatch, mod):
@@ -486,7 +502,14 @@ def _no_declared_gaps(monkeypatch, mod):
 
 
 def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
-    """无缺口必须零请求零写入——这是日常手动跑时的常态路径。"""
+    """无缺口时不发任何**源端**请求、也不写入——日常手动跑时的常态路径。
+
+    「零网络请求」只对板块列表与历史接口成立：本任务自己一个都不发，但
+    ``get_recent_trading_days`` → ``core/calendar.py:196`` 在宿主机日历缓存过期时
+    会调 ``_fetch_trading_calendar()`` 并写缓存文件。那是本仓既有行为（core/calendar
+    自己的测试覆盖它），与本任务无关——所以这里只钉「源端零请求」这个真正属于
+    本任务的性质。
+    """
     import tasks.concept_board_backfill as mod
 
     monkeypatch.setattr(mod, "get_recent_trading_days",
@@ -497,16 +520,16 @@ def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
         mod, "_stored_dates", lambda db: {"2026-09-28"}
     )
     def boom(*_a, **_k):
-        raise AssertionError("不应发起任何网络请求")
+        raise AssertionError("不应发起任何源端请求")
     monkeypatch.setattr(mod, "fetch_day_records", boom)
-    # 列表也要桩：它同样是一次网络请求，零请求的断言覆盖它。
+    # 列表也要桩：它同样是一次源端请求，零请求的断言覆盖它。
     monkeypatch.setattr(mod, "_fetch_board_list", boom)
 
     db = _db()
     result = mod.update_concept_board_backfill(db)
     assert result["status"] == "success"
     assert result["saved"] == 0
-    assert result["requested_days"] == 0
+    assert _meta(result)["requested_days"] == 0
     assert not db.save_concept_board_batch.called
 
 
@@ -526,7 +549,7 @@ def test_all_days_backfilled_is_success(monkeypatch):
     result = mod.update_concept_board_backfill(_db())
     assert result["status"] == "success"
     assert result["saved"] == 504
-    assert result["backfilled_days"] == ["2026-09-28"]
+    assert _meta(result)["backfilled_days"] == ["2026-09-28"]
 
 
 def test_partial_backfill_is_degraded(monkeypatch):
@@ -545,8 +568,8 @@ def test_partial_backfill_is_degraded(monkeypatch):
     )
     result = mod.update_concept_board_backfill(_db())
     assert result["status"] == "degraded"
-    assert result["backfilled_days"] == ["2026-09-28"]
-    assert result["failed_days"] == ["2026-09-25"]
+    assert _meta(result)["backfilled_days"] == ["2026-09-28"]
+    assert _meta(result)["failed_days"] == ["2026-09-25"]
 
 
 def test_nothing_backfilled_when_source_is_down_is_retained_network(monkeypatch):
@@ -593,7 +616,7 @@ def test_board_list_source_down_is_retained_network_not_no_data(monkeypatch):
     assert result["status"] == "retained"
     assert result["error_kind"] == "network"
     assert result["retained_old_data"] is True
-    assert result["requested_days"] == 1
+    assert _meta(result)["requested_days"] == 1
 
 
 def test_board_list_legitimately_empty_is_no_data_not_a_network_failure(monkeypatch):
@@ -644,3 +667,296 @@ def test_backfill_never_writes_expected_or_later(monkeypatch):
     mod.update_concept_board_backfill(db)
     written = db.save_concept_board_batch.call_args[0][0]
     assert {r["trade_date"] for r in written} == {"2026-09-28"}
+
+
+# ===========================================================================
+# 写入前闸门：抓到几条 ≠ 那天补齐了
+# ===========================================================================
+
+
+def test_partially_fetched_day_is_not_written_and_not_reported(monkeypatch):
+    """少数板块回来**不得**让那天落库，也不得落进 ``backfilled_days``。
+
+    这不是假设的形态：``core/source_client.py`` 的每主机熔断 5 次失败即冷却 120s，
+    而东财 WAF 会在循环中途掐掉 ``push2``（``tasks/concept_board.py:225`` 记着这条）。
+    熔断一打开，剩下几百个板块**一个请求都不发**——那天只落零星几行。旧实现的
+    唯一判据是 ``if not records``，于是报 success；而 ``find_missing_days`` 只看
+    「那天有没有行」，第二天起那天永久出局。这正是 2026-08-12 P2-12 与
+    ``core/known_gaps.py`` 存在的理由。
+    """
+    import tasks.concept_board_backfill as mod
+
+    boards = _boards(10)
+    # 09-28 那天熔断打开了，只有 3/10 个板块回来；09-24 完好。
+    def fake_fetch(day, boards=None):
+        got = list(boards)[:3] if day == "2026-09-28" else list(boards)
+        return _records_for(day, got)
+
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-24"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(mod, "fetch_day_records", fake_fetch)
+
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "degraded"
+    assert _meta(result)["backfilled_days"] == ["2026-09-24"]
+    assert _meta(result)["failed_days"] == ["2026-09-28"]
+    # 残缺那天一个字节都不许写：写了它就「有行」了，缺口集再也不会把它捞回来。
+    written_days = [
+        {r["trade_date"] for r in call[0][0]} for call in db.save_concept_board_batch.call_args_list
+    ]
+    assert written_days == [{"2026-09-24"}]
+
+
+def test_below_coverage_alone_never_reports_success(monkeypatch):
+    """唯一一天只回来少数板块 → 绝不能报 success（哪怕它写进去了）。"""
+    import tasks.concept_board_backfill as mod
+
+    boards = _boards(10)
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: _records_for(day, list(boards)[:2]),
+    )
+    result = mod.update_concept_board_backfill(_db())
+    assert result["status"] != "success"
+    assert result["status"] == "retained"
+    assert _meta(result)["backfilled_days"] == []
+    assert _meta(result)["failed_days"] == ["2026-09-28"]
+
+
+def test_coverage_threshold_scales_with_the_board_list(monkeypatch):
+    """下界必须由**运行时** ``len(boards)`` 推出，不能钉死 504。
+
+    板块全集会变（东财随时增删概念），钉死数字等于给某天判一个与当下无关的
+    死线。这条只钉「2 个板块 / 回来 1 个 = 残缺」这一侧——比例下界在单板块
+    用例（``_one_board``）下取 1，所以它们仍然全绿。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: _boards(2))
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: _records_for(day, list(boards)[:1]),
+    )
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "retained"
+    assert not db.save_concept_board_batch.called
+
+
+def test_zero_row_write_is_a_failed_day(monkeypatch):
+    """抓到 ≠ 写入（AGENTS.md 硬规则 4）。
+
+    ``providers.save_concept_board_batch`` 吞掉一切异常并返回 0（providers.py:1980），
+    库被占/被锁正是 ``core/runner.py:113`` 记着的真实故障。旧实现把 0 当成功：
+    两天都写 0 行、两天都进 ``backfilled_days``、``failed_days`` 空、还打
+    「✅ 回补完成: 0 条」。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    db = _db(saved=0)
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "retained"
+    assert result["saved"] == 0
+    assert _meta(result)["backfilled_days"] == []
+    assert _meta(result)["failed_days"] == ["2026-09-25", "2026-09-28"]
+
+
+def test_saved_accumulates_across_days(monkeypatch):
+    """``saved`` 是**这一轮**写进去的总行数，不是最后一天的。
+
+    键名不给提示，而同一个 dict 里 ``requested_days``/``backfilled_days`` 是计数、
+    ``saved`` 曾经也是。两天各 504 条时旧实现记 504，``ingestion_runs.saved_rows``
+    少报 9 倍——审计表看不出这一轮到底修了多少。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    result = mod.update_concept_board_backfill(_db(saved=504))
+    assert _meta(result)["backfilled_days"] == ["2026-09-25", "2026-09-28"]
+    assert result["saved"] == 1008
+
+
+def test_day_lists_reach_the_audit_record(monkeypatch):
+    """三个日子清单必须落在 ``result["metadata"]`` 里——那才是审计读的地方。
+
+    ``safe_task`` 的契约是 ``result["metadata"]``，写进 ``ingestion_runs.metadata_json``。
+    放顶层则**任何**裁定都留不下：``normalize_task_result`` 的 degraded 路径只取
+    ``error``（拿到的是 ``reason`` 那个串，failed_days 的名字全丢）、retained 只取
+    ``error``、success 与 no_data 干脆没有 metadata 形参。
+    """
+    import tasks.concept_board_backfill as mod
+    from core.task_result import normalize_task_result
+
+    boards = _boards(10)
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-24"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: _records_for(
+            day, list(boards) if day == "2026-09-24" else list(boards)[:2]
+        ),
+    )
+    result = mod.update_concept_board_backfill(_db())
+    normalized = normalize_task_result("update_concept_board_backfill", result)
+    assert normalized.metadata["requested_days"] == 2
+    assert normalized.metadata["backfilled_days"] == ["2026-09-24"]
+    assert normalized.metadata["failed_days"] == ["2026-09-28"]
+
+
+def test_each_day_is_written_as_it_lands(monkeypatch):
+    """每天当天就写，不是攒到最后一次性写——中途中断要保住已修好的部分。
+
+    这条以前只写在提交说明里：``test_partial_backfill_is_degraded`` 不数调用次数，
+    于是把写入挪到循环末尾（合并成一次调用）一样是绿的。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    db = _db()
+    mod.update_concept_board_backfill(db)
+    assert db.save_concept_board_batch.call_count == 2
+    # 第一次调用就带着窗口里**最早**那天（09-25）落库——证明写发生在该天自己的
+    # 循环里，而不是攒到最后。
+    first_batch = db.save_concept_board_batch.call_args_list[0][0][0]
+    assert {r["trade_date"] for r in first_batch} == {"2026-09-25"}
+
+
+# ===========================================================================
+# target_date 的两道否决
+# ===========================================================================
+
+
+def _refused_target(monkeypatch, mod, *, target_date: str, stored: set[str]) -> dict:
+    """跑一次指定日期的回补，返回结果；调用方断言它**一个字节都没写**。"""
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: stored)
+
+    def boom(*_a, **_k):
+        raise AssertionError("被拒的指定日期不该发任何请求")
+
+    monkeypatch.setattr(mod, "_fetch_board_list", boom)
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    db = _db()
+    result = mod.update_concept_board_backfill(db, target_date=target_date)
+    assert not db.save_concept_board_batch.called, "被拒的指定日期必须零写入"
+    assert _meta(result)["requested_days"] == 0
+    assert _meta(result)["backfilled_days"] == []
+    return result
+
+
+def test_target_date_equal_to_expected_is_refused(monkeypatch):
+    """``target_date == expected`` 必须拒——模块硬约束 1。
+
+    旧实现的 ``days = [] if target_date >= expected else [target_date]`` 已经挡住
+    这一侧（``>=`` 覆盖相等），所以它现在绿；本条是**钉住**它，别让后人把
+    ``>=`` 收成 ``>``。
+    """
+    import tasks.concept_board_backfill as mod
+
+    result = _refused_target(monkeypatch, mod, target_date="2026-09-29", stored=set())
+    assert result["status"] == "success"
+
+
+def test_target_date_after_expected_is_refused(monkeypatch):
+    import tasks.concept_board_backfill as mod
+
+    result = _refused_target(monkeypatch, mod, target_date="2026-09-30", stored=set())
+    assert result["status"] == "success"
+
+
+def test_target_date_already_in_the_table_is_refused(monkeypatch):
+    """``target_date`` 已在库内 → 必须拒。
+
+    这是 review 抓到的 Critical：``stored`` 在 333 行读出来、到了 ``target_date``
+    分支就被**丢掉**。于是「补一个已经在库里的日子」会用历史行的 NULL
+    ``up_count``/``down_count`` 盖掉快照写的真值，并把 ``data_source`` 从 'em'
+    翻成 'em_hist'——那三道 ``< expected`` 的闸门都只约束 expected，挡不住它。
+    而 ``Task 4`` 的 CLI 就要把 ``target_date`` 暴露出去。
+    """
+    import tasks.concept_board_backfill as mod
+
+    result = _refused_target(
+        monkeypatch, mod, target_date="2026-09-28", stored={"2026-09-28"}
+    )
+    assert result["status"] == "success"
+
+
+def test_stored_dates_reads_a_path_containing_a_query_character(tmp_path):
+    """``file:`` URI 用 ``as_uri()`` 拼，不靠字符串插值。
+
+    路径里有 ``?`` 或 ``#`` 时，插值拼出来的 URI 会被 ``sqlite3`` 当成 query /
+    fragment 解析，连接直接抛错 → 落进 ``except`` → 返回 ``set()`` → 窗口内
+    **已经有数据**的日子全被当成缺失 → 回补用 NULL 抹掉它们的涨跌家数。
+    生产路径两者都不含，属潜伏问题，但代价是数据损坏，不是白跑一遍。
+    """
+    import sqlite3
+
+    import tasks.concept_board_backfill as mod
+
+    db_file = tmp_path / "quant?core#1.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE concept_board (trade_date TEXT, concept_code TEXT)")
+    conn.executemany(
+        "INSERT INTO concept_board VALUES (?, ?)",
+        [("2026-09-28", "BK1"), ("2026-09-24", "BK1")],
+    )
+    conn.commit()
+    conn.close()
+
+    from unittest.mock import MagicMock
+
+    db = MagicMock()
+    db.db_path = str(db_file)
+    assert mod._stored_dates(db) == {"2026-09-28", "2026-09-24"}
+
