@@ -1,4 +1,5 @@
-"""回补任务的接线门禁：它必须是手动任务，一不小心接进日常管道就是 15 分钟。
+"""回补任务的接线门禁：它必须是手动任务，一不小心接进日常管道就是每晚
+4536 次请求、约 22 分钟（默认窗口 10 → 9 个可用交易日 × 504 个概念）。
 
 `core/runner.py` 的 cadence 过滤**不跳过** `ON_DEMAND` 任务，所以只靠注册表
 的 cadence 字段并不能保证它不进 `run_all`——必须由门禁钉住。
@@ -57,7 +58,15 @@ def _run_all_task_names() -> set[str]:
     }
 
 
-def test_task_is_not_wired_into_any_daily_stage():
+def test_task_name_is_absent_from_run_all():
+    """`run_all` 的函数体里不得出现这个任务名字符串。
+
+    门禁的机制是**字面量扫描**，所以它保证的是「没有按名字把它接进 run_all」，
+    而不是「run_all 不可能跑到它」——非字面量的组内派发（按 cadence 过滤出的
+    列表再逐个跑）能绕过它。今天不是活风险：`run_all` 是纯字面量派发，且每处
+    遍历注册表的派发都按 WEEKLY/MONTHLY 过滤，ON_DEMAND 匹配不上；真正兜底的是
+    cadence 字段本身。名字照实写，免得门禁显得比它实际保证的更强。
+    """
     assert TASK not in _run_all_task_names(), (
         f"{TASK} 出现在 run_all 里：core/runner.py 的 cadence 过滤"
         "不跳过 ON_DEMAND 任务，一旦接入就会每晚执行 4536 次请求"
@@ -98,6 +107,73 @@ def test_run_registry_task_forwards_lookback(monkeypatch):
     monkeypatch.setitem(_TASK_CALLABLES, TASK, _capture)
     _run_registry_task(TASK, MagicMock(), None, None, lookback_days=30)
     assert seen.get("lookback_days") == 30
+
+
+def _drive_main_for_task(monkeypatch, *extra_argv: str) -> list[tuple[str, dict]]:
+    """按 `tests/test_daily_pipeline.py::TestMain` 的既定模式驱动 `main()`。
+
+    打桩 `ProviderFactory` 与 `sys.argv`、用 recorder 替掉 `_run_registry_task`，
+    返回它每次被调用时的 `(任务名, kwargs)`。这里刻意**不**替 `_safe_task`：
+    本组门禁只关心 main() 往派发层递了什么，safe_task 那一段由
+    `test_single_task_dispatch_goes_through_safe_task` 单独守。
+    """
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    import daily_pipeline
+
+    calls: list[tuple[str, dict]] = []
+
+    def _record(task_name, db, loader, engine, **kwargs):
+        calls.append((task_name, kwargs))
+        return {"status": "success", "saved": 0}
+
+    # main() 的路由前提：任务名必须在 _TASK_CALLABLES 里（不 patch 整张表，
+    # 免得把派发条件也一并抹掉）
+    monkeypatch.setitem(
+        daily_pipeline._TASK_CALLABLES, TASK, lambda db, **kw: {"saved": 0}
+    )
+    with patch.object(sys, "argv", ["daily_pipeline.py", "--task", TASK, *extra_argv]), \
+         patch("daily_pipeline.ProviderFactory") as factory, \
+         patch("daily_pipeline._run_registry_task", side_effect=_record):
+        factory.get_db.return_value = MagicMock()
+        factory.get_loader.return_value = MagicMock()
+        factory.get_indicator_engine.return_value = MagicMock()
+        daily_pipeline.main()
+    return calls
+
+
+def test_main_forwards_lookback_to_the_dispatcher(monkeypatch):
+    """`main()` 必须把 `--lookback` 递给 `_run_registry_task`。
+
+    这是窗口参数的两段传递里**上半段**。下半段（派发层 → 任务）由
+    `test_run_registry_task_forwards_lookback` 守着；两段都缺，删掉
+    `daily_pipeline.py:1439` 的 `lookback_days=args.lookback` 只会让上半段静默
+    失效：`_run_registry_task` 用自己的默认值 10，于是 `--lookback 60` 照样只补
+    9 天，操作员以为 23 天的债清了而实际一天没补——所以必须有这道门。
+    """
+    calls = _drive_main_for_task(monkeypatch, "--lookback", "60")
+    assert [name for name, _ in calls] == [TASK]
+    assert calls[0][1].get("lookback_days") == 60, (
+        f"main() 没把 --lookback 递给派发层：{calls[0][1]}；"
+        "下半段门禁只证明派发层会转发，证明不了 main() 真的递了"
+    )
+
+
+def test_main_without_lookback_uses_the_task_module_default(monkeypatch):
+    """不带 `--lookback` 时，argparse 的默认值必须就是 `DEFAULT_LOOKBACK_DAYS`。
+
+    TUI 从不传 `--lookback`（`tui/app.py:571-573` 只给 `--task` 与 `--force`），
+    所以**每一次 TUI 点击用的都是这个默认值**。它若与任务模块的常量各写一份
+    字面量，改窗口就只改到一半，且没有任何东西会红。
+    """
+    from tasks.concept_board_backfill import DEFAULT_LOOKBACK_DAYS
+
+    calls = _drive_main_for_task(monkeypatch)
+    assert calls[0][1].get("lookback_days") == DEFAULT_LOOKBACK_DAYS, (
+        "CLI 默认窗口与 tasks.concept_board_backfill.DEFAULT_LOOKBACK_DAYS 不一致，"
+        "TUI 每次点击都走这个默认值"
+    )
 
 
 def test_single_task_dispatch_goes_through_safe_task(monkeypatch):
@@ -141,14 +217,15 @@ def test_tui_dropdown_offers_the_backfill():
     成员与组序的唯一来源是 registry 的 `TASK_GROUPS`（`single_task.py:83-97`
     从它派生），`_SINGLE_TASK_LABELS` 只是**标签查表**。只加标签而不进组，
     派生出来的下拉里根本没有这个任务——加标签这件事会静默无效。
+
+    断言的是 `_build_single_tasks()` 的返回值，即 `on_mount` 原样交给
+    `Select(options=...)` 的那一份，而不是渲染前的中间态 `_SINGLE_TASK_GROUPS`：
+    后者看不到 `_build_single_tasks` 里任何新增的展开/过滤，选项在那里被筛掉时
+    门禁仍然绿。
     """
     from tui.widgets.single_task import SingleTaskWidget
 
-    entries = [
-        (label, task)
-        for _, tasks in SingleTaskWidget._SINGLE_TASK_GROUPS
-        for label, task in tasks
-    ]
-    labels = {task: label for label, task in entries}
+    options = SingleTaskWidget._build_single_tasks()
+    labels = {task: label for label, task in options}
     assert TASK in labels, f"{TASK} 不在 TUI 单任务下拉里（只加标签不进组是无效的）"
     assert "概念板块缺口回补" in labels[TASK]
