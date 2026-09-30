@@ -117,6 +117,7 @@ from tasks.bars import _update_single_bar, update_bars  # noqa: F401
 from tasks.cftc_cot import update_cftc_cot
 from tasks.china_macro import update_china_macro
 from tasks.concept_board import update_concept_board, update_concept_member
+from tasks.concept_board_backfill import update_concept_board_backfill
 from tasks.convertible_bond import (
     update_cb_index,
     update_cb_quotation,
@@ -265,6 +266,7 @@ _TASK_CALLABLES: dict[str, Any] = {
     "update_futures": update_futures,
     "update_global_assets": update_global_assets,
     "update_concept_board": update_concept_board,
+    "update_concept_board_backfill": update_concept_board_backfill,
     "update_concept_member": update_concept_member,
     "update_market_valuation": update_market_valuation,
     "update_market_breadth": update_market_breadth,
@@ -294,6 +296,7 @@ def _run_registry_task(
     limit: int | None = None,
     resume: bool = False,
     force: bool = False,
+    lookback_days: int = 10,
     health_fast: bool = False,
 ) -> Any:
     fn = _TASK_CALLABLES.get(task_name)
@@ -362,6 +365,17 @@ def _run_registry_task(
         "update_historical_valuation", "update_placement_announcements",
     ):
         return _safe_task(task_name, fn, db, symbols=symbols)
+
+    if task_name == "update_concept_board_backfill":
+        # 手动回补：只写 < expected 的历史日（expected 归快照任务所有），与
+        # update_concept_board 不同源——后者盘中跑会把实时值冻结成日线
+        # （2026-07-30 事故），所以上面那道门禁只拦 TRADING_DAY、本任务
+        # （ON_DEMAND）**故意**不受拦。不要为此把 cadence 改成 TRADING_DAY。
+        #
+        # 必须经 _safe_task：本任务最常见的结局是 retained + error_kind=network
+        # （源整体不可用），而 core/runner.py:139-149 只对经 safe_task 的结果
+        # 做 30s 重试；直调则无重试、无 _task_run_id、无 ingestion_runs 审计。
+        return _safe_task(task_name, fn, db, lookback_days=lookback_days)
 
     if task_name == "retry":
         return _safe_task(task_name, fn, db, loader)
@@ -1274,6 +1288,16 @@ def main():
         help="并发执行线程数 (默认: 3；仅作用于 stage4 与 bars 内部池，stage2/3/5 固定串行)",
     )
     parser.add_argument(
+        "--lookback",
+        type=int,
+        default=10,
+        help=(
+            "回补窗口，单位是交易日（仅 update_concept_board_backfill 使用）。"
+            "实际可用窗口比该值少一个交易日：窗口取的是「含 expected 在内」的 N 天，"
+            "而 expected 永不入窗（回补不写快照已写的那天），故 --lookback 1 不补任何一天。"
+        ),
+    )
+    parser.add_argument(
         "--symbols",
         type=str,
         default=None,
@@ -1412,6 +1436,7 @@ def main():
                 task, db, loader, engine,
                 symbols=symbols, limit=args.limit,
                 resume=args.resume, force=args.force,
+                lookback_days=args.lookback,
             )
             if isinstance(raw, dict | TaskResult):
                 result = normalize_task_result(task, raw)
