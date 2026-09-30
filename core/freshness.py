@@ -81,6 +81,7 @@ DELAYED_PUBLISH_TABLES: set[str] = {
     "margin_trading",
     "dragon_tiger",
     "block_trade",
+    "gold_price",  # 上金所基准金价：晚盘价跨到次日凌晨 02:30，早盘价 09:00 后才定
 }
 
 
