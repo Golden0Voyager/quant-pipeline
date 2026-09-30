@@ -15,7 +15,7 @@ from typing import Any
 
 import pandas as pd
 
-from core.calendar import get_expected_latest_trading_day
+from core.calendar import get_expected_latest_trading_day, get_recent_trading_days
 from core.freshness import check_task_freshness
 from core.utils import to_float as _to_float
 from core.utils import warn_if_all_empty
@@ -396,6 +396,20 @@ def _fetch_index_futures_basis() -> list[dict]:
     return records
 
 
+def _is_only_one_trading_day_behind(expected: str, max_date: str | None) -> bool:
+    """源端数据只比期望日少**一个**交易日 → 判定为盘后发布延迟，而非源端故障。
+
+    同花顺行业指数在收盘后确实会晚一根：实测 2026-09-29 20:05 跑时东财列表
+    已失败、兜底拿到 90 个行业但最新只到 09-28。那批 09-28 数据本身是好的，
+    表里缺的也正是它，整批丢掉只会让 sector_daily 停在旧日期不动、并每天
+    进补齐清单。差两个交易日以上才说明源端真出了问题，那时仍然整批拒收。
+    """
+    recent = get_recent_trading_days(expected, 2)
+    if len(recent) < 2 or max_date is None:
+        return False
+    return max_date >= recent[1]
+
+
 # ===========================================================================
 # 主更新函数
 # ===========================================================================
@@ -419,15 +433,28 @@ def update_sector_derivatives(db: DatabaseInterface) -> dict:
         records = _fetch_sector_daily()
         if records:
             warn_if_all_empty(records, ["close", "pct_change"], "sector_daily")
-            verdict = check_task_freshness(records, date_field="trade_date", expected=get_expected_latest_trading_day())
-            if verdict.is_stale:
-                logger.warning(f"⚠️ 行业涨跌幅数据陈旧 (max_date={verdict.max_date}, expected={verdict.expected})，保留旧数据")
+            expected = get_expected_latest_trading_day()
+            verdict = check_task_freshness(records, date_field="trade_date", expected=expected)
+            if verdict.is_stale and not _is_only_one_trading_day_behind(
+                expected, verdict.max_date
+            ):
+                logger.warning(f"⚠️ 行业涨跌幅数据陈旧 (max_date={verdict.max_date}, expected={expected})，保留旧数据")
                 results["sector_daily"] = 0
                 stale_parts.append("sector_daily")
             else:
                 saved = db.save_sector_daily_batch(records)
                 results["sector_daily"] = saved
-                logger.info(f"✅ 行业涨跌幅保存完成: {saved} 条")
+                if verdict.is_stale:
+                    # 源端只晚一根：写进去的是货真价实的历史数据，缺的仅是
+                    # expected 那一天，整轮仍按 retained 上报（缺口留在
+                    # stale_parts 里，缺失日等源端补齐）
+                    logger.warning(
+                        f"⚠️ 行业涨跌幅源端少一个交易日 (max_date={verdict.max_date}, "
+                        f"expected={expected})，已写入 {saved} 条，缺失日待源端补齐"
+                    )
+                    stale_parts.append("sector_daily")
+                else:
+                    logger.info(f"✅ 行业涨跌幅保存完成: {saved} 条")
         else:
             results["sector_daily"] = 0
             logger.warning("⚠️ 行业涨跌幅无数据")

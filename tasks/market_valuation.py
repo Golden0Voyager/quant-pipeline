@@ -28,13 +28,15 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 
-def _fetch_pe() -> list[dict]:
+def _fetch_pe(failures: list[str] | None = None) -> list[dict]:
     """获取全市场 PE(TTM/LYR) 中位数及历史分位。"""
     resp = get_default_client().call("legu", lambda: ak.stock_a_ttm_lyr())
     if not resp.success:
         # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
         # 任务只剩「zero rows without explanation」，现场无法分诊
         logger.warning(f"⚠️ 全市场PE 源请求失败: {resp.metadata.error}")
+        if failures is not None:
+            failures.append(f"全市场PE: {resp.metadata.error}")
         return []
     df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
@@ -67,13 +69,15 @@ def _fetch_pe() -> list[dict]:
 # ===========================================================================
 
 
-def _fetch_pb() -> list[dict]:
+def _fetch_pb(failures: list[str] | None = None) -> list[dict]:
     """获取全市场 PB 中位数及历史分位。"""
     resp = get_default_client().call("legu", lambda: ak.stock_a_all_pb())
     if not resp.success:
         # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
         # 任务只剩「zero rows without explanation」，现场无法分诊
         logger.warning(f"⚠️ 全市场PB 源请求失败: {resp.metadata.error}")
+        if failures is not None:
+            failures.append(f"全市场PB: {resp.metadata.error}")
         return []
     df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
@@ -104,13 +108,15 @@ def _fetch_pb() -> list[dict]:
 # ===========================================================================
 
 
-def _fetch_ebs() -> list[dict]:
+def _fetch_ebs(failures: list[str] | None = None) -> list[dict]:
     """获取股债利差（沪深300 vs 10年国债）。"""
     resp = get_default_client().call("legu", lambda: ak.stock_ebs_lg())
     if not resp.success:
         # 失败原因（如上游 504 断服）必须落日志：旧实现静默吞掉，
         # 任务只剩「zero rows without explanation」，现场无法分诊
         logger.warning(f"⚠️ 股债利差 源请求失败: {resp.metadata.error}")
+        if failures is not None:
+            failures.append(f"股债利差: {resp.metadata.error}")
         return []
     df = resp.data
     if df is None or (hasattr(df, "empty") and df.empty):
@@ -158,6 +164,10 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
 
     # --- Merge by date (PE / PB / 股债利差 三者按日期合并) ---
     daily_merge: dict[str, dict] = {}
+    # 「源不可用」与「源可用但当天没数据」必须分开：前者是网络故障，该按
+    # retained 保留旧数据并让 safe_task 的网络重试生效；后者是真正需要人看一眼
+    # 的异常，混为一谈就变成 P2-18 记过的 retained 静默退化。
+    transport_failures: list[str] = []
     daily_calls = [
         ("全市场PE", _fetch_pe),
         ("全市场PB", _fetch_pb),
@@ -165,7 +175,7 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
     ]
     for name, fn in daily_calls:
         try:
-            records = fn()
+            records = fn(transport_failures)
             for r in records:
                 d = r.pop("date")
                 if d not in daily_merge:
@@ -176,6 +186,7 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
         except Exception as e:
             logger.warning(f"⚠️ {name} 获取失败: {e}")
             results[name] = f"error: {e}"
+            transport_failures.append(f"{name}: {e}")
 
     if daily_merge:
         daily_records = list(daily_merge.values())
@@ -194,6 +205,16 @@ def update_market_valuation(db: DatabaseInterface) -> dict:
         # 附分源明细：三源各自是「0 条」还是「error: …」，上游断服时
         # 日志里直接可见原因，不用再翻代码猜（2026-09-28 乐咕 504 教训）
         logger.warning(f"⚠️ 大盘估值无数据（分源明细: {results}）")
+        if transport_failures:
+            # 源确实不可用（不是「源正常但今天没数据」）：保留库里已有的
+            # market_valuation 行并按网络故障上报。error_kind=network 同时让
+            # core/runner.py 的 safe_task 在 30s 后重试一次——旧实现缺 status，
+            # normalize_task_result 落成 FAILED/DATA_QUALITY，重试永不触发。
+            results["status"] = "retained"
+            results["error_kind"] = "network"
+            results["retained_old_data"] = True
+            results["reason"] = "legu unavailable; kept previous market valuation rows"
+            results["error"] = "; ".join(transport_failures)
     results["saved"] = saved
 
     return dict(results)

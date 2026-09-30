@@ -7,6 +7,7 @@ single ``SourceClient`` that applies a declared ``SourcePolicy`` to every call.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
@@ -49,6 +50,10 @@ class SourcePolicy:
     min_interval_seconds: float
     circuit_failures: int = 5
     circuit_cooldown_seconds: float = 120.0
+    # 额外视为「瞬时故障」的异常类型。默认只有网络类；某些源的**瞬时**上游故障
+    # 会被上游库表达成非网络异常（见 POLICIES["legu"]），不声明就会落进
+    # `except Exception` 的「schema drift，不可重试」分支，max_attempts 形同虚设。
+    retryable_exceptions: tuple[type[Exception], ...] = RETRYABLE_EXCEPTIONS
 
 
 @dataclass
@@ -261,7 +266,7 @@ class SourceClient:
                 )
                 return SourceResponse(success=True, data=result, metadata=meta)
 
-            except RETRYABLE_EXCEPTIONS as exc:
+            except policy.retryable_exceptions as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.debug(
                     "Attempt %d/%d for %s failed: %s",
@@ -462,6 +467,15 @@ POLICIES: dict[str, SourcePolicy] = {
         timeout_seconds=15, max_attempts=3,
         base_delay_seconds=1, max_delay_seconds=20,
         min_interval_seconds=0.5,
+        # 乐咕把 504 / 反爬页当 HTML 返回，而 akshare 抓 `get_cookie_csrf` 时既不
+        # `raise_for_status()` 也不判 None，于是同一场瞬时故障有三种面貌：
+        #   AttributeError: 'NoneType' object has no attribute 'attrs'  (缺 _csrf meta)
+        #   json.JSONDecodeError                                            (错误页不是 JSON)
+        #   TypeError                                                       (None 不可下标)
+        # 实测 2026-09-29 站点持续 504，三源（PE/PB/股债利差）同时以
+        # AttributeError 失败，且因为不可重试，max_attempts=3 一次都没跑。
+        retryable_exceptions=RETRYABLE_EXCEPTIONS
+        + (AttributeError, KeyError, TypeError, json.JSONDecodeError),
     ),
     "ths": SourcePolicy(
         source="ths", host="10jqka.com.cn",

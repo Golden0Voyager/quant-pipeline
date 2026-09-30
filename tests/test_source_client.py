@@ -6,12 +6,15 @@ error classification — all with fake clocks and scripted responses.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 from core.source_client import (
+    POLICIES,
+    RETRYABLE_EXCEPTIONS,
     CircuitState,
     FetchMetadata,
     SourceClient,
@@ -187,6 +190,70 @@ class TestRetry:
         assert resp.success is False
         assert resp.data is None
         assert resp.metadata.attempt_count == 2
+
+
+class TestPolicyScopedRetryableExceptions:
+    """A source that signals transient failure with a non-network exception type.
+
+    legulegu serves its 504 / anti-bot page as HTML, and akshare scrapes it
+    without ``raise_for_status()`` or a None guard, so the transient upstream
+    condition surfaces as ``AttributeError: 'NoneType' object has no
+    attribute 'attrs'`` (the missing ``_csrf`` meta tag) or
+    ``json.JSONDecodeError``. The generic ``except Exception`` branch treats
+    both as permanent schema drift, so the policy's three attempts collapse
+    to one and a site-wide 504 becomes an instant hard failure.
+    """
+
+    def test_policy_declared_exception_type_is_retried(self) -> None:
+        policy = SourcePolicy(
+            "t", "ex.com", 10, 3, 0.01, 0.1, 0.0,
+            retryable_exceptions=(AttributeError,),
+        )
+        client = SourceClient(policies={"t": policy})
+        call_count = 0
+
+        def _flaky() -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise AttributeError("'NoneType' object has no attribute 'attrs'")
+            return "ok"
+
+        resp = client.call("t", _flaky)
+        assert resp.success is True
+        assert resp.data == "ok"
+        assert call_count == 3
+
+    def test_undeclared_exception_type_still_fails_fast(self) -> None:
+        """A policy that says nothing keeps today's one-shot behaviour."""
+        policy = SourcePolicy("t", "ex.com", 10, 3, 0.01, 0.1, 0.0)
+        client = SourceClient(policies={"t": policy})
+        call_count = 0
+
+        def _always_fails() -> str:
+            nonlocal call_count
+            call_count += 1
+            raise AttributeError("boom")
+
+        resp = client.call("t", _always_fails)
+        assert resp.success is False
+        assert call_count == 1
+        assert resp.metadata.attempt_count == 1
+
+    def test_legu_policy_declares_the_scrape_failure_types(self) -> None:
+        """The production legu policy must name both observed failure shapes."""
+        legu = POLICIES["legu"]
+        assert AttributeError in legu.retryable_exceptions
+        assert json.JSONDecodeError in legu.retryable_exceptions
+
+    def test_no_other_policy_widens_its_retry_set(self) -> None:
+        """Widening is a per-source decision; the rest keep the network-only set."""
+        widened = {
+            name
+            for name, policy in POLICIES.items()
+            if set(policy.retryable_exceptions) - set(RETRYABLE_EXCEPTIONS)
+        }
+        assert widened == {"legu"}
 
 
 # ── Circuit breaker ──────────────────────────────────────────────────────
