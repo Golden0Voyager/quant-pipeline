@@ -53,7 +53,7 @@ class SourcePolicy:
     # 额外视为「瞬时故障」的异常类型。默认只有网络类；某些源的**瞬时**上游故障
     # 会被上游库表达成非网络异常（见 POLICIES["legu"]），不声明就会落进
     # `except Exception` 的「schema drift，不可重试」分支，max_attempts 形同虚设。
-    retryable_exceptions: tuple[type[BaseException], ...] = RETRYABLE_EXCEPTIONS
+    retryable_exceptions: tuple[type[Exception], ...] = RETRYABLE_EXCEPTIONS
 
 
 @dataclass
