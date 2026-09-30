@@ -117,7 +117,10 @@ from tasks.bars import _update_single_bar, update_bars  # noqa: F401
 from tasks.cftc_cot import update_cftc_cot
 from tasks.china_macro import update_china_macro
 from tasks.concept_board import update_concept_board, update_concept_member
-from tasks.concept_board_backfill import update_concept_board_backfill
+from tasks.concept_board_backfill import (
+    DEFAULT_LOOKBACK_DAYS,
+    update_concept_board_backfill,
+)
 from tasks.convertible_bond import (
     update_cb_index,
     update_cb_quotation,
@@ -296,7 +299,7 @@ def _run_registry_task(
     limit: int | None = None,
     resume: bool = False,
     force: bool = False,
-    lookback_days: int = 10,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     health_fast: bool = False,
 ) -> Any:
     fn = _TASK_CALLABLES.get(task_name)
@@ -1290,7 +1293,7 @@ def main():
     parser.add_argument(
         "--lookback",
         type=int,
-        default=10,
+        default=DEFAULT_LOOKBACK_DAYS,
         help=(
             "回补窗口，单位是交易日（仅 update_concept_board_backfill 使用）。"
             "实际可用窗口比该值少一个交易日：窗口取的是「含 expected 在内」的 N 天，"
