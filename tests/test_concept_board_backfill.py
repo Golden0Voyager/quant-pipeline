@@ -960,3 +960,56 @@ def test_stored_dates_reads_a_path_containing_a_query_character(tmp_path):
     db.db_path = str(db_file)
     assert mod._stored_dates(db) == {"2026-09-28", "2026-09-24"}
 
+
+def test_target_date_before_expected_and_absent_is_backfilled(monkeypatch):
+    """反面：两道否决都不命中时，指定日期**必须真的补上**。
+
+    只钉否决侧的话，把 ``_target_days`` 写成永真（永远拒）或永假（永远放行）
+    都还有一半用例是绿的——而永假会让 ``--target-date`` 这个入口彻底失效。
+    覆盖率报告点名了这条路径（359 行）原先没有任何用例经过。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _one_board(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    db = _db()
+    result = mod.update_concept_board_backfill(db, target_date="2026-09-28")
+    assert result["status"] == "success"
+    assert _meta(result)["requested_days"] == 1
+    assert _meta(result)["backfilled_days"] == ["2026-09-28"]
+    written = db.save_concept_board_batch.call_args[0][0]
+    assert {r["trade_date"] for r in written} == {"2026-09-28"}
+
+
+def test_stored_dates_failure_warning_names_data_loss_not_wasted_work(tmp_path, caplog):
+    """取不到已有日期时，告警必须说清代价是**数据损坏**。
+
+    旧措辞说这个失败只是浪费请求、且 ``INSERT OR REPLACE`` 幂等——它不幂等：它把
+    ``up_count``/``down_count`` 置空并翻转 ``data_source``，而 ``set()`` 会让缺口
+    计算把**已经有数据**的日子全当成缺失。措辞若继续说「幂等」，读日志的人会以为
+    最坏情况只是白跑一遍。
+    """
+    import sqlite3
+    from unittest.mock import MagicMock
+
+    import tasks.concept_board_backfill as mod
+
+    db_file = tmp_path / "no_such_table.db"
+    sqlite3.connect(db_file).close()  # 建一个空库：没有 concept_board 表
+
+    db = MagicMock()
+    db.db_path = str(db_file)
+    with caplog.at_level(logging.WARNING):
+        assert mod._stored_dates(db) == set()
+    assert "数据损坏" in caplog.text
+    assert "幂等" not in caplog.text, f"仍在用「幂等」描述一个会覆写真值的失败: {caplog.text}"
+
+
