@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from core.task_registry import CATCH_UP_TASK_ORDER, lookup_task
 
 TASK = "update_concept_board_backfill"
@@ -78,18 +80,47 @@ def test_task_is_dispatchable_via_task_callables():
     assert TASK in _TASK_CALLABLES
 
 
-def test_lookback_flag_is_registered():
-    """`--lookback` 必须真的出现在 CLI 上（parser 局部于 main()，用 --help 探针）。"""
-    import subprocess
+def test_lookback_flag_is_registered(monkeypatch, capsys):
+    """`--lookback` 必须真的出现在 CLI 上（parser 局部于 main()）。
+
+    **在进程内调 `main()`，不派生子进程。** 早先的写法是
+    `subprocess.run([sys.executable, "daily_pipeline.py", "--help"])`，它在
+    CI 上返回了空 stdout（本地同一条命令恒为 1700~2500 字节，随 COLUMNS 变化）。
+    **根因未查明。** 已排除：`--help` 在 `parse_args()` 处 `SystemExit(0)`，
+    早于 `_acquire_lock()`（`daily_pipeline.py:1310` vs `:1341`），故与 `/tmp`
+    的 flock 无关——实测持锁状态下同一条命令仍输出正常字节；清空环境变量后
+    本地亦正常。
+
+    子进程写法真正的问题是它把「CLI 是否正常」与「子进程能否在测试环境里
+    启动」耦在一起，而后者失败时只剩一句 `assert '--lookback' in ''`——退出码
+    与 stderr 都被丢掉。进程内调用走仓库为这件事建的隔离
+    （`tests/conftest.py::_isolate_pipeline_lock`），没有子进程可逃逸；本用例
+    另显式 patch 一次，不依赖那个 autouse fixture 的存在。
+    """
     import sys
 
-    root = Path(__file__).resolve().parents[1]
-    out = subprocess.run(
-        [sys.executable, str(root / "daily_pipeline.py"), "--help"],
-        capture_output=True, text=True, cwd=root, timeout=120,
-    ).stdout
-    assert "--lookback" in out
+    import daily_pipeline
+
+    # conftest 的 autouse fixture 已经 patch 了这两处；这里再显式 patch 一次，
+    # 使本用例自带隔离、不依赖那个 fixture 的存在。
+    monkeypatch.setattr(daily_pipeline, "_acquire_lock", lambda: None)
+    monkeypatch.setattr(daily_pipeline, "global_lock_held", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["daily_pipeline.py", "--help"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        daily_pipeline.main()
+
+    out = capsys.readouterr().out
+    assert excinfo.value.code == 0, (
+        f"main() 退出码 {excinfo.value.code}；stdout 长度={len(out)}，前 400 字={out[:400]!r}"
+    )
+    assert "--lookback" in out, (
+        f"帮助文本里没有 --lookback；stdout 长度={len(out)}，前 400 字={out[:400]!r}"
+    )
     assert "交易日" in out, "帮助文本必须写明单位是交易日，否则 --lookback 10 会被读成 10 天"
+    # 排他闸使有效窗口比 lookback 少一天（get_recent_trading_days 含 expected
+    # 再被丢掉），运维必须从 --help 就看得出 --lookback 1 补不了任何一天。
+    assert "不补任何一天" in out, "帮助文本必须说明 --lookback 1 不补任何一天"
 
 
 def test_run_registry_task_forwards_lookback(monkeypatch):
