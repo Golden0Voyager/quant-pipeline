@@ -51,11 +51,21 @@ class _FakeResponse:
     """``SourceResponse`` 的最小替身：只带 ``_fetch_board_list`` 读的那几个属性。"""
 
     def __init__(
-        self, *, success: bool, data: object = None, error: str | None = None
+        self,
+        *,
+        success: bool,
+        data: object = None,
+        error: str | None = None,
+        circuit_breaker_triggered: bool = False,
     ) -> None:
         self.success = success
         self.data = data
-        self.metadata = SimpleNamespace(error=error)
+        # ``circuit_breaker_triggered`` 由生产代码用 ``getattr`` 读，替身必须带上：
+        # 真实 ``FetchMetadata`` 一定有这一项（core/source_client.py:67），少了它
+        # 「熔断汇总」那条用例会在替身上误报 AttributeError 而不是测到真东西。
+        self.metadata = SimpleNamespace(
+            error=error, circuit_breaker_triggered=circuit_breaker_triggered
+        )
 
 
 class _FakeClient:
@@ -450,6 +460,47 @@ def test_fetch_day_returns_empty_when_all_boards_fail(monkeypatch):
     assert mod.fetch_day_records("2026-09-28", boards=[("BK0001", "甲")]) == []
 
 
+def test_circuit_breaker_open_gives_one_summary_not_one_warning_per_board(monkeypatch, caplog):
+    """熔断打开后，剩下的每个板块都拿到同一条响应——逐条告警等于把日志刷爆。
+
+    ``core/source_client.py`` 每主机 5 次失败即冷却 120s，于是熔断一打开，剩下
+    几百个板块**一个请求都不发**、每个都回一句 ``circuit breaker open``。默认窗口
+    9 天 × 约 499 个板块 = 约 4491 条同义告警。这与模块 :163-165 拒绝的「方向
+    警告」是同一形状：真漂移会被埋在里面。所以只发**一条**汇总，且必须是
+    WARNING——熔断是必须让人看见的故障。
+    """
+    import tasks.concept_board_backfill as mod
+
+    boards = _boards(20)
+    _stub_client(monkeypatch, mod, _FakeResponse(
+        success=False, error="circuit breaker open", circuit_breaker_triggered=True,
+    ))
+    with caplog.at_level(logging.WARNING):
+        assert mod.fetch_day_records("2026-09-28", boards=boards) == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, f"{len(warnings)} 条告警，应当只有一条汇总: {caplog.text}"
+    assert "熔断" in caplog.text
+    # 汇总要带得上「少了几个 / 一共几个」，否则读日志的人不知道那天废了多少。
+    assert "20/20" in caplog.text, f"汇总没给覆盖计数: {caplog.text}"
+
+
+def test_failures_that_are_not_the_breaker_are_still_reported_one_by_board(monkeypatch, caplog):
+    """**不是**熔断的失败仍然逐板块告警——那是某块概念自己的问题，要能定位到是谁。
+
+    与上一条互为反向：把两种失败一起折叠成一条汇总，就丢掉了「哪个概念取不到」
+    这个定位信息。判据必须是 ``FetchMetadata.circuit_breaker_triggered`` 这个
+    标记位，而不是「失败」本身。
+    """
+    import tasks.concept_board_backfill as mod
+
+    _stub_client(monkeypatch, mod, _FakeResponse(success=False, error="HTTP 502"))
+    with caplog.at_level(logging.WARNING):
+        mod.fetch_day_records("2026-09-28", boards=[("BK0001", "甲"), ("BK0002", "乙")])
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, f"{len(warnings)} 条告警，应当逐板块两条: {caplog.text}"
+    assert "甲" in caplog.text and "乙" in caplog.text
+
+
 # ===========================================================================
 # 主任务：状态语义 + 写入上界
 # ===========================================================================
@@ -479,14 +530,28 @@ def _meta(result: dict) -> dict:
     return result["metadata"]
 
 
-def _one_board(monkeypatch, mod):
-    """给 ``_fetch_board_list`` 打桩，否则下面几条用例会真的发网络请求。
+def _small_universe(monkeypatch, mod, boards: list[tuple[str, str]] | None = None):
+    """给一个**小到不真实**的板块全集，并把它压成「只按比例判残缺」。
 
-    主任务是**先取列表再逐日抓取**，所以任何走到 days 循环的用例都必须桩掉它——
-    否则测试在离线时红、在联网时绿，而更糟的是本机东财通不通会改变 ``None`` 与
-    ``[]`` 的走向，让断言偶尔以另一种原因成立。**hermetic，不依赖真实源端状态。**
+    两个动作缺一不可：
+
+    1. 打桩 ``_fetch_board_list``，否则下面几条用例会真的发网络请求。
+       主任务是**先取列表再逐日抓取**，所以任何走到 days 循环的用例都必须桩掉它——
+       否则测试在离线时红、在联网时绿，而更糟的是本机东财通不通会改变 ``None`` 与
+       ``[]`` 的走向，让断言偶尔以另一种原因成立。**hermetic，不依赖真实源端状态。**
+    2. 把 ``MIN_BOARD_FLOOR`` 压到 1。绝对下界编码的是**真实**板块全集的性质
+       （约 500 个），1 个或 2 个板块的假全集永远满足不了它，于是这些用例会集体
+       变成「因为撞上绝对下界而红」——它们各自要测的东西（状态语义、写入计数、
+       日期闸门）就全被这层无关的判据盖住了。
+
+    绝对下界本身由本文件末尾两条**不打这个桩**的用例守（截短被拒 / 不过高），
+    比例下界由 ``test_coverage_threshold_scales_with_the_board_list`` 守。
     """
-    monkeypatch.setattr(mod, "_fetch_board_list", lambda: [("BK0001", "甲")])
+    monkeypatch.setattr(
+        mod, "_fetch_board_list",
+        lambda: [("BK0001", "甲")] if boards is None else boards,
+    )
+    monkeypatch.setattr(mod, "MIN_BOARD_FLOOR", 1)
 
 
 def _no_declared_gaps(monkeypatch, mod):
@@ -536,7 +601,7 @@ def test_no_gap_makes_no_network_call_and_no_write(monkeypatch):
 def test_all_days_backfilled_is_success(monkeypatch):
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -555,7 +620,7 @@ def test_all_days_backfilled_is_success(monkeypatch):
 def test_partial_backfill_is_degraded(monkeypatch):
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -580,7 +645,7 @@ def test_nothing_backfilled_when_source_is_down_is_retained_network(monkeypatch)
     """
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -645,11 +710,45 @@ def test_board_list_legitimately_empty_is_no_data_not_a_network_failure(monkeypa
     assert result["saved"] == 0
 
 
+def test_missing_akshare_fails_instead_of_reporting_retained(monkeypatch):
+    """``akshare`` 没装是**永久**故障，不能报 ``retained`` + ``error_kind=network``。
+
+    旧实现没有这道短路：它跑完整个 days 循环、每天 0 行、报
+    ``retained`` + ``error_kind=network`` —— 而 ``retained`` 以 **0 退出**
+    （AGENTS.md 无人值守段第 6 条），于是 ``safe_task`` 白等 30s 重试一次，
+    再重试一次，每次结果都一样，退出码还是 0。缺一个硬依赖该报 ``failed``：
+    非零退出 + error 级通知，操作员看得见。
+
+    ``fetch_day_records`` 自己的 ``ak is None`` 守卫（模块 :240）**留着**——它是那个
+    函数的自我保护；这里补的是主任务那道「不进入写入循环」的短路。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "ak", None)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+
+    def boom(*_a, **_k):
+        raise AssertionError("akshare 缺失时不该走到取列表或抓取")
+
+    monkeypatch.setattr(mod, "_fetch_board_list", boom)
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "failed"
+    assert result["error_kind"] != "network", "本地缺依赖不是网络问题，不该触发 30s 重试"
+    assert result["saved"] == 0
+    assert not db.save_concept_board_batch.called
+
+
 def test_backfill_never_writes_expected_or_later(monkeypatch):
     """写入上界闸门：源端若返回 expected 当天（或更晚）的行，必须被丢弃。"""
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -692,7 +791,7 @@ def test_partially_fetched_day_is_not_written_and_not_reported(monkeypatch):
         got = list(boards)[:3] if day == "2026-09-28" else list(boards)
         return _records_for(day, got)
 
-    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    _small_universe(monkeypatch, mod, boards)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-24"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -717,7 +816,7 @@ def test_below_coverage_alone_never_reports_success(monkeypatch):
     import tasks.concept_board_backfill as mod
 
     boards = _boards(10)
-    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    _small_universe(monkeypatch, mod, boards)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -738,12 +837,12 @@ def test_coverage_threshold_scales_with_the_board_list(monkeypatch):
     """下界必须由**运行时** ``len(boards)`` 推出，不能钉死 504。
 
     板块全集会变（东财随时增删概念），钉死数字等于给某天判一个与当下无关的
-    死线。这条只钉「2 个板块 / 回来 1 个 = 残缺」这一侧——比例下界在单板块
-    用例（``_one_board``）下取 1，所以它们仍然全绿。
+    死线。这条只钉「2 个板块 / 回来 1 个 = 残缺」这一侧——**绝对**下界被
+    ``_small_universe`` 压到 1，所以这里判残缺的判据确实只有比例。
     """
     import tasks.concept_board_backfill as mod
 
-    monkeypatch.setattr(mod, "_fetch_board_list", lambda: _boards(2))
+    _small_universe(monkeypatch, mod, _boards(2))
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -759,6 +858,75 @@ def test_coverage_threshold_scales_with_the_board_list(monkeypatch):
     assert not db.save_concept_board_batch.called
 
 
+def test_absolute_floor_rejects_a_day_built_from_a_truncated_board_list(monkeypatch):
+    """比例下界的**分母自己也可能是残的**——分母一残，它就自动放行残缺的那一天。
+
+    真实触发（``tasks/concept_board.py:107`` 的 ``_fetch_concept_list_em``）：先翻
+    ``push2``，失败退到 ``push2delay``，而它对「拿到一个**非空但不足**的列表」没有
+    意见——``tasks/concept_board.py:156`` 只要求 ``success and out``。退回来的主机
+    少给了 250 条时，回补拿到 250 个板块、只请求这 250 个、下界
+    ``ceil(0.8 × 250) = 200``、实到 250 ≥ 200，于是**通过**：写下一个 250 板块的
+    日子并报 success，而 ``find_missing_days`` 只问「那天有没有行」（模块 :100），
+    那天从此永久出局、无人复访——正是本功能要终结的那种洞。
+
+    这里**不**打 ``_small_universe`` 的桩：绝对下界要按真实量级验（实测 31 个交易日
+    每天 495–504 个不同板块，15613 行）。
+    """
+    import tasks.concept_board_backfill as mod
+
+    truncated = _boards(250)
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: truncated)
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    # 源端对这 250 个板块**全部**正常返回：没有熔断、没有漂移、没有丢行。
+    # 唯一的异常就是板块列表本身少了——这正是这道闸要抓的形态。
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: _records_for(day, list(boards)),
+    )
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert not db.save_concept_board_batch.called, (
+        "残缺列表写下去的那天会被 find_missing_days 认为已经齐了，永久出局"
+    )
+    assert result["status"] != "success"
+    assert result["status"] == "retained", "什么都没写 = 源整体不可用，仍走 30s 重试"
+    assert _meta(result)["backfilled_days"] == []
+    assert _meta(result)["failed_days"] == ["2026-09-28"]
+
+
+def test_absolute_floor_leaves_room_for_a_smaller_legitimate_universe(monkeypatch):
+    """钉住绝对下界的**上侧**：它不能高到把合法的板块全集变化也判成残缺。
+
+    只钉「截短被拒」的话，把下界取成实测最差的一天（495）一样能让上面那条变绿，
+    而它会在东财增删概念时误伤健康的一天——板块全集会变正是
+    ``test_coverage_threshold_scales_with_the_board_list`` 保留比例下界的理由。
+    320 个板块（比实测最差的一天低 35%、比被拦的 250 高）必须照常写入。
+    """
+    import tasks.concept_board_backfill as mod
+
+    monkeypatch.setattr(mod, "_fetch_board_list", lambda: _boards(320))
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(mod, "_stored_dates", lambda db: set())
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: _records_for(day, list(boards)),
+    )
+    db = _db()
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "success"
+    assert _meta(result)["backfilled_days"] == ["2026-09-28"]
+    # 写进去的就是这 320 个板块——数量不打折，才叫「照常写入」。
+    written = db.save_concept_board_batch.call_args[0][0]
+    assert len({r["concept_code"] for r in written}) == 320
+
+
 def test_zero_row_write_is_a_failed_day(monkeypatch):
     """抓到 ≠ 写入（AGENTS.md 硬规则 4）。
 
@@ -769,7 +937,7 @@ def test_zero_row_write_is_a_failed_day(monkeypatch):
     """
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -796,7 +964,7 @@ def test_saved_accumulates_across_days(monkeypatch):
     """
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -823,7 +991,7 @@ def test_day_lists_reach_the_audit_record(monkeypatch):
     from core.task_result import normalize_task_result
 
     boards = _boards(10)
-    monkeypatch.setattr(mod, "_fetch_board_list", lambda: boards)
+    _small_universe(monkeypatch, mod, boards)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-24"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -850,7 +1018,7 @@ def test_each_day_is_written_as_it_lands(monkeypatch):
     """
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28", "2026-09-25"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -970,7 +1138,7 @@ def test_target_date_before_expected_and_absent_is_backfilled(monkeypatch):
     """
     import tasks.concept_board_backfill as mod
 
-    _one_board(monkeypatch, mod)
+    _small_universe(monkeypatch, mod)
     monkeypatch.setattr(mod, "get_recent_trading_days",
                         lambda end, count: ["2026-09-29", "2026-09-28"])
     monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
@@ -993,9 +1161,9 @@ def test_stored_dates_failure_warning_names_data_loss_not_wasted_work(tmp_path, 
     """取不到已有日期时，告警必须说清代价是**数据损坏**。
 
     旧措辞说这个失败只是浪费请求、且 ``INSERT OR REPLACE`` 幂等——它不幂等：它把
-    ``up_count``/``down_count`` 置空并翻转 ``data_source``，而 ``set()`` 会让缺口
-    计算把**已经有数据**的日子全当成缺失。措辞若继续说「幂等」，读日志的人会以为
-    最坏情况只是白跑一遍。
+    ``up_count``/``down_count`` 置空并翻转 ``data_source``，而「当成库里没有数据」
+    会让缺口计算把**已经有数据**的日子全当成缺失。措辞若继续说「幂等」，读日志的
+    人会以为最坏情况只是白跑一遍。
     """
     import sqlite3
     from unittest.mock import MagicMock
@@ -1008,8 +1176,97 @@ def test_stored_dates_failure_warning_names_data_loss_not_wasted_work(tmp_path, 
     db = MagicMock()
     db.db_path = str(db_file)
     with caplog.at_level(logging.WARNING):
-        assert mod._stored_dates(db) == set()
+        # ``None`` = **读失败**，与「表真的空」是两件事（下一条用例分开钉）。
+        assert mod._stored_dates(db) is None
     assert "数据损坏" in caplog.text
     assert "幂等" not in caplog.text, f"仍在用「幂等」描述一个会覆写真值的失败: {caplog.text}"
+
+
+def test_unreadable_stored_dates_stops_the_task_before_the_write_loop(tmp_path, monkeypatch):
+    """读失败必须 **fail-closed**：整个任务停在这里，一个字节都不许写。
+
+    旧实现读失败返回 ``set()``，而 ``set()`` 的含义是「库内一天数据都没有」——于是
+    窗口内**已经有行**的日子全被列进待补，回补行的 NULL ``up_count``/``down_count``
+    顺着 ``INSERT OR REPLACE`` 盖掉快照写的真值，``data_source`` 从 'em' 翻成
+    'em_hist'。这不是假设：本机对着**真实** ``SmartMoneyDBProvider`` 与真实表复现过
+    ——回补前 504 行、504 行带 ``up_count``、``data_source='em'``；强制读失败后任务
+    报 ``success`` saved=504；回补后 504 行、**0** 行带 ``up_count``、
+    ``data_source`` 全是 ``'em_hist'``。数据没了，而那一轮还报成功。
+
+    三个日期闸门（``< expected``）只管**上**侧，管不到下侧；下侧原本只靠这个
+    fail-open 的 ``set()`` 兜着。
+
+    触发概率低（路径不可读、表不存在），正因如此要的是「三行就够」而不是重构：
+    让 ``_stored_dates`` **区分失败与空**，主任务一见到失败就不进写入循环。
+    """
+    import sqlite3
+    from unittest.mock import MagicMock
+
+    import tasks.concept_board_backfill as mod
+
+    db_file = tmp_path / "unreadable.db"
+    sqlite3.connect(db_file).close()  # 空库：没有 concept_board 表 → SELECT 失败
+
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    _no_declared_gaps(monkeypatch, mod)
+
+    def boom(*_a, **_k):
+        raise AssertionError("读不到已有日期时不该发任何源端请求")
+
+    monkeypatch.setattr(mod, "_fetch_board_list", boom)
+    monkeypatch.setattr(mod, "fetch_day_records", boom)
+
+    db = MagicMock()
+    db.db_path = str(db_file)
+    result = mod.update_concept_board_backfill(db)
+    assert not db.save_concept_board_batch.called
+    assert result["status"] == "failed", f"读失败必须报 failed，实际 {result['status']}"
+    assert result["status"] != "retained", (
+        "retained 以 0 退出、操作员看不见，而读失败重试多少次都一样"
+    )
+    assert result["error_kind"] != "network", "本地库读失败不是网络问题，不该触发 30s 重试"
+    assert result["saved"] == 0
+    # 一个日子都没进入待补清单：连「该补哪天」都算不出来。
+    assert _meta(result) == {
+        "requested_days": 0, "backfilled_days": [], "failed_days": [],
+    }
+
+
+def test_genuinely_empty_table_lets_the_task_proceed(tmp_path, monkeypatch):
+    """**真的**空表与读失败必须能分开：空表照常回补。
+
+    上一条把失败改成 fail-closed，最容易犯的反向错误是顺手把「空表」也当成失败
+    ——那么新装机器（``_ensure_tables`` 建好表、一行数据都还没有）第一次跑回补就会
+    直接报 failed，回补功能在库最空的时候反而不可用。这里钉住空表 = 正常继续。
+    """
+    import sqlite3
+    from unittest.mock import MagicMock
+
+    import tasks.concept_board_backfill as mod
+
+    db_file = tmp_path / "empty_table.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE concept_board (trade_date TEXT, concept_code TEXT)")
+    conn.commit()
+    conn.close()  # 表在、行没有
+
+    db = MagicMock()
+    db.db_path = str(db_file)
+    assert mod._stored_dates(db) == set(), "空表必须读成空集合，不能读成失败"
+
+    _small_universe(monkeypatch, mod)
+    monkeypatch.setattr(mod, "get_expected_latest_trading_day", lambda: "2026-09-29")
+    monkeypatch.setattr(mod, "get_recent_trading_days",
+                        lambda end, count: ["2026-09-29", "2026-09-28"])
+    _no_declared_gaps(monkeypatch, mod)
+    monkeypatch.setattr(
+        mod, "fetch_day_records",
+        lambda day, boards=None: [{"trade_date": day, "concept_code": "BK1"}],
+    )
+    result = mod.update_concept_board_backfill(db)
+    assert result["status"] == "success"
+    assert _meta(result)["backfilled_days"] == ["2026-09-28"]
 
 
