@@ -631,16 +631,18 @@ def test_update_sector_derivatives_all_and_errors():
 def test_sector_daily_stale_fallback_data_is_retained():
     """Sector daily data genuinely stale (>=2 trading days behind) → retained, not saved.
 
-    The fixture date moved from 2026-09-18 to 2026-09-25 against an expected of
+    The fixture date moved from 2026-09-18 to 2026-09-24 against an expected of
     2026-09-29. 09-18 was only *one* trading day behind 09-21, which the
     one-day-lag rule now writes on purpose; the point of this case is a source
-    that is genuinely behind, so it needs two.
+    that is genuinely behind, so it needs two. 09-24 is the second session
+    before 09-29 — 09-25 is the Mid-Autumn holiday, so it is not a session and
+    must not be used as a fixture date.
 
     get_recent_trading_days is pinned so the boundary does not depend on the
     host's calendar cache.
     """
     stale_records = [
-        {"sector_name": "银行", "trade_date": "2026-09-25", "close": 100.0, "pct_change": 1.0},
+        {"sector_name": "银行", "trade_date": "2026-09-24", "close": 100.0, "pct_change": 1.0},
     ]
     db = MagicMock()
     for m in ("save_sector_daily_batch", "save_sector_valuation_batch", "save_index_futures_basis_batch"):
@@ -650,7 +652,7 @@ def test_sector_daily_stale_fallback_data_is_retained():
     ), patch.object(
         sector_derivatives,
         "get_recent_trading_days",
-        return_value=["2026-09-29", "2026-09-28", "2026-09-25"],
+        return_value=["2026-09-29", "2026-09-28", "2026-09-24"],
     ):
         result = sector_derivatives.update_sector_derivatives(db)
     assert result["status"] == "retained"
@@ -683,11 +685,11 @@ def test_sector_stale_but_others_saved_is_retained():
     """sector_daily genuinely stale, valuation+basis fresh → retained, others still saved.
 
     Same fixture-date move as above: 09-18 was one trading day behind 09-21,
-    which is now written by design, so the "really behind" case moved to 09-25
-    against an expected of 09-29.
+    which is now written by design, so the "really behind" case moved to 09-24
+    against an expected of 09-29 (09-25 is the Mid-Autumn holiday).
     """
     stale_records = [
-        {"sector_name": "银行", "trade_date": "2026-09-25", "close": 100.0, "pct_change": 1.0},
+        {"sector_name": "银行", "trade_date": "2026-09-24", "close": 100.0, "pct_change": 1.0},
     ]
     db = MagicMock()
     db.save_sector_daily_batch.return_value = 0
@@ -698,7 +700,7 @@ def test_sector_stale_but_others_saved_is_retained():
     ), patch.object(
         sector_derivatives,
         "get_recent_trading_days",
-        return_value=["2026-09-29", "2026-09-28", "2026-09-25"],
+        return_value=["2026-09-29", "2026-09-28", "2026-09-24"],
     ):
         result = sector_derivatives.update_sector_derivatives(db)
     assert result["status"] == "retained"
