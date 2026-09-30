@@ -32,9 +32,11 @@ from core.known_gaps import declared_missing_days
 
 logger = logging.getLogger(__name__)
 
-# 上面那句 noqa 的理由：主任务（Task 3）直接调 get_expected_latest_trading_day()
-# 算 expected，测试也打桩本模块的这个属性。它必须留在模块命名空间里，删掉只会
-# 逼每个调用点各自再导一次。同 daily_pipeline.py 的既有做法。
+# 上面那句 noqa 的理由：主任务（Task 3）在本模块内直接调 get_expected_latest_trading_day()
+# 算 expected，测试也打桩本模块的这个属性——五个 Task 3 用例的
+# monkeypatch.setattr(mod, "get_expected_latest_trading_day", ...) 要靠这个名字解析到它，
+# 所以它必须绑在模块对象上。同 daily_pipeline.py:37 的 timedelta（那里
+# tests/test_daily_pipeline.py:4468 真的 patch 了它）。
 #
 # 窗口默认值的含义：504 个概念 × **可用**缺口天数 = 请求数。有效窗口比 lookback_days
 # 少一天——get_recent_trading_days 给的是「含 expected 在内」的 N 个交易日
