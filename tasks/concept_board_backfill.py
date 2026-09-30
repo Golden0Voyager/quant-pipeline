@@ -24,11 +24,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
+import pandas as pd
+
 from core.calendar import (  # noqa: F401 — get_expected_latest_trading_day 重新导出
     get_expected_latest_trading_day,
     get_recent_trading_days,
 )
 from core.known_gaps import declared_missing_days
+from core.source_client import get_default_client
+
+try:
+    import akshare as ak
+except ImportError:
+    ak = None
 
 logger = logging.getLogger(__name__)
 
@@ -73,3 +81,113 @@ def find_missing_days(
         for day in recent
         if day < expected and day not in present and day not in skip
     )
+
+
+# 历史行与快照行靠这个值区分：快照有涨跌家数，历史没有。
+HISTORY_SOURCE = "em_hist"
+
+# 列名按同族接口 stock_board_industry_hist_em 推定（tasks/sector_derivatives.py
+# 已在生产验证）。待验证项见 spec：东财线路自 2026-09-29 起分钟级抖动，该接口的
+# 真实列名尚未实测，因此这里用「能识别多少写多少」而不是硬断言。
+_HIST_COL_MAP = {
+    "日期": "trade_date",
+    "开盘": "open",
+    "收盘": "close",
+    "最高": "high",
+    "最低": "low",
+    "成交量": "volume",
+    "成交额": "amount",
+    "涨跌幅": "pct_change",
+}
+# 记录键集固定，缺列写 None。行与行之间键不一致会让下游按 key 取值踩 KeyError。
+_HIST_VALUE_COLS = ("open", "close", "high", "low", "volume", "amount", "pct_change")
+
+
+def _records_from_hist_df(
+    df: pd.DataFrame, *, concept_code: str, concept_name: str
+) -> list[dict]:
+    """东财历史 K 线 → concept_board 记录。``up_count``/``down_count`` 恒为 None。"""
+    if df is None or df.empty:
+        return []
+    df = df.rename(columns=_HIST_COL_MAP)
+    known = [c for c in _HIST_VALUE_COLS if c in df.columns]
+    unknown = [c for c in df.columns if c not in _HIST_COL_MAP.values()]
+    if unknown:
+        logger.warning(
+            f"⚠️ 概念板块历史列名漂移，未识别 {sorted(unknown)}，只写 {known}"
+        )
+    if "trade_date" not in df.columns:
+        logger.warning("⚠️ 概念板块历史缺少日期列，跳过该板块")
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        day = str(row.get("trade_date", "")).strip()[:10]
+        if not day:
+            continue
+        # 键集固定：未识别的列写 None 而不是省略，否则同一批记录里有的行有
+        # pct_change、有的行没有，下游按 key 取值会踩 KeyError。
+        records.append({
+            "trade_date": day,
+            "concept_code": concept_code,
+            "concept_name": concept_name,
+            "open": row.get("open"),
+            "close": row.get("close"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount"),
+            "pct_change": row.get("pct_change"),
+            "up_count": None,
+            "down_count": None,
+            "data_source": HISTORY_SOURCE,
+        })
+    return records
+
+
+def _fetch_board_list() -> list[tuple[str, str]]:
+    """概念板块列表，返回 ``(code, name)``。取不到时返回空列表。"""
+    if ak is None:
+        return []
+    resp = get_default_client().call("eastmoney", ak.stock_board_concept_name_em)
+    if not resp.success or resp.data is None:
+        logger.warning(f"⚠️ 概念板块列表获取失败: {resp.metadata.error}")
+        return []
+    df = resp.data
+    if "板块代码" not in df.columns or "板块名称" not in df.columns:
+        logger.warning(f"⚠️ 概念板块列表列名不符，可用列: {list(df.columns)}")
+        return []
+    out: list[tuple[str, str]] = []
+    for _, row in df.iterrows():
+        code = str(row.get("板块代码", "")).strip()
+        name = str(row.get("板块名称", "")).strip()
+        if code and name:
+            out.append((code, name))
+    return out
+
+
+def fetch_day_records(
+    day: str, *, boards: list[tuple[str, str]] | None = None
+) -> list[dict]:
+    """取某个交易日的全部概念板块记录。单个板块失败即跳过，不中断其余。"""
+    if ak is None:
+        logger.error("❌ akshare 未安装")
+        return []
+    if boards is None:
+        boards = _fetch_board_list()
+    if not boards:
+        return []
+    compact = day.replace("-", "")
+    records: list[dict] = []
+    for code, name in boards:
+        resp = get_default_client().call(
+            "eastmoney",
+            lambda c=code: ak.stock_board_concept_hist_em(
+                symbol=c, period="daily",
+                start_date=compact, end_date=compact, adjust="",
+            ),
+        )
+        if not resp.success:
+            logger.warning(f"⚠️ 概念 {name}({code}) 历史获取失败: {resp.metadata.error}")
+            continue
+        records.extend(_records_from_hist_df(resp.data, concept_code=code, concept_name=name))
+    return records
