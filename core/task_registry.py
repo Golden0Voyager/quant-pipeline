@@ -377,6 +377,17 @@ TASK_GROUPS: dict[str, list[str]] = {
         "update_index_daily",
         "update_limit_up_down",
         "update_concept_board",
+        # 同表第二 owner（回补），与 chip_distribution_em 的日常/全市场版同构。
+        # 单任务下拉的成员与组序由本字典派生，所以要进下拉必须列在这里。
+        #
+        # ⚠️ 组内成员会被**一键顺序跑完**（tui/app.py 的 action_run_task_group 对
+        # 每个成员起一个 `--task <t> --force` 子进程，无二次确认），所以按「行业」
+        # 组键不只是刷新板块，而是把本任务也整轮跑掉：默认窗口 10（9 个可用交易日）
+        # × 504 个概念 = 4536 次东财请求、约 22 分钟。这一条是**已知并接受**的：
+        # 下拉成员与组成员同源于本字典，要让任务在 TUI 里可点就必须进组，而
+        # update_chip_distribution_em_fullmarket（ON_DEMAND，在 "core" 组）已是同样的
+        # 先例。真要拆只能改 TUI 的交互（跑组前预估/确认），那是独立议题。
+        "update_concept_board_backfill",
         "update_stock_comment",
         "update_hot_rank",
         "update_concept_member",
@@ -1098,6 +1109,19 @@ TASK_REGISTRY: tuple[TaskSpec, ...] = (
             {"concept_board": ("trade_date", "concept_code")},
             {"concept_board": ("trade_date", "concept_code")},
         ),
+    ),
+    TaskSpec(
+        name="update_concept_board_backfill",
+        callable=None,
+        tables=("concept_board",),
+        # ON_DEMAND 表示「这是运维型任务」。注意 core/runner.py 的 cadence 过滤
+        # **不跳过** ON_DEMAND，所以本任务**不得**接入 run_all 的任何 stage——
+        # 接线门禁见 tests/test_concept_board_backfill_wiring.py。
+        cadence=Cadence.ON_DEMAND,
+        date_columns={"concept_board": "trade_date"},
+        empty_policy=EmptyPolicy.ALLOW,
+        primary_source="akshare",
+        display_label="概念板块缺口回补",
     ),
     TaskSpec(
         name="update_concept_member",

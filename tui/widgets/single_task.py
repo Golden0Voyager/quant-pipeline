@@ -62,6 +62,7 @@ _SINGLE_TASK_LABELS: dict[str, str] = {
     "update_index_daily": "大盘指数 (Index Daily)",
     "update_limit_up_down": "涨跌停 (Limit U/D)",
     "update_concept_board": "概念板块 (Concept Board)",
+    "update_concept_board_backfill": "概念板块缺口回补 (Concept Board Backfill)",
     "update_concept_member": "概念成分 (Concept Members)",
     "update_index_membership": "指数成分 (Index Membership)",
     "update_etf_daily": "ETF日线 (ETF Daily)",
