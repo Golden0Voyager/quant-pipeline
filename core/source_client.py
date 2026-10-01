@@ -23,7 +23,55 @@ logger = logging.getLogger(__name__)
 # ── value types ──────────────────────────────────────────────────────────
 
 RETRYABLE_HTTP = frozenset({429, 502, 503})
-RETRYABLE_EXCEPTIONS = (TimeoutError, ConnectionError)
+
+
+def _network_exception_types() -> tuple[type[Exception], ...]:
+    """Collect the exception types real HTTP clients actually raise.
+
+    The built-in ``ConnectionError`` / ``TimeoutError`` are **siblings** of the
+    libraries' classes, not superclasses — ``requests`` and ``curl_cffi`` each
+    define their own tree rooted at ``OSError``::
+
+        requests.exceptions.ConnectionError -> RequestException -> OSError
+        requests.exceptions.Timeout         -> RequestException -> OSError
+        curl_cffi.requests.errors.RequestsError -> Exception
+        built-in ConnectionError                          -> OSError
+        built-in TimeoutError                            -> OSError
+
+    so ``except (TimeoutError, ConnectionError)`` catches a ``RemoteDisconnected``
+    wrapped by ``requests`` **not at all**. That failure then lands in the
+    ``except Exception`` branch documented as "non-retryable: schema drift":
+    one attempt, no backoff, and ``circuit.record_failure()`` never called, so
+    the breaker never trips. Measured 2026-10-01: 2520 doomed requests at 0.8 s
+    intervals, 34 minutes to conclude "source down".
+
+    Only the **network** classes are listed, deliberately excluding
+    ``requests.exceptions.HTTPError`` and its umbrella ``RequestException``:
+    HTTP status handling is a separate mechanism in ``call()`` (it reads
+    ``status_code`` off the returned response) and folding it in here would
+    retry 4xx responses.
+    """
+    found: list[type[Exception]] = [TimeoutError, ConnectionError]
+
+    try:
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+
+        found.extend([RequestsConnectionError, RequestsTimeout])
+    except ImportError:  # pragma: no cover - requests 是 akshare 的硬依赖
+        pass
+
+    try:
+        from curl_cffi.requests.errors import RequestsError
+
+        found.append(RequestsError)
+    except ImportError:  # pragma: no cover - curl_cffi 是 akshare 的传递依赖
+        pass
+
+    return tuple(found)
+
+
+RETRYABLE_EXCEPTIONS = _network_exception_types()
 
 _SENTINEL = object()  # unique marker for "no return value"
 
