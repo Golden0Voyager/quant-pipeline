@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+import pytest
+
 from core.source_client import (
     POLICIES,
     RETRYABLE_EXCEPTIONS,
@@ -420,6 +422,129 @@ class TestFallbackChain:
         assert resp.success is True
         assert resp.data == "primary data"
         assert fallback_calls == 0
+
+
+# ── Real-library network exceptions ───────────────────────────────────────
+
+
+class TestRealLibraryNetworkExceptions:
+    """真实 HTTP 客户端抛的异常必须与内建异常同等对待。
+
+    背景（2026-10-01 实测）：``RETRYABLE_EXCEPTIONS`` 原本只含**内建**
+    ``ConnectionError`` / ``TimeoutError``，而 ``requests`` 与 ``curl_cffi``
+    抛的是各自库的异常类——它们只继承 ``OSError``，与内建 ``ConnectionError``
+    是兄弟而非子类::
+
+        requests.exceptions.ConnectionError -> RequestException -> OSError
+        内建 ConnectionError                              -> OSError
+        issubclass(...) = False
+
+    于是真实网络故障不命中 ``except policy.retryable_exceptions``，直接掉进
+    ``except Exception`` 的「非可重试：schema drift」分支：**只请求 1 次**、
+    无退避，且 ``circuit.record_failure()`` 一次都不调 → **熔断器永不计数**。
+
+    现场后果（``update_concept_board_backfill``，2026-10-01 20:13）：504 个板块
+    × 5 个交易日 = 2520 次注定失败的请求打在一个正在拒接的 host 上，耗时 34
+    分钟才判定「源端故障」。
+
+    本组测试用**真实库的异常类**驱动 ``call()``，锁住三件事：重试、退避、
+    熔断计数。旧实现下三个断言全部失败。
+    """
+
+    # 真实库里最高频的网络故障形态：RemoteDisconnected 被 requests 包成
+    # requests.exceptions.ConnectionError（实测日志即此形态）。
+    @staticmethod
+    def _network_exceptions() -> dict[str, BaseException]:
+        import http.client
+
+        import requests
+        from curl_cffi.requests.errors import RequestsError
+
+        return {
+            "requests.ConnectionError": requests.exceptions.ConnectionError(
+                ("Connection aborted.", http.client.RemoteDisconnected(
+                    "Remote end closed connection without response"))
+            ),
+            "requests.ConnectTimeout": requests.exceptions.ConnectTimeout("timed out"),
+            "requests.ReadTimeout": requests.exceptions.ReadTimeout("timed out"),
+            "curl_cffi.RequestsError": RequestsError(
+                "curl: (56) Connection closed abruptly"
+            ),
+        }
+
+    @pytest.mark.parametrize("label", list(_network_exceptions()))
+    def test_network_exceptions_are_declared_retryable(self, label: str) -> None:
+        """真实库的异常类型必须在 ``RETRYABLE_EXCEPTIONS`` 里被显式覆盖。
+
+        这是**类型层面**的断言，不依赖 ``call()`` 的行为，因此能在任何重试 /
+        熔断逻辑被改动时依然钉住「这些异常被认定为瞬时故障」这一前提。
+        """
+        cls = type(self._network_exceptions()[label])
+        assert any(issubclass(cls, retryable) for retryable in RETRYABLE_EXCEPTIONS), (
+            f"{label} 未被认定为可重试 —— 它只继承 OSError，与内建 "
+            f"ConnectionError 是兄弟类；真实网络故障会掉进 "
+            f"except Exception 的「不可重试」分支"
+        )
+
+    @pytest.mark.parametrize("label", list(_network_exceptions()))
+    def test_network_exception_is_retried_to_max_attempts(self, label: str) -> None:
+        """一次瞬时网络故障必须重试满 max_attempts 次，而不是只试 1 次。"""
+        exc = self._network_exceptions()[label]
+        policy = SourcePolicy("t", "ex.com", 10, 3, 0.0, 0.0, 0.0)
+        client = SourceClient(policies={"t": policy})
+        state = {"n": 0}
+
+        def _flaky() -> str:
+            state["n"] += 1
+            if state["n"] < 3:
+                raise exc
+            return "ok"
+
+        resp = client.call("t", _flaky)
+        assert resp.success is True, f"{label}: 两次瞬时故障后应成功"
+        assert state["n"] == 3, (
+            f"{label}: 实际请求 {state['n']} 次，应为 3 —— 说明该异常"
+            f"未被识别为可重试"
+        )
+
+    def test_network_failure_counts_toward_circuit_breaker(self) -> None:
+        """连续的网络故障必须计入熔断器，达到阈值即开闸。
+
+        旧实现下 ``record_failure()`` 从不被调用，``_failure_count`` 恒为 0，
+        熔断器永不打开——这正是 2026-10-01 那 2520 次请求未被掐断的原因。
+        """
+        exc = self._network_exceptions()["requests.ConnectionError"]
+        policy = SourcePolicy("t", "ex.com", 10, 3, 0.0, 0.0, 0.0, circuit_failures=3)
+        client = SourceClient(policies={"t": policy})
+
+        def _always_down() -> str:
+            raise exc
+
+        for _ in range(3):
+            assert client.call("t", _always_down).success is False
+
+        assert client._circuits["t"].state is CircuitState.OPEN, (
+            "连续 3 次真实网络故障（circuit_failures=3）后熔断器未打开 —— "
+            "record_failure() 没被调用，重试与熔断机制整体失效"
+        )
+
+    def test_network_failure_is_not_labelled_as_schema_drift(self) -> None:
+        """瞬时网络故障不得被当成「schema drift / 不可重试」。
+
+        ``error`` 文案是对上游归因的唯一线索；瞬时故障报成契约漂移，会把运维
+        引向「接口改了」而不是「源在限流」。
+        """
+        exc = self._network_exceptions()["requests.ConnectionError"]
+        policy = SourcePolicy("t", "ex.com", 10, 3, 0.0, 0.0, 0.0)
+        client = SourceClient(policies={"t": policy})
+
+        def _down() -> str:
+            raise exc
+
+        resp = client.call("t", _down)
+        assert resp.metadata.attempt_count == 3, (
+            f"attempt_count={resp.metadata.attempt_count}，应为 3"
+        )
 
 
 # ── Session lifecycle ────────────────────────────────────────────────────
