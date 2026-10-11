@@ -39,10 +39,13 @@ def test_all_gaps_are_inside_the_audit_era():
 
 
 def test_declared_dividend_yield_gaps_are_pinned():
-    """钉住已声明的 6 个股息率空洞。
+    """钉住已声明的股息率空洞。
 
     若有人为了消除告警而删除条目，这里会变红——删条目必须先说服这个测试，
     也就是必须给出「这些洞已不再是洞」的证据（例如真的回补成功）。
+
+    2026-09-29 与 2026-10-09 是**机制性**空洞，与前 6 个的成因不同：
+    fundamentals 分区建出来了，但快照任务没跟着跑（详见各自 cause）。
     """
     assert known_gap_dates("fundamentals", "dividend_yield") == frozenset({
         "2026-08-10",
@@ -51,6 +54,8 @@ def test_declared_dividend_yield_gaps_are_pinned():
         "2026-08-25",
         "2026-09-03",
         "2026-09-17",
+        "2026-09-29",
+        "2026-10-09",
     })
 
 
