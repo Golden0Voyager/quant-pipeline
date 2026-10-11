@@ -29,27 +29,41 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 
+_QUARTER_CN = {
+    "一": "1",
+    "二": "2",
+    "三": "3",
+    "四": "4",
+    "第一": "1",
+    "第二": "2",
+    "第三": "3",
+    "第四": "4",
+}
+
+# 累计口径："2026年第1-2季度" / "2026年1-2季度"。
+# 必须排在序数口径之前，且季度号取**末位**数字——源端写的是「第1-N季度」，
+# 旧实现的退化正则抓到「第」后的第一个数字（恒为 1），四个季度全部塌成 Q1。
+_CUMULATIVE_QUARTER = re.compile(r"(\d{4})\D*1\s*[-~至]\s*(\d)\s*季度")
+_ORDINAL_QUARTER = re.compile(r"(\d{4}).*?(第一|第二|第三|第四|一|二|三|四)\s*季度")
+_NUMERIC_QUARTER = re.compile(r"(\d{4})\D*(\d)")
+
+
 def _parse_quarter(q_str: str) -> str | None:
-    """将 '2024年第一季度' 转换为 '2024-Q1'。"""
+    """把源端的季度写法归一化为 ``YYYY-Qn``。
+
+    三种口径都要认：累计（``第1-2季度``）、序数（``第一季度``）、数字（``2024-Q1``）。
+    """
     if not q_str:
         return None
-    chinese_quarters = {
-        "一": "1",
-        "二": "2",
-        "三": "3",
-        "四": "4",
-        "第一": "1",
-        "第二": "2",
-        "第三": "3",
-        "第四": "4",
-    }
-    m_cn = re.search(r"(\d{4}).*?(第一|第二|第三|第四|一|二|三|四)\s*季度", q_str)
-    if m_cn:
-        return f"{m_cn.group(1)}-Q{chinese_quarters[m_cn.group(2)]}"
-    m = re.search(r"(\d{4})\D*(\d)", q_str)
+    m = _CUMULATIVE_QUARTER.search(q_str)
     if m:
-        year, q = m.group(1), m.group(2)
-        return f"{year}-Q{q}"
+        return f"{m.group(1)}-Q{m.group(2)}"
+    m = _ORDINAL_QUARTER.search(q_str)
+    if m:
+        return f"{m.group(1)}-Q{_QUARTER_CN[m.group(2)]}"
+    m = _NUMERIC_QUARTER.search(q_str)
+    if m:
+        return f"{m.group(1)}-Q{m.group(2)}"
     return None
 
 
@@ -515,49 +529,98 @@ def _fetch_lpr() -> list[dict]:
 # ===========================================================================
 
 
+# 源端列名 → 本表列名。每个字段给一组候选，按顺序取第一个**真实存在**的列。
+#
+# akshare 现行的 `macro_china_gdp` 用的是「国内生产总值-绝对值」/「…-同比增长」
+# 这一组带后缀的名字（2026-10-11 实测）。旧 `col_map` 只列了无后缀的写法，
+# 与实际列名**零重叠**，`row.get("gdp")` 恒为 None —— macro_quarterly 因此
+# 21 行全是 NULL，而任务照报 success。
+_GDP_COLUMN_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "gdp": ("国内生产总值-绝对值", "国内生产总值", "国内生产总值（亿元）", "GDP"),
+    "gdp_yoy": ("国内生产总值-同比增长", "同比增长", "GDP同比增长"),
+    "gdp_primary": ("第一产业-绝对值", "第一产业", "第一产业（亿元）"),
+    "gdp_secondary": ("第二产业-绝对值", "第二产业", "第二产业（亿元）"),
+    "gdp_tertiary": ("第三产业-绝对值", "第三产业", "第三产业（亿元）"),
+}
+
+# 源端给的是**年内累计值**（第1-2季度 = 1-6 月累计），本表存**单季值**，
+# 故这四个字段要差分。`gdp_yoy` 是累计口径的同比，不差分。
+_GDP_CUMULATIVE_FIELDS = ("gdp", "gdp_primary", "gdp_secondary", "gdp_tertiary")
+
+
+def _resolve_gdp_columns(df: pd.DataFrame) -> dict[str, str]:
+    """返回 ``{本表字段: 源端列名}``，只含源端真实存在的列。"""
+    return {
+        field: next((c for c in candidates if c in df.columns), "")
+        for field, candidates in _GDP_COLUMN_CANDIDATES.items()
+    }
+
+
+def _to_single_quarter(records: list[dict]) -> list[dict]:
+    """把年内累计值还原成单季值。
+
+    Q1 的累计值即单季值；Q2..Q4 由 ``累计(q) - 累计(q-1)`` 得到。**缺前序
+    季度的行整行丢弃** —— 差不出单季值时宁可少一行，也不能落一个「看着像
+    单季、实则是年初至今累计」的值，那正是本 bug 当初在库里留下的形态。
+    """
+    by_quarter = {r["date"]: r for r in records}
+    out: list[dict] = []
+    for quarter in sorted(by_quarter):
+        row = dict(by_quarter[quarter])
+        q_num = int(quarter.rsplit("Q", 1)[1])
+        if q_num == 1:
+            out.append(row)
+            continue
+        prev = by_quarter.get(f"{quarter.rsplit('-', 1)[0]}-Q{q_num - 1}")
+        if prev is None:
+            logger.warning(f"⚠️ {quarter} 缺前序季度累计值，该季度单季值不可还原，跳过")
+            continue
+        for field in _GDP_CUMULATIVE_FIELDS:
+            cur_val, prev_val = row.get(field), prev.get(field)
+            row[field] = (
+                None if cur_val is None or prev_val is None else cur_val - prev_val
+            )
+        out.append(row)
+    return out
+
+
 def _fetch_gdp() -> list[dict]:
-    """获取 GDP 数据。"""
+    """获取 GDP 数据（年内累计口径转换为单季值）。"""
     if ak is None:
         return []
     try:
         df = ak.macro_china_gdp()
         if df is None or df.empty:
             return []
-        col_map = {
-            "季度": "quarter",
-            "国内生产总值": "gdp",
-            "国内生产总值（亿元）": "gdp",
-            "GDP": "gdp",
-            "同比增长": "gdp_yoy",
-            "GDP同比增长": "gdp_yoy",
-            "环比增长": "gdp_qoq",
-            "GDP环比增长": "gdp_qoq",
-            "第一产业": "gdp_primary",
-            "第一产业（亿元）": "gdp_primary",
-            "第二产业": "gdp_secondary",
-            "第二产业（亿元）": "gdp_secondary",
-            "第三产业": "gdp_tertiary",
-            "第三产业（亿元）": "gdp_tertiary",
-        }
-        df = df.rename(columns=col_map)
-        keep = {"quarter", "gdp", "gdp_yoy", "gdp_qoq", "gdp_primary", "gdp_secondary", "gdp_tertiary"}
-        available = [c for c in keep if c in df.columns]
-        df = df[available]
+        if "季度" not in df.columns:
+            logger.warning("⚠️ GDP 数据无季度列，跳过")
+            return []
+
+        resolved = _resolve_gdp_columns(df)
+        if not resolved.get("gdp"):
+            # 一个字段都没对上 = 源端改列名了。返回空让调用方报 no_data，
+            # 而不是落一批全 NULL 的行再报 success（AGENTS.md 硬规则 #4）。
+            logger.warning(
+                f"⚠️ GDP 数据列名全部无法识别（实际列: {list(df.columns)}），"
+                "跳过以免写入全空行"
+            )
+            return []
+
         records = []
         for _, row in df.iterrows():
-            q_str = str(row.get("quarter", "")).strip()
-            date = _parse_quarter(q_str)
-            if date:
-                records.append({
+            date = _parse_quarter(str(row.get("季度", "")).strip())
+            if not date:
+                continue
+            records.append(
+                {
                     "date": date,
-                    "gdp": _to_float(row.get("gdp")),
-                    "gdp_yoy": _to_float(row.get("gdp_yoy")),
-                    "gdp_qoq": _to_float(row.get("gdp_qoq")),
-                    "gdp_primary": _to_float(row.get("gdp_primary")),
-                    "gdp_secondary": _to_float(row.get("gdp_secondary")),
-                    "gdp_tertiary": _to_float(row.get("gdp_tertiary")),
-                })
-        return records
+                    **{
+                        field: _to_float(row.get(col)) if col else None
+                        for field, col in resolved.items()
+                    },
+                }
+            )
+        return _to_single_quarter(records)
     except Exception as e:
         logger.warning(f"GDP 获取失败: {e}")
         return []
