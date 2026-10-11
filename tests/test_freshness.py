@@ -54,6 +54,35 @@ class TestComputeCatchUpTasks:
         assert tasks[0] == "update_bars"
         assert tasks[-1] == "update_chip_distribution_em"
 
+    def test_fundamentals_stale_also_schedules_its_snapshot_dependency(self):
+        """fundamentals 滞后必须连带排入 update_market_snapshot，且排在其后。
+
+        两者写同一张表 fundamentals，update_fundamentals 在 CATCH_UP_TASK_ORDER
+        里靠前、先 claim 掉该表，于是 update_market_snapshot 被 `not in claimed`
+        挡掉。后果：fundamentals 分区被建出来却没有 dividend_yield，而该任务的
+        作用域是 MAX(trade_date) —— 一旦次日有了更新的分区，这一天永不被回访
+        （2026-09-29 与 2026-10-09 两个不可回补空洞即由此产生）。
+        """
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["fundamentals"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert "update_fundamentals" in tasks
+        assert "update_market_snapshot" in tasks
+        assert tasks.index("update_fundamentals") < tasks.index("update_market_snapshot")
+
+    def test_dependency_is_pulled_in_without_its_own_table_being_stale(self):
+        """依赖任务是靠依赖关系进来的，不是因为它自己的表被判滞后。
+
+        这里 daily_bars 与 fundamentals 同时滞后：拉进来的依赖不能打乱
+        CATCH_UP_TASK_ORDER 原有顺序（update_bars 必须仍排第一）。
+        """
+        latest = _fresh_latest_dates(self.EXPECTED)
+        latest["daily_bars"] = self.STALE
+        latest["fundamentals"] = self.STALE
+        tasks = compute_catch_up_tasks(latest, self.EXPECTED)
+        assert tasks[0] == "update_bars"
+        assert "update_market_snapshot" in tasks
+
 
 def test_date_status():
     from core.freshness import date_status
