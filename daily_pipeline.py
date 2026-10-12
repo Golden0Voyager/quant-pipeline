@@ -998,9 +998,12 @@ def weekly_backfill(
 
     db.close()
     elapsed = time.time() - start_time
+    # health_check 的 degraded 是信息性告警（已知 retained 退化、空洞等），
+    # 不应让维护层（weekly/monthly）把 exit code 1；实际数据任务失败才算 crashed。
     failed_tasks = sorted(
         k for k, v in results.items()
-        if isinstance(v, dict)
+        if k != "health"
+        and isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
     )
     retained_tasks = sorted(
@@ -1098,9 +1101,11 @@ def monthly_repair(
 
     db.close()
     elapsed = time.time() - start_time
+    # health_check 的 degraded 是信息性告警，maintenance tier 不因它算 crashed
     failed_tasks = sorted(
         k for k, v in results.items()
-        if isinstance(v, dict)
+        if k != "health"
+        and isinstance(v, dict)
         and v.get("status") in {"degraded", "failed", "aborted"}
     )
     retained_tasks = sorted(
