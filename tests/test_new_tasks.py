@@ -1663,6 +1663,138 @@ def test_china_macro_parse_quarter_edge_cases():
     assert china_macro._parse_quarter("2024-Q1") == "2024-Q1"  # 数字格式
 
 
+def test_china_macro_parse_quarter_cumulative_notation():
+    """_parse_quarter: 源端的年内累计口径（第1-2季度 / 第1-4季度）。
+
+    akshare 的 ``季度`` 列用的是累计写法而非「第二季度」。旧实��的中文分支
+    （第一|第二|第三|第四 季度）匹配不上，落到 ``(\\d{4})\\D*(\\d)`` 抓到
+    「第」后的**第一个**数字，于是「第1-2季度」「第1-3季度」「第1-4季度」
+    全部塌成 Q1：库内 macro_quarterly 因此只剩每年一行、且 date 全是 Q1
+    （2026-10-11 实测 21 行、date 全为 YYYY-Q1）。
+    """
+    assert china_macro._parse_quarter("2026年第1季度") == "2026-Q1"
+    assert china_macro._parse_quarter("2026年第1-2季度") == "2026-Q2"
+    assert china_macro._parse_quarter("2026年第1-3季度") == "2026-Q3"
+    assert china_macro._parse_quarter("2026年第1-4季度") == "2026-Q4"
+    # 同一年的四个季度必须互不相同——塌成同一个 key 是这个 bug 的本质
+    parsed = {
+        china_macro._parse_quarter(q)
+        for q in ("2026年第1季度", "2026年第1-2季度", "2026年第1-3季度", "2026年第1-4季度")
+    }
+    assert len(parsed) == 4
+
+
+def test_china_macro_gdp_maps_current_akshare_columns():
+    """_fetch_gdp: 认得 akshare 现行列名（`-绝对值` / `-同比增长` 后缀）。
+
+    源端列名为 ``国内生产总值-绝对值`` / ``国内生产总值-同比增长`` …，
+    与旧 ``col_map`` 里的 ``国内生产总值`` / ``同比增长`` **零重叠**，
+    于是 ``row.get("gdp")`` 恒为 None：生产库 macro_quarterly 21 行
+    gdp 全部为 NULL（2026-07-25 备份同样如此），而任务仍报 success。
+    """
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame(
+        {
+            "季度": ["2025年第1季度", "2025年第1-2季度"],
+            "国内生产总值-绝对值": [100.0, 250.0],
+            "国内生产总值-同比增长": [5.0, 5.1],
+            "第一产业-绝对值": [10.0, 20.0],
+            "第二产业-绝对值": [40.0, 100.0],
+            "第三产业-绝对值": [50.0, 130.0],
+        }
+    )
+    with patch.object(china_macro, "ak", ak):
+        records = {r["date"]: r for r in china_macro._fetch_gdp()}
+
+    # 2025-Q1 的累计值即单季值；2025-Q2 要由 250-100 差分得出
+    assert records["2025-Q1"]["gdp"] == 100.0
+    assert records["2025-Q2"]["gdp"] == 150.0
+    assert records["2025-Q2"]["gdp_primary"] == 10.0
+    assert records["2025-Q2"]["gdp_secondary"] == 60.0
+    assert records["2025-Q2"]["gdp_tertiary"] == 80.0
+    # 同比是**累计口径的同比**，不做差分
+    assert records["2025-Q2"]["gdp_yoy"] == 5.1
+
+
+def test_china_macro_gdp_qoq_is_derived_from_single_quarter_levels():
+    """gdp_qoq 由单季值推出，跨年 Q1 接上一年的 Q4。
+
+    语义是**未季调**环比：由本表自己的单季值算出。国家统计局公布的季调环比
+    （近年每季约 +0.8%~+1.5%）拿不到——`ak.macro_china_nbs_nation` 的
+    easyquery 接口对本机返回 403（2026-10-11 实测）——且朴素算法会被季节性
+    主导（2024-Q4 与 2025-Q4 都算出 +9.55%）。故此处写入的是本表口径，
+    与官方季调数字**不可混用**。
+    """
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame(
+        {
+            "季度": [
+                "2024年第1季度", "2024年第1-2季度", "2024年第1-3季度", "2024年第1-4季度",
+                "2025年第1季度",
+                "2025年第1-2季度", "2025年第1-3季度", "2025年第1-4季度",
+            ],
+            "国内生产总值-绝对值": [100.0, 250.0, 350.0, 500.0, 125.0, 300.0, 450.0, 625.0],
+        }
+    )
+    with patch.object(china_macro, "ak", ak):
+        records = {r["date"]: r for r in china_macro._fetch_gdp()}
+
+    # 2025-Q1 的前序是 2024-Q4（跨年），不能只看同年
+    assert records["2024-Q4"]["gdp"] == 150.0        # 单季值 = 500-350
+    assert records["2025-Q1"]["gdp"] == 125.0
+    assert records["2025-Q1"]["gdp_qoq"] == pytest.approx(100 * (125 - 150) / 150)
+    assert records["2025-Q2"]["gdp_qoq"] == pytest.approx(100 * (175 - 125) / 125)
+    assert records["2025-Q3"]["gdp_qoq"] == pytest.approx(100 * (150 - 175) / 175)
+    assert records["2025-Q4"]["gdp_qoq"] == pytest.approx(100 * (175 - 150) / 150)
+
+
+def test_china_macro_gdp_qoq_is_null_when_there_is_no_previous_quarter():
+    """全表第一个季度没有前序，gdp_qoq 必须留 NULL 而不是 0。
+
+    写 0 会被读成「环比零增长」，与「没有可比的前季」是两回事。
+    """
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame(
+        {"季度": ["2025年第1季度"], "国内生产总值-绝对值": [100.0]}
+    )
+    with patch.object(china_macro, "ak", ak):
+        records = china_macro._fetch_gdp()
+    assert len(records) == 1
+    assert records[0]["gdp_qoq"] is None
+
+
+def test_china_macro_gdp_drops_quarter_without_predecessor():
+    """累计值差不出单季值时丢弃该季度，而不是写入一个错的数。
+
+    缺 Q1 就无法把 Q2 的累计值还原成单季；此时宁可少一行，也不能落一个
+    「看起来有值、实则是年初至今累计」的行——那正是本 bug 当初的形态。
+    """
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame(
+        {
+            "季度": ["2025年第1-2季度"],
+            "国内生产总值-绝对值": [250.0],
+            "国内生产总值-同比增长": [5.1],
+        }
+    )
+    with patch.object(china_macro, "ak", ak):
+        assert china_macro._fetch_gdp() == []
+
+
+def test_china_macro_gdp_all_null_columns_is_not_data():
+    """源端列名再次漂移时必须返回空，而不是一行全 NULL。
+
+    这是 AGENTS.md 硬规则 #4「写路径必须区分抓到与写入」的同类：抓到 21 行
+    却每一列都是 None，落库后 macro_quarterly 全空而任务报 success。
+    """
+    ak = MagicMock()
+    ak.macro_china_gdp.return_value = pd.DataFrame(
+        {"季度": ["2025年第1季度", "2025年第1-2季度"], "某个没人认识的列": [1.0, 2.0]}
+    )
+    with patch.object(china_macro, "ak", ak):
+        assert china_macro._fetch_gdp() == []
+
+
 def test_china_macro_empty_fetchers():
     """china_macro: 所有 fetcher 返回空。"""
     ak = MagicMock()
