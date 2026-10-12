@@ -556,31 +556,50 @@ def _resolve_gdp_columns(df: pd.DataFrame) -> dict[str, str]:
     }
 
 
+def _quarter_parts(quarter: str) -> tuple[int, int]:
+    """``'2025-Q3'`` → ``(2025, 3)``。"""
+    year, q = quarter.rsplit("-Q", 1)
+    return int(year), int(q)
+
+
 def _to_single_quarter(records: list[dict]) -> list[dict]:
-    """把年内累计值还原成单季值。
+    """把年内累计值还原成单季值，并推出 ``gdp_qoq``。
 
     Q1 的累计值即单季值；Q2..Q4 由 ``累计(q) - 累计(q-1)`` 得到。**缺前序
     季度的行整行丢弃** —— 差不出单季值时宁可少一行，也不能落一个「看着像
     单季、实则是年初至今累计」的值，那正是本 bug 当初在库里留下的形态。
+
+    ``gdp_qoq`` 由本表的单季值算出，**是未季调口径**：国家统计局公布的季调
+    环比拿不到（``ak.macro_china_nbs_nation`` 的 easyquery 接口对本机返回
+    403，2026-10-11 实测），而朴素算法会被季节性主导——2024-Q4 与 2025-Q4
+    都算出 +9.55%，而官方季调环比近年每季约 +0.8%~+1.5%。**故该列与官方
+    季调数字不可混用**，也不能与 ``gdp_yoy``（官方同比）并列解读。
+
+    前序季度**跨年**接续（2025-Q1 的前序是 2024-Q4）；全表第一个季度没有
+    前序，``gdp_qoq`` 留 NULL —— 写 0 会被读成「环比零增长」。
     """
     by_quarter = {r["date"]: r for r in records}
+    order = sorted(by_quarter, key=_quarter_parts)
     out: list[dict] = []
-    for quarter in sorted(by_quarter):
+    prev_kept: dict | None = None
+    for quarter in order:
         row = dict(by_quarter[quarter])
-        q_num = int(quarter.rsplit("Q", 1)[1])
-        if q_num == 1:
-            out.append(row)
-            continue
-        prev = by_quarter.get(f"{quarter.rsplit('-', 1)[0]}-Q{q_num - 1}")
-        if prev is None:
-            logger.warning(f"⚠️ {quarter} 缺前序季度累计值，该季度单季值不可还原，跳过")
-            continue
-        for field in _GDP_CUMULATIVE_FIELDS:
-            cur_val, prev_val = row.get(field), prev.get(field)
-            row[field] = (
-                None if cur_val is None or prev_val is None else cur_val - prev_val
-            )
+        year, q = _quarter_parts(quarter)
+        if q != 1:
+            # Q1 的累计值即单季值，无需前序；Q2..Q4 必须有同年前序才能差分
+            prev_cum = by_quarter.get(f"{year}-Q{q - 1}")
+            if prev_cum is None:
+                logger.warning(f"⚠️ {quarter} 缺前序季度累计值，该季度单季值不可还原，跳过")
+                continue
+            for field in _GDP_CUMULATIVE_FIELDS:
+                cur_val, prev_val = row.get(field), prev_cum.get(field)
+                row[field] = (
+                    None if cur_val is None or prev_val is None else cur_val - prev_val
+                )
+        if prev_kept is not None and prev_kept.get("gdp") and row.get("gdp") is not None:
+            row["gdp_qoq"] = 100.0 * (row["gdp"] - prev_kept["gdp"]) / prev_kept["gdp"]
         out.append(row)
+        prev_kept = row
     return out
 
 
@@ -614,6 +633,8 @@ def _fetch_gdp() -> list[dict]:
             records.append(
                 {
                     "date": date,
+                    # 显式给 None：首季没有前序，键必须存在（写库时落 NULL 而不是缺列）
+                    "gdp_qoq": None,
                     **{
                         field: _to_float(row.get(col)) if col else None
                         for field, col in resolved.items()
