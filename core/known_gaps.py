@@ -155,6 +155,32 @@ KNOWN_GAPS: tuple[KnownGap, ...] = (
         "部分运行中断：31 个任务（含 update_fundamentals，无 update_market_snapshot），"
         "且当日 health_check 亦未运行，故无人发现",
     ),
+    # ↓ 下面两条与前 6 条成因不同：**fundamentals 分区建出来了**，只是快照任务
+    # 没跟着跑，故 dividend_yield 整列为 NULL。二者都不可回补（雪球只有实时值），
+    # 但**成因已被修掉**（见 cause），不会再有新的同类空洞。
+    KnownGap(
+        "fundamentals",
+        "dividend_yield",
+        "2026-09-29",
+        "作用域错位：18:27 那轮管道里 update_fundamentals 请求 09-29 时东财超时"
+        "（curl 28），回退到 09-28 落库（date_used=2026-09-28），09-29 分区未建，"
+        "紧随的快照遂按 MAX(trade_date)=09-28 判定「已补充」跳过；20:04 手动单任务"
+        "重跑 fundamentals 这次建出了 09-29 分区，但该次运行不含快照任务；"
+        "09-30 管道建出 09-30 分区后，快照作用域 MAX 变为 09-30，09-29 永不被回访。"
+        "实测股息率逐日变化（000001：09-28=5.389 → 09-30=5.264 → 10-08=5.17），"
+        "用当前值回填等于伪造历史值",
+    ),
+    KnownGap(
+        "fundamentals",
+        "dividend_yield",
+        "2026-10-09",
+        "补齐缺漏路径漏掉依赖任务：2026-10-11 11:12 的补齐轮里 fundamentals 面板滞后，"
+        "但 core.freshness.compute_catch_up_tasks 以「表」为去重键，"
+        "update_fundamentals（排第 3）先 claim 掉 fundamentals 表，"
+        "同表写入方 update_market_snapshot（排第 4）被 `not in claimed` 挡掉，"
+        "于是建出 10-09 分区 5573 行而 dividend_yield 全 NULL。"
+        "已修：compute_catch_up_tasks 补上依赖闭包，声明了依赖且同表写入的任务不再被挡",
+    ),
 )
 
 

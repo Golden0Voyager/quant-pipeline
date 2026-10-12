@@ -20,6 +20,7 @@ from core.calendar import (
 )
 from core.task_registry import (
     CATCH_UP_TASK_ORDER,
+    TASK_REGISTRY,
     panel_date_columns,
     table_date_columns,
     task_to_table,
@@ -267,13 +268,38 @@ def compute_catch_up_tasks(
 
     tasks: list[str] = []
     claimed: set[str] = set()
+    claimed_by: dict[str, str] = {}
     for task in CATCH_UP_TASK_ORDER:
         tables = task_to_table().get(task, [])
         hit = [t for t in tables if t in stale_tables and t not in claimed]
         if hit:
             tasks.append(task)
             claimed.update(hit)
+            for tbl in hit:
+                claimed_by[tbl] = task
+            continue
+        # `claimed` 的本意是：同一张表有多个**备选**写入方时只挑一个
+        # （chip_distribution_em 的日常版 vs 全市场版）。但声明了依赖关系的
+        # 两个任务不是备选而是**互补写入方**——update_fundamentals 建分区、
+        # update_market_snapshot 补 dividend_yield，缺任一方都留下空洞。
+        # 少了这一段，后者在补齐缺漏路径上会被静默挡掉：该日 fundamentals
+        # 分区被建出来却没有股息率，而它的作用域是 MAX(trade_date)，一旦次日
+        # 有了更新的分区，这一天此后再也不会被回访（2026-09-29 / 2026-10-09
+        # 两个空洞即由此产生，且源端只有实时股息率、无法回补）。
+        blockers = {
+            claimed_by[tbl] for tbl in tables if tbl in stale_tables and tbl in claimed_by
+        }
+        if blockers and _task_dependencies(task) & blockers:
+            tasks.append(task)
     return tasks
+
+
+def _task_dependencies(task: str) -> frozenset[str]:
+    """返回 *task* 在注册表里声明的前置任务集合（无则空集）。"""
+    for spec in TASK_REGISTRY:
+        if spec.name == task and spec.refresh_policy is not None:
+            return frozenset(spec.refresh_policy.dependencies)
+    return frozenset()
 
 
 @dataclass(frozen=True)
