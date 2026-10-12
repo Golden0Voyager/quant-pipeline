@@ -4851,9 +4851,9 @@ class TestRunRepairScript:
         assert captured["env"]["QUANT_PIPELINE_LOCK_HELD"] == "1"
 
     def test_reconcile_gets_extended_timeout(self):
-        """全市场对账需 3-4h，reconcile 应拿到 4h 超时而非默认 1h。
+        """全市场对账需 3-6h，reconcile 应拿到 6h 超时而非默认 1h。
 
-        回归：2026-08-27 对账 61 分钟（24%）被旧 3600s 超时杀死。
+        实测最慢一次 6h07m（2026-10-08），安全系数 1.1 倍取 6h。
         """
         proc = MagicMock(returncode=0, stdout="done", stderr="")
 
@@ -4864,7 +4864,26 @@ class TestRunRepairScript:
             daily_pipeline._run_repair_script("some_other.py")
 
         timeouts = [c.kwargs["timeout"] for c in m.call_args_list]
-        assert timeouts == [14400, 3600, 3600, 3600]
+        assert timeouts == [21600, 3600, 3600, 3600]
+
+    def test_reconcile_gets_resume_flag(self):
+        """reconcile 每次运行带 --resume，从断点续跑；其它脚本不带。
+
+        回归：2026-10-08 每月修复第 1 次运行 reconcile 时未传 --resume，
+        导致从 idx=0 重新跑满 5569 只，超时后仍只完成 70 只、浪费 6h。
+        """
+        proc = MagicMock(returncode=0, stdout="done", stderr="")
+
+        with patch("daily_pipeline.subprocess.run", return_value=proc) as m:
+            daily_pipeline._run_repair_script("reconcile_with_akshare.py")
+            daily_pipeline._run_repair_script("backup_database.py")
+
+        cmds = [c.args[0] for c in m.call_args_list]
+        # cmds[i] 是 subprocess.run 的第一个参数（完整命令列表）
+        assert cmds[0][-1] == "--resume"
+        assert "reconcile_with_akshare.py" in cmds[0][1]
+        assert cmds[1][-1] != "--resume"
+        assert "backup_database.py" in cmds[1][1]
 
     def test_failure_logs_error_detail(self):
         proc = MagicMock(returncode=1, stdout="", stderr="boom traceback")
