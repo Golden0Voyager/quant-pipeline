@@ -1027,11 +1027,12 @@ _REPAIR_CHAIN: tuple[str, ...] = (
 )
 
 # 修复脚本超时（秒）：每月对账需逐只对比全市场日线、带限流休息，
-# 实测 5549 只约 3-4h（2026-08-27 61 分钟仅完成 24% 即被旧 1h 超时杀死、
-# 中途已修复的 11,668 行只能留待下次续跑），故单独放宽；其余脚本 1h 足够。
+# 实测最慢一次 6h07m（2026-10-08），故单独放宽至 6h；其余脚本 1h 足够。
+# 另外 reconcile 自带断点续传（reconcile_progress.json），每月运行均带 --resume，
+# 首次后每次只需补跑上次未完成的尾部，总耗时逐月递减。
 _REPAIR_TIMEOUTS: dict[str, int] = {
     "backup_database.py": 3600,
-    "reconcile_with_akshare.py": 14400,  # 4h：全市场对账 + 新浪限流休息
+    "reconcile_with_akshare.py": 21600,  # 6h：全市场对账 + 新浪限流休息
     "validate_and_vacuum.py": 3600,
 }
 _REPAIR_TIMEOUT_DEFAULT = 3600
@@ -1046,9 +1047,14 @@ def _run_repair_script(script: str) -> dict:
     path = Path(__file__).parent / "scripts" / script
     env = {**os.environ, "QUANT_PIPELINE_LOCK_HELD": "1"}
     timeout = _REPAIR_TIMEOUTS.get(script, _REPAIR_TIMEOUT_DEFAULT)
+    cmd = [sys.executable, str(path)]
+    # reconcile 自带断点续传（reconcile_progress.json），每月运行都带 --resume，
+    # 首次后每次只需补跑尾部，总耗时逐月递减；避免全量重跑导致超时。
+    if script == "reconcile_with_akshare.py":
+        cmd.append("--resume")
     try:
         proc = subprocess.run(
-            [sys.executable, str(path)],
+            cmd,
             capture_output=True, text=True, timeout=timeout, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
