@@ -4759,8 +4759,16 @@ class TestWeeklyBackfill:
 
     def test_failed_task_marks_crashed_and_notifies(self, weekday_mock):
         db, loader, engine = self._mocks()
-        with patch("daily_pipeline._run_registry_task",
-                   return_value={"status": "failed", "error": "x"}), \
+        call_order: list[str] = []
+
+        def fake_run(name, *a, **kw):
+            call_order.append(name)
+            # health_check 和 retry 正常，其他任务失败以触发 crashed
+            if name in ("health", "health_check"):
+                return {"status": "degraded", "issues": ["known"]}
+            return {"status": "failed", "error": "x"}
+
+        with patch("daily_pipeline._run_registry_task", side_effect=fake_run), \
              patch("daily_pipeline.get_latest_dates", return_value={}), \
              patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
              patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
@@ -4769,6 +4777,28 @@ class TestWeeklyBackfill:
             results = daily_pipeline.weekly_backfill(db, loader, engine)
         assert results["crashed"] is True
         assert mock_notify.call_args.args[0] == "error"
+
+    def test_health_degraded_does_not_crash_weekly(self, weekday_mock):
+        """health_check=degraded（如已知 retained 退化）不应让 weekly_backfill 算 crashed。
+
+        回归：2026-10-12 weekly_backfill 因 concept_member retained 4 天导致
+        health=degraded，整个 repair 被标 crashed 并 exit code 1，
+        但实际数据任务（update_index_membership）完全正常。
+        """
+        db, loader, engine = self._mocks()
+        with patch("daily_pipeline._run_registry_task",
+                   side_effect=lambda n, *a, **kw: (
+                       {"status": "degraded", "issues": ["retained"]}
+                       if n == "health_check" else {"status": "ok"}
+                   )), \
+             patch("daily_pipeline.get_latest_dates", return_value={}), \
+             patch("daily_pipeline.get_expected_latest_trading_day", return_value="2026-07-31"), \
+             patch("daily_pipeline.compute_catch_up_tasks", return_value=[]), \
+             patch("daily_pipeline.notify_all") as mock_notify, \
+             patch("daily_pipeline.logger"):
+            results = daily_pipeline.weekly_backfill(db, loader, engine)
+        assert results["crashed"] is False
+        assert mock_notify.call_args.args[0] == "info"
 
 
 class TestMonthlyRepair:
