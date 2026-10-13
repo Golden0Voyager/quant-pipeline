@@ -293,6 +293,7 @@ def test_scripts_needing_the_preamble_rule_are_actually_found():
     assert {p.name for p in _scripts_with_cross_repo_imports()} >= {"repair_turnover.py"}
     assert {p.name for p in _scripts_with_argparse()} == {
         "audit_data_contracts.py",
+        "backfill_fund_flow_gaps.py",
         # 本脚本原先不 import 仓库模块，因此不在「需要仓库根注入」的集合里；
         # 接入 core.db_pragmas 之后它自动进入本规则，并从外部 cwd 跑 --help。
         "backfill_historical_valuation.py",
@@ -300,6 +301,7 @@ def test_scripts_needing_the_preamble_rule_are_actually_found():
         "compare_limit_pools.py",
         "migrate_database.py",
         "reconcile_with_akshare.py",
+        "repair_fund_flow_decomposition.py",
         "repair_turnover.py",
     }
 

@@ -142,7 +142,7 @@ if _REPO_ROOT not in sys.path:
   `ingestion_runs` 记下 `saved_rows=5203` 而表里整列为 NULL（2026-08-12），且因作用域是
   `MAX(trade_date)`，该日期此后永不被回访 → 静默永久空洞。新增写库任务请沿用同一原则。
 
-### 5. 测试必须 hermetic：不允许真实外发通知
+### 5. 测试必须 hermetic：不允许真实外发通知，也不允许真实出网
 - `tests/conftest.py::_block_external_notifications`（autouse）把 `core.notifications.urlopen`
   换成记录后拒绝调用的桩。通知就挂在真实故障路径上（`safe_task` 异常终止、AkShare 熔断中止、
   整轮汇总），而测试刻意覆盖这些分支——**实测：本机配好通道后跑一次全量 `pytest`，守卫共拦下
@@ -153,6 +153,24 @@ if _REPO_ROOT not in sys.path:
 - 断言真实外发行为的用例自行 patch `notifications.urlopen`（测试体内优先级更高）；反证
   「确实尝试外发但被拦下」的用例直接请求该 fixture 拿拦截列表，见
   `tests/test_notifications.py::test_external_notification_is_blocked_in_tests`。
+- **出网守卫（2026-10-13 加，PR #170）**：`_block_outbound_network`（autouse）包住
+  `socket.socket.connect` / `connect_ex`。数据源遍布 akshare / 东财 / 同花顺 / 雪球，漏掉的
+  mock 会变成真实请求，而这比报错更糟——**断言可能在校验线上数据而不是被测逻辑，且每次跑
+  结果都不同**。本轮开发实测踩到：`fetch_market_day_records` 内部自建会话，mock 没接上，
+  断言拿到东财线上真实值，**而且测试通过**。
+  - 拦在 `connect` 而非 `getaddrinfo`：一处覆盖 `socket.create_connection` / `requests` /
+    `curl_cffi` 全部上层封装。回环与 AF_UNIX 放行（前者留给本地临时服务，后者是字符串地址）。
+  - 抛 `OSError` 而**不是** `AssertionError`（与通知守卫不同，刻意）：数据源代码普遍
+    `except OSError` / `except requests.RequestException`，抛 OSError 会像真实断网一样被既有
+    handler 接住，「网络故障路径」的用例因此照常成立；真正需要联网才能过的用例会异常上抛。
+  - 守卫生效当场抓出 `tests/test_column_fixes.py` 两条一直联网的用例：只 mock 了
+    `_fetch_sector_daily`，板块估值（cninfo）与股指期货基差（sina）直接打真网络，
+    `save_sector_valuation_batch.called` 成立只因源端当时在线。**两头都坏**：源端挂则假失败，
+    源端返脏数据则变绿而断言什么都没验。已补 mock。
+  - 守卫自身有门禁 `tests/test_network_guard.py`，**双向**验证（拦得住 + 放得过）：只测前者的话，
+    一个把所有连接一律拦掉的实现同样能骗过门禁；而守卫写坏（patch 点错、判定反）会**静默退化成
+    什么都不拦的 fixture**，套件照样全绿、实时依赖又回来。
+  - 附带收益：套件耗时 260s → 102s（网络超时变即时失败）。
 
 ### 6. 连续 `retained` 是**静默退化**：单次正常，连续多日必须报
 - `retained`（保留旧数据）**以 0 退出**、只映射到 `warning`，而 `NOTIFICATION_LEVEL` 默认 `error`
@@ -201,6 +219,57 @@ if _REPO_ROOT not in sys.path:
   「漏一处」就等于**没有上限**，而漏掉的那一处照样「工作正常」（WAL 生效、读写都对），只是
   悄悄把磁盘吃光。
 
+### 8. fund_flow 覆盖度：跌破水位必须降级上报，不得静默 success
+- `tasks/market_flow.py::_FUND_FLOW_COVERAGE_FLOOR = 0.90`。universe 取 `daily_bars` 的代码集
+  （本地唯一逐票齐全的表），跌破即返回 `degraded/data_quality` 并把
+  `universe_size/covered/missing/coverage_pct` 写进 metadata。
+- 阈值不是拍的：生产库实测**健康运行 2026-07-07 ~ 09-18 稳定 93.8%~94.1%**（缺口来自新股/
+  停牌，是数据源的结构性水位），**2026-09-24 起塌到 66.9%**。取 90% = 低于健康水位 4pp 不误报、
+  高于塌陷水位 23pp 不漏报。改阈值前请先重跑这两组数字。
+- 为什么必须降级：旧实现把源端返回的东西照写并永远 success，于是「数据没更新」以 success 的
+  面目进 `ingestion_runs`，`health_check` 与 P2-18 的连续 retained 检测**全都看不到**（任务每天
+  都是 success）。与规则 4 同型。
+- **用 `degraded` 而不是 `failed`**：`normalize_task_result` 的 `failed` 分支不传 `saved`，审计会把
+  一次几千行的写入误读成「一行都没写」。
+- 三处必须跳过守卫：①`--symbols` 子集运行（对全市场覆盖率没有意义，否则每次子集运行都误报）；
+  ②universe 为空（表空 / 不支持）；③universe 查询抛异常 —— **守卫自己不能成为新的单点故障**。
+- 覆盖不足时会先触发 `core/fund_flow_source.fetch_market_day_records` 逐票重建（见规则 9），
+  重建后覆盖度通常回到 ~100%，告警随之停止；重建只拿到部分 → 仍 degraded；重建完全失败 →
+  `retained` 且**一行不写**。
+
+### 9. 同花顺「即时」不得进 `fund_flow`（它无法被安全使用）
+- `SmartMoneyLoaderProvider.get_market_fund_flow()` **刻意没有同花顺兜底**，`_ths_fund_flow_fallback`
+  与 `_parse_cn_amount` 已删除。**不要把它们加回来**，即使 handoff/建议书里写着「东财失败时用同花顺
+  兜底」—— 那份建议书是错的，实测证据如下。
+- 口径对不上（2026-10-13 只读复核）：同花顺值与东财**任何一天**都对不上，**30 只样本 0 命中**
+  （不是错位，是不同口径）；精度只到「万」（`5805.91万`、`-1.22亿`）；是**盘中实时快照**；
+  自身**不带日期**（日期是我们贴的）。而东财自洽：榜单端点与逐票端点对同一 (票, 日) **40/40
+  完全一致**，两者内部恒等式（主力 = 大单 + 超大单）都成立。
+- **决定性的一条**：它没有超大单/大单分解，而这个「缺失」在本仓库里**写不成 NULL** ——
+  `smartmoney_hunter/database.py::_coerce_float` 对 `NaN` 和 `None` **都返回 0.0**。所以「写但标
+  NULL」这条路不存在，**只能用而不能写**。
+- 代价（已发生）：`0.0` 是**假真值**，与 NULL 在聚合/排序/回测里含义相反 —— 共 **36,470 行**
+  5 个派生字段被伪造，`backtest.py` 取 `MAX(trade_date)` 一行，于是 **5,216 只**股票的回测「最新
+  资金流」里超大单净流入是 0 元。已由 `scripts/repair_fund_flow_decomposition.py` 修复（26,045 行
+  东财覆盖 + 10,425 行置 NULL，可转债无此数据）。
+- **不要顺手改 `_coerce_float` 的默认值**：审计过 79 张表，命中列里绝大多数是**合法真实零值**
+  （融券 0 占比 41%、平价大宗交易折价率 0），真实零值在金融数据里太常见，通用统计手段区分不了
+  「真实 0」与「缺失被填成 0」——`fund_flow` 那个能识别靠的是语义恒等式，不是统计特征。改默认值会
+  把融券 0、平价折价变成 NULL，反而引入新错误。该函数在 quant_hunter 且被全表通用，要改须单独评估。
+
+### 10. 东财 secid 必须校验源站回显的 `code`
+- `core/fund_flow_source.py::fetch_day_klines` 只接受 `data.code` 与请求代码一致的响应；**回显缺失
+  同样拒绝**（宁可响亮地取不到，也不要静默写入错证券的数据）。
+- 原因：东财把**短于 6 位的代码当前缀匹配**。实测 `secid=0.1318` 返回 `code=131800, name=Ｒ-003`
+  —— 完全另一只证券，其资金流 10.5 亿。不校验就会把 `131800` 的数据写到 `1318` 名下，**全程不报
+  任何错**。校验生效后修复脚本报告的「主力净额最大改动」从 36.83 亿降到 20.09 亿，那个 36.83 亿
+  正是伪造数据。
+- 配套：`secid_for` 必须走 `core.utils.infer_market`，**920 必须先于 9 判北交所**。写成
+  `code.startswith(("6", "9"))` 会把 350 只 920 段北交所全判成沪市（实测 `secid=1.920002` 返回
+  `rc:100, data:null`）—— 同一处顺序陷阱见「市场前缀规则」。
+- 逐票字段序是**整段映射错位不会报错**的那类代码（下标挪一格，小单净额就写进主力列，一切照常
+  「成功」）。唯一出处是 `core/fund_flow_source.py`，两个脚本都从它导入 —— **不要复制第二份**。
+
 ---
 
 ## 🧪 回归测试规范(red-proof)
@@ -238,6 +307,8 @@ if _REPO_ROOT not in sys.path:
 | P2-14 `ingestion_runs.attempts` 列装的是记录条数而非重试次数(`update_bars`=5565 / `update_index_membership`=3850) | P2 | ✅ 已修复 (PR #122):该列真实语义是重试次数(`core.refresh` 写入的 `metadata["attempts"]`),而「本轮检查了多少条记录」在本表**没有对应列**。因 `ingestion_runs` 是两仓库共享的 canonical 契约(`quant_hunter` 的 `db_schema.py` 有逐字相同的 DDL),**不改列名**、只修正写入方:列改取 `metadata["attempts"]`(未跟踪重试写 0),记录条数并入 `metadata_json` 不静默丢弃。红证:还原旧实现会让 `tests/test_providers_extended2.py::test_attempts_column_records_retry_count_not_record_count` 与 `::test_attempts_column_zero_when_retry_count_not_reported` 变红(`assert 5565 == 2` / `assert 5565 == 0`) |
 | P2-18 连续 `retained` 静默退化:`retained` 以 0 退出、只记 `warning`,而 `NOTIFICATION_LEVEL` 默认 `error` 恰好压掉它 → 任务连续多日「数据完全没更新」而整轮仍报「全部完成」 | P2 | ✅ 已修复 (PR #126):新增 `core/retained_streak.py` —— 同一任务**连续 3 个运行日**裁定均为 `retained` 即命中;一天只认最后一次**有结论**的运行(排除残留的 `status='running'` 父行)、按**上海运行日**聚合(`finished_at` 按 UTC 落库,UTC 16:00 后属上海次日)、没有运行的日子跳过而不打断、只报**仍在持续**的(恢复即清零,避免旧噪音天天重报)。刻意**不设豁免名单**:`known_gaps` 登记的是不可回补的历史空洞,连续 retained 是**正在发生、可修复**的退化,声明掉等于让它继续静默。`tasks/utility.py::health_check` 新增巡检段,命中进 `issues` → 本轮 `degraded` → `daily_pipeline` 收尾通知升为 **error 级**、退出码非 0(且 `ingestion_runs` 缺失时跳过并在报告里写明)。生产库验收(只读):改动前 `health_check` 对生产库返回 `success`/0 问题,改动后返回 `degraded` 且只命中 `update_concept_board`(连续 5 天 09-21~09-25;`update_fund_flow` 连续 3 天后已于 09-24 恢复故不报)。红证:还原 `tasks/utility.py` 会让 `tests/test_daily_pipeline.py::TestHealthCheck` 的 4 个新用例变红;去掉 `_run_day` 的时区折算 → 2 个用例红;把「只数最近连续段」改成「数全部 retained 日」→ 2 个用例红 |
 | P2-19 WAL 文件被单个巨型事务撑成**只涨不缩**的高水位线(生产库长期占着 2.39 GiB,而活跃日志只有 87 MB),且 `journal_size_limit` 不持久 → 上限必须每个写连接各设一次,内联写法散在 7 处 | P2 | ✅ 已修复 (PR #129):新增 `core/db_pragmas.py` 作为 WAL 与体积上限的**唯一出处**(`apply_write_pragmas` 默认 64 MiB、`QUANT_WAL_SIZE_LIMIT_MB` 可覆盖;`truncate_wal` 尽力而为、绝不抛异常),原 7 处内联写法全部收敛(`providers` ×2 / `core/migrations` / `scripts` ×3),`daily_pipeline` 收尾与 `scripts/reconcile_with_akshare.py` 收尾各回收一次。顺带修掉真缺陷:`scripts/backfill_historical_valuation.py` 此前**根本没有仓库根注入**(它只 import 第三方,还没 import 过仓库模块),接入后按 P2-16b 规则补上统一引导,并把该脚本纳入「外部 cwd 跑 `--help`」探针。生产库验收:`2.39 GiB → 0`(5.5 s,当时 TUI 与正在跑的 pipeline 都持有连接)、其后 `PRAGMA quick_check` = ok(289 s)、`page_count × page_size` 与文件字节精确一致、`freelist_count` = 0。红证:去掉 `journal_size_limit` → 3 个用例红;`providers._get_write_conn` 退回内联写法 → 2 个用例红(含「唯一出处」门禁);`daily_pipeline` 收尾去掉回收 → 1 个用例红(合计 6 个) |
+| P2-20 `update_fund_flow` 把源端返回的东西照写并永远 success:东财榜单端点间歇失败 → 同花顺兜底只覆盖 67%,**1/3 全市场静默停止更新**而 `ingestion_runs`/`health_check`/P2-18 连续 retained 检测**全都看不到**(任务每天都是 success) | P2 | ✅ 已修复 (PR #170):新增 `tasks/market_flow.py::_FUND_FLOW_COVERAGE_FLOOR = 0.90`(生产库校准:健康 93.8%~94.1%、塌陷 66.9%),跌破即 `degraded/data_quality` 并量化缺口;同时新增 `core/fund_flow_source.py` 与 `scripts/backfill_fund_flow_gaps.py` 回补 09-18 起积欠的 **29,867 个 (票,日) 对**(实跑 34 s),覆盖率回到 100.0%。红证:还原守卫 → `test_coverage_collapse_returns_degraded` 等 2 个红;初稿的 `secid` 写法 → `test_920_is_not_treated_as_shanghai` 红 |
+| P2-21 同花顺兜底把**缺失的分解填成 `0.0`**(`_coerce_float` 对 NaN 与 None 都返回 0):36,470 行 5 个派生字段是假真值,而 `backtest.py` 取 `MAX(trade_date)` 一行 → **5,216 只**股票的回测最新资金流里超大单净流入是 0 元 | P2 | ✅ 已修复 (PR #170):`scripts/repair_fund_flow_decomposition.py` 东财可覆盖的 26,045 行全量覆盖、取不到的 10,425 行(全为可转债)5 个派生字段置 **NULL** 并保留原主力净额;同花顺兜底本身**删除**(`_ths_fund_flow_fallback`/`_parse_cn_amount`),降级改由东财逐票日 K 承担。生产库验收:污染行 36,470 → **0**、回测暴露面 5,216 → **0**、全表恒等式违例 **0**。拦下一个严重问题:`secid=0.1318` 返回 `code=131800/name=Ｒ-003`(短代码是**前缀匹配**),不校验就会把另一只证券的资金流写进来 —— 故 `fetch_day_klines` 只接受回显一致者，**回显缺失同样拒绝**。红证:去掉回显校验 → 2 个用例红;还原 `build_plan`→`apply_plan` 元组顺序 → 3 个用例红(该接缝曾让 UPDATE 静默匹配 0 行而两边单测都绿) |
 
 ### 🔁 OCR 全量扫描分诊记录(2026-09-28,同工具重扫勿重复审理)
 
