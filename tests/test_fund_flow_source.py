@@ -7,7 +7,7 @@ core/fund_flow_source.py 的红证测试。
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -188,6 +188,98 @@ class TestIsWeekend:
         assert ffs.is_weekend("2026-10-11") is True   # 周日
         assert ffs.is_weekend("2026-10-10") is True   # 周六
         assert ffs.is_weekend("2026-10-09") is False  # 周五
+
+
+class TestFetchMarketDayRecords:
+    """逐票重建整天 —— 聚合榜单端点不可用时的第二级兜底。
+
+    每个用例都必须把 ``make_session`` 换掉：``fetch_market_day_records`` 自己
+    建会话，不换就会真联网（开发时确实发生过一次，断言拿到的是线上真实值）。
+    """
+
+    @staticmethod
+    def _session(mapping: dict[str, list[str]]):
+        """按代码返回不同 kline；回显 code 与请求一致（真实端点会这么回）。"""
+        holder = MagicMock()
+
+        def _get(url, params=None, timeout=None):
+            resp = MagicMock()
+            code = params["secid"].split(".")[-1]
+            resp.json.return_value = {
+                "data": {"code": code, "klines": mapping.get(code, [])}
+            }
+            return resp
+
+        holder.get.side_effect = _get
+        return holder
+
+    def _rebuild(self, mapping, codes, trade_date):
+        with patch("core.fund_flow_source.make_session", return_value=self._session(mapping)):
+            return ffs.fetch_market_day_records(codes, trade_date)
+
+    def test_rebuilds_only_the_requested_trade_date(self):
+        """只收日期恰好等于目标日的 kline：目标日未发布时不能贴上一日的数据。"""
+        records, missing = self._rebuild(
+            {"000001": ["2026-10-09,1,2,3,4,5,6,7,8,9,10", REAL_KLINE]},
+            ["000001"],
+            "2026-10-12",
+        )
+        assert missing == []
+        assert len(records) == 1
+        assert records[0]["symbol"] == "000001"
+        assert records[0]["date"] == "2026-10-12"
+        assert records[0]["main_net_inflow"] == 821331.0
+
+    def test_other_dates_are_ignored(self):
+        records, missing = self._rebuild(
+            {"000001": ["2026-10-09,1,2,3,4,5,6,7,8,9,10"]}, ["000001"], "2026-10-12"
+        )
+        assert records == []
+        assert missing == ["000001"]
+
+    def test_missing_code_is_reported_not_raised(self):
+        """一只取不到不得让整轮重建失败。"""
+        records, missing = self._rebuild(
+            {"000001": [REAL_KLINE]}, ["000001", "000002"], "2026-10-12"
+        )
+        assert len(records) == 1
+        assert missing == ["000002"]
+
+    def test_record_carries_all_six_numeric_columns(self):
+        records, _ = self._rebuild({"000001": [REAL_KLINE]}, ["000001"], "2026-10-12")
+        assert set(records[0]) == {"symbol", "date", *ffs.NUMERIC_COLUMNS}
+
+    def test_empty_input_short_circuits_without_network(self):
+        with patch("core.fund_flow_source.make_session") as mk:
+            assert ffs.fetch_market_day_records([], "2026-10-12") == ([], [])
+        mk.assert_not_called()
+
+    def test_records_satisfy_the_identity(self):
+        """重建出来的行必须满足 主力 = 大单 + 超大单，否则就是又一批假数据。"""
+        records, _ = self._rebuild({"000001": [REAL_KLINE]}, ["000001"], "2026-10-12")
+        row = records[0]
+        assert row["main_net_inflow"] == pytest.approx(
+            row["large_net_inflow"] + row["super_large_net_inflow"]
+        )
+
+    def test_wrong_instrument_is_rejected_via_echo_check(self):
+        """回显校验在这里同样生效：非 6 位代码的前缀匹配不得混进来。"""
+        sess = MagicMock()
+        sess.get.return_value.json.return_value = {
+            "data": {"code": "131800", "klines": [REAL_KLINE]}
+        }
+        with patch("core.fund_flow_source.make_session", return_value=sess):
+            records, missing = ffs.fetch_market_day_records(["1318"], "2026-10-12")
+        assert records == []
+        assert missing == ["1318"]
+
+    def test_per_code_failure_is_contained(self):
+        sess = MagicMock()
+        sess.get.side_effect = RuntimeError("network down")
+        with patch("core.fund_flow_source.make_session", return_value=sess):
+            records, missing = ffs.fetch_market_day_records(["000001", "000002"], "2026-10-12")
+        assert records == []
+        assert sorted(missing) == ["000001", "000002"]
 
 
 class TestColumnGroups:

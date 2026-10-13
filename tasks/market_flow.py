@@ -49,23 +49,50 @@ def _bare_code(value: object) -> str:
     return text.zfill(6) if text.isdigit() else text
 
 
-def _fund_flow_coverage(db: DatabaseInterface, df: pd.DataFrame) -> tuple[int, int, int]:
-    """返回 (universe, covered, missing)。
+def _fund_flow_universe(db: DatabaseInterface) -> set[str]:
+    """当天「按定义应该有资金流」的代码集：daily_bars 的代码集。
 
-    universe 是「按定义当天应该有资金流」的集合 —— 用 daily_bars 的代码集，
-    因为它是本地唯一逐票齐全的表。取不到时返回 (0, 0, 0) 表示「无法判定」，
-    调用方据此跳过守卫：守卫自己不能成为新的单点故障。
+    它是本地唯一逐票齐全的表。取不到时返回空集表示「无法判定」，调用方据此
+    跳过守卫 —— 守卫自己不能成为新的单点故障。
     """
     try:
-        universe = {_bare_code(c) for c in db.get_distinct_codes("daily_bars", "ts_code")}
+        return {_bare_code(c) for c in db.get_distinct_codes("daily_bars", "ts_code")}
     except Exception as e:  # noqa: BLE001 — 守卫失败不得拖垮主任务
         logger.debug(f"  覆盖度守卫跳过：universe 查询失败 ({e})")
-        return (0, 0, 0)
+        return set()
+
+
+def _fund_flow_coverage(universe: set[str], df: pd.DataFrame) -> tuple[int, int]:
+    """返回 (covered, missing)。universe 为空时返回 (0, 0)。"""
     if not universe:
-        return (0, 0, 0)
+        return (0, 0)
     have = {_bare_code(c) for c in df["code"]} if "code" in df.columns else set()
     covered = len(have & universe)
-    return (len(universe), covered, len(universe) - covered)
+    return (covered, len(universe) - covered)
+
+
+def _rebuild_market_day(universe: set[str], trade_date: str) -> pd.DataFrame | None:
+    """聚合源覆盖不足时，用东财逐票日 K 把整天重建一遍。
+
+    **整日替换而不是合并**：合并会让同一天里一半是榜单口径、一半是兜底口径，
+    而兜底口径（无分解、精度只到万）正是这次要消灭的东西。宁可全用同源数据。
+
+    返回 None 表示重建不出可用数据 —— 调用方据此不写任何东西，而不是退回
+    写口径不一致的兜底数据。
+    """
+    from core.fund_flow_source import fetch_market_day_records
+
+    try:
+        records, missing = fetch_market_day_records(universe, trade_date)
+    except Exception as e:  # noqa: BLE001 — 重建失败不得让主任务崩掉
+        logger.warning(f"⚠️ 东财逐票重建失败: {e}")
+        return None
+    if not records:
+        logger.warning(f"⚠️ 东财逐票重建未取到任何 {trade_date} 数据（{len(missing)} 只全部失败）")
+        return None
+    df = pd.DataFrame(records)
+    logger.info(f"✅ 东财逐票重建 {trade_date}: {len(df)} 只（未取到 {len(missing)} 只）")
+    return df
 
 
 def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
@@ -95,9 +122,33 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
         # 覆盖度在写库前判定：它描述的是「源端给全了没有」，与写入无关。
         # --symbols 是子集运行，对全市场覆盖率没有意义，跳过（否则每次
         # 子集运行都会误报塌陷）。
-        universe = covered = missing = 0
+        universe: set[str] = set()
         if not symbols:
-            universe, covered, missing = _fund_flow_coverage(db, df)
+            universe = _fund_flow_universe(db)
+            covered, missing = _fund_flow_coverage(universe, df)
+            if universe and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR:
+                logger.warning(
+                    f"⚠️ 聚合源覆盖不足（{covered}/{len(universe)} = "
+                    f"{covered / len(universe):.1%}），改用东财逐票重建 {today}"
+                )
+                rebuilt = _rebuild_market_day(universe, today)
+                if rebuilt is not None:
+                    df = rebuilt
+                    covered, missing = _fund_flow_coverage(universe, df)
+                else:
+                    logger.error(
+                        "❌ 东财逐票重建失败：不写入任何资金流数据"
+                        "（保留旧数据，不写入口径不一致的兜底数据）"
+                    )
+                    return {
+                        "status": "retained",
+                        "reason": (
+                            f"聚合源覆盖 {covered}/{len(universe)} 且东财逐票重建失败"
+                        ),
+                        "error_kind": "network",
+                        "retained_old_data": True,
+                        "total": 0,
+                    }
 
         batch_records = []
         for _, row in df.iterrows():
@@ -141,30 +192,30 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
         logger.info(f"✅ 资金流向保存完成: {saved}/{len(df)} 只")
 
         result: dict = {"saved": saved, "total": len(df)}
-        # 覆盖度不足是 data_quality，不是网络故障：已抓到的行照写（丢掉只会把
-        # 洞变得更大），但整轮必须降级上报 —— 否则「数据没更新」会以 success
-        # 的面目进审计，连续多日也无人发现（与 P2-12 的 market_snapshot 同型）。
-        # degraded 而非 failed：failed 在 to_dict 里丢 saved，审计会误读成
-        # 「一行都没写」。
-        if universe and covered / universe < _FUND_FLOW_COVERAGE_FLOOR:
-            pct = covered / universe
+        # 逐票重建之后覆盖度通常回到 ~100%，守卫自然不再触发；只有重建也
+        # 没能补齐时才降级上报 —— 否则「数据没更新」会以 success 的面目进
+        # 审计，连续多日也无人发现（与 P2-12 的 market_snapshot 同型）。
+        # degraded 而非 failed：failed 在 to_dict 里丢 saved，审计会把一次
+        # 几千行的写入误读成「一行都没写」。
+        if universe and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR:
+            pct = covered / len(universe)
             result.update({
                 "status": "degraded",
                 "error_kind": "data_quality",
                 "error": (
                     f"资金流覆盖度 {pct:.1%} 低于水位 {_FUND_FLOW_COVERAGE_FLOOR:.0%}："
-                    f"{universe} 只应有，仅 {covered} 只拿到，缺 {missing} 只"
-                    "（源端降级兜底通常只给主力净额，无超大单/大单分解）"
+                    f"{len(universe)} 只应有，仅 {covered} 只拿到，缺 {missing} 只"
+                    "（东财逐票重建后仍不足，多为停牌/退市或源端无数据）"
                 ),
                 "metadata": {
-                    "universe_size": universe,
+                    "universe_size": len(universe),
                     "covered": covered,
                     "missing": missing,
                     "coverage_pct": round(pct, 4),
                 },
             })
             logger.error(
-                f"❌ 资金流覆盖度塌陷: {covered}/{universe} ({pct:.1%}) "
+                f"❌ 资金流覆盖度仍不足: {covered}/{len(universe)} ({pct:.1%}) "
                 f"< {_FUND_FLOW_COVERAGE_FLOOR:.0%}，缺 {missing} 只"
             )
         return result

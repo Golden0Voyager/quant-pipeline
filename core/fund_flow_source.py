@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import ModuleType
 from typing import Any
 
@@ -160,3 +162,59 @@ def is_weekend(day: str) -> bool:
     from datetime import date
 
     return date.fromisoformat(day).weekday() >= 5
+
+
+def fetch_market_day_records(
+    codes: Iterable[str],
+    trade_date: str,
+    workers: int = 8,
+    lmt: int = 3,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """逐票重建某个交易日的全市场资金流。返回 (records, 未取到的代码)。
+
+    这是聚合榜单端点（``push2/clist``）不可用时的第二级兜底：榜单只给全市场
+    一张快照，逐票日 K 则能拿到带完整超大单/大单分解的单日值，且与榜单端点
+    同源同口径（实测对同一 (票, 日) 40/40 完全一致）。
+
+    只有 kline 日期**恰好等于** ``trade_date`` 才收：目标日尚未发布时宁可少收，
+    也不能把上一交易日的值贴到今天的名下。
+
+    单票失败只计数不抛 —— 一只停牌票不该让整轮重建失败。
+    """
+    if requests is None:
+        return [], list(codes)
+    wanted = sorted({str(c).strip() for c in codes if str(c).strip()})
+    if not wanted:
+        return [], []
+
+    session = make_session()
+    records: list[dict[str, Any]] = []
+    missing: list[str] = []
+
+    def _one(code: str) -> dict[str, Any] | None:
+        for raw in fetch_day_klines(session, code, lmt):
+            rec = parse_kline(raw)
+            if rec is not None and rec["date"] == trade_date:
+                return {"symbol": code, "date": trade_date,
+                        **{field: rec[field] for field in NUMERIC_COLUMNS}}
+        return None
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(_one, code): code for code in wanted}
+        for fut in as_completed(futures):
+            code = futures[fut]
+            try:
+                rec = fut.result()
+            except Exception as e:  # noqa: BLE001 — 单票失败不得中断整轮
+                logger.debug(f"  {code} 重建失败: {e}")
+                rec = None
+            if rec is None:
+                missing.append(code)
+            else:
+                records.append(rec)
+
+    logger.info(
+        f"📊 东财逐票重建 {trade_date}: {len(records)}/{len(wanted)} 只"
+        + (f"，{len(missing)} 只未取到" if missing else "")
+    )
+    return records, missing

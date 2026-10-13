@@ -819,18 +819,20 @@ class TestUpdateFundFlow:
 
 
 # ===========================================================================
-# update_fund_flow 覆盖度守卫（P0：源端降级静默成 success）
+# update_fund_flow 覆盖度守卫 + 东财逐票重建
 #
 # 生产库实测基线（2026-10-13 只读复核）：
 #   健康运行 2026-07-07 ~ 09-18 覆盖率稳定 93.8% ~ 94.1%
-#   2026-09-24 起塌到 66.9% ~ 67.0%（东财榜单端点间歇失败 → 同花顺兜底
-#   只覆盖约 5200 只，且无超大单/大单分解）
-# 旧实现把兜底结果照写 success，缺口对 ingestion_runs / health_check /
-# retained 检测全部不可见 —— 与 P2-12 的 update_market_snapshot 同型。
+#   2026-09-24 起塌到 66.9% ~ 67.0%（聚合榜单端点间歇失败 → 同花顺兜底，
+#   而同花顺只覆盖约 5200 只且无超大单/大单分解）
+#
+# 现在覆盖度不足会先触发东财逐票重建（core.fund_flow_source），而不是把
+# 口径不一致的兜底数据写进库 —— 同花顺「即时」与东财任何一天都对不上。
 # ===========================================================================
-class TestUpdateFundFlowCoverageGuard:
-    """覆盖度跌破水位 → degraded/data_quality，而不是静默 success。"""
+_MUST_NOT_REBUILD = object()
 
+
+class TestUpdateFundFlowCoverageGuard:
     @staticmethod
     def _universe(n: int) -> set[str]:
         return {f"{i:06d}" for i in range(n)}
@@ -847,124 +849,198 @@ class TestUpdateFundFlowCoverageGuard:
             "large_net_inflow_pct": [0.02] * len(codes),
         })
 
-    def test_coverage_collapse_returns_degraded(self):
-        """红证：旧实现返回 {'saved':…, 'total':…}（无 status），断言变红。"""
-        universe = self._universe(1000)
-        covered = sorted(universe)[:700]  # 70% → 塌陷形态
-        db = MagicMock()
-        db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
-        loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert r["status"] == "degraded"
-        assert r["error_kind"] == "data_quality"
+    def _run(self, db, loader, rebuild=_MUST_NOT_REBUILD, **kwargs):
+        """统一入口：屏蔽 logger。
 
-    def test_degraded_still_reports_rows_written(self):
-        """已写入的行数必须留在审计里：degraded 语义是「写了但降级」，不是「没写」。"""
-        universe = self._universe(1000)
-        covered = sorted(universe)[:700]
-        db = MagicMock()
-        db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
-        loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert r["saved"] == len(covered)
+        ``rebuild`` 默认禁止重建（真联网会被 AssertionError 立刻抓住）；
+        传 None 表示重建返回 None（取不到数据）；传 DataFrame 表示重建成功。
+        """
+        target = (
+            patch("tasks.market_flow._rebuild_market_day", side_effect=AssertionError("不该重建"))
+            if rebuild is _MUST_NOT_REBUILD
+            else patch("tasks.market_flow._rebuild_market_day", return_value=rebuild)
+        )
+        with patch("daily_pipeline.logger"), target as mocked:
+            result = daily_pipeline.update_fund_flow(db, loader, **kwargs)
+        return result, mocked
 
-    def test_degraded_records_shortfall_in_metadata(self):
-        """缺口量化写进 metadata：光有 status 说不出「少了多少」。"""
+    # ── 触发条件 ──────────────────────────────────────────────────
+
+    def test_low_coverage_triggers_rebuild(self):
         universe = self._universe(1000)
         covered = sorted(universe)[:700]
         db = MagicMock()
         db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
+        db.save_fund_flow_batch.return_value = 1000
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        meta = r["metadata"]
-        assert meta["universe_size"] == 1000
-        assert meta["covered"] == len(covered)
-        assert meta["missing"] == 300
+        rebuilt = self._df(sorted(universe))
+        _, rebuild = self._run(db, loader, rebuild=rebuilt)
+        rebuild.assert_called_once()
 
-    def test_healthy_coverage_stays_success(self):
-        """94% 的健康基线不得误报（阈值定得太紧就会在这里变红）。"""
+    def test_healthy_coverage_does_not_rebuild(self):
+        """红证：去掉触发条件后本用例变红 —— 无谓重建要多打 5000 次请求。"""
         universe = self._universe(1000)
-        covered = sorted(universe)[:940]
         db = MagicMock()
         db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
+        db.save_fund_flow_batch.return_value = 940
         loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert "status" not in r
-        assert r["saved"] == len(covered)
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:940])
+        _, rebuild = self._run(db, loader)
+        rebuild.assert_not_called()
 
-    def test_coverage_counts_bare_codes_despite_suffix(self):
-        """df 带 .SZ 后缀、universe 是裸 6 位时仍算命中（否则恒判塌陷）。"""
-        universe = self._universe(100)
-        covered = [f"{c}.SZ" for c in sorted(universe)]
+    def test_symbols_subset_run_does_not_rebuild(self):
+        """子集运行对全市场覆盖率没有意义，否则每次都白重建。"""
+        universe = self._universe(1000)
         db = MagicMock()
         db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
+        db.save_fund_flow_batch.return_value = 1
         loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert "status" not in r
+        loader.get_market_fund_flow.return_value = self._df(["000001"])
+        _, rebuild = self._run(db, loader, symbols=["000001"])
+        rebuild.assert_not_called()
 
-    def test_empty_universe_skips_guard(self):
-        """universe 取不到（表空）时不得因除零或误报而失败。"""
+    def test_empty_universe_does_not_rebuild(self):
         db = MagicMock()
         db.get_distinct_codes.return_value = set()
         db.save_fund_flow_batch.return_value = 1
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = self._df(["000001"])
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert "status" not in r
-        assert r["saved"] == 1
-
-    def test_symbols_subset_run_skips_guard(self):
-        """--symbols 是子集运行，覆盖度对它没有意义（否则每次子集运行都误报塌陷）。"""
-        universe = self._universe(1000)
-        db = MagicMock()
-        db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = 1
-        loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(["000001"])
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader, symbols=["000001"])
+        r, rebuild = self._run(db, loader)
+        rebuild.assert_not_called()
         assert "status" not in r
 
-    def test_guard_does_not_suppress_the_write(self):
-        """覆盖度不足时仍然要写：丢掉已抓到的 70% 只会把洞变得更大。"""
-        universe = self._universe(1000)
-        covered = sorted(universe)[:700]
-        db = MagicMock()
-        db.get_distinct_codes.return_value = universe
-        db.save_fund_flow_batch.return_value = len(covered)
-        loader = MagicMock()
-        loader.get_market_fund_flow.return_value = self._df(covered)
-        with patch("daily_pipeline.logger"):
-            daily_pipeline.update_fund_flow(db, loader)
-        db.save_fund_flow_batch.assert_called_once()
-
-    def test_guard_survives_universe_query_failure(self):
-        """universe 查询本身失败不能把任务带崩 —— 守卫不是新的单点故障。"""
+    def test_universe_query_failure_does_not_rebuild(self):
+        """universe 查询失败不能变成「一律重建」——守卫不是新的单点故障。"""
         db = MagicMock()
         db.get_distinct_codes.side_effect = RuntimeError("table missing")
         db.save_fund_flow_batch.return_value = 1
         loader = MagicMock()
         loader.get_market_fund_flow.return_value = self._df(["000001"])
-        with patch("daily_pipeline.logger"):
-            r = daily_pipeline.update_fund_flow(db, loader)
-        assert "status" not in r
+        r, rebuild = self._run(db, loader)
+        rebuild.assert_not_called()
         assert r["saved"] == 1
+
+    # ── 重建成功 ──────────────────────────────────────────────────
+
+    def test_rebuild_restores_full_coverage_and_clears_alert(self):
+        """这就是改动的目的：聚合源降级不再以 degraded 收场。"""
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 1000
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        rebuilt = self._df(sorted(universe))
+        r, _ = self._run(db, loader, rebuild=rebuilt)
+        assert "status" not in r
+        assert r["total"] == 1000
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert len(written) == 1000
+
+    def test_rebuild_replaces_rather_than_merges(self):
+        """整日替换而非合并：合并会让同一天混两种口径。
+
+        聚合源的 700 只若被保留，它们仍是无分解/低精度的兜底数据 —— 正是
+        这次要消灭的东西。
+        """
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 1000
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        rebuilt = self._df(sorted(universe))
+        self._run(db, loader, rebuild=rebuilt)
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert len(written) == 1000
+        assert {w["symbol"] for w in written} == universe
+
+    def test_rebuild_result_keeps_all_six_fields(self):
+        universe = self._universe(100)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 100
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:50])
+        self._run(db, loader, rebuild=self._df(sorted(universe)))
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert written[0]["super_large_net_inflow"] == 5e7
+        assert written[0]["large_net_inflow"] == 5e7
+
+    # ── 重建失败 ──────────────────────────────────────────────────
+
+    def test_rebuild_failure_retains_and_writes_nothing(self):
+        """宁可不写，也不写口径不一致的兜底数据。"""
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        r, _ = self._run(db, loader, rebuild=None)
+        assert r["status"] == "retained"
+        assert r["error_kind"] == "network"
+        assert r["retained_old_data"] is True
+        db.save_fund_flow_batch.assert_not_called()
+
+    def test_rebuild_fetch_error_does_not_crash_the_task(self):
+        """逐票抓取本身抛异常时，_rebuild_market_day 必须吞掉并返回 None。"""
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        with patch("daily_pipeline.logger"), \
+             patch(
+                 "core.fund_flow_source.fetch_market_day_records",
+                 side_effect=RuntimeError("boom"),
+             ):
+            r = daily_pipeline.update_fund_flow(db, loader)
+        assert r["status"] == "retained"
+        assert r["error_kind"] == "network"
+        db.save_fund_flow_batch.assert_not_called()
+
+    # ── 重建后仍不足 ──────────────────────────────────────────────
+
+    def test_still_short_after_rebuild_is_degraded_with_metadata(self):
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 850
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        rebuilt = self._df(sorted(universe)[:850])
+        r, _ = self._run(db, loader, rebuild=rebuilt)
+        assert r["status"] == "degraded"
+        assert r["error_kind"] == "data_quality"
+        meta = r["metadata"]
+        assert meta["universe_size"] == 1000
+        assert meta["covered"] == 850
+        assert meta["missing"] == 150
+
+    def test_degraded_still_reports_rows_written(self):
+        """degraded 语义是「写了但降级」，saved 必须留在审计里。"""
+        universe = self._universe(1000)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 850
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df(sorted(universe)[:700])
+        r, _ = self._run(db, loader, rebuild=self._df(sorted(universe)[:850]))
+        assert r["saved"] == 850
+
+    # ── 代码形态 ──────────────────────────────────────────────────
+
+    def test_coverage_counts_bare_codes_despite_suffix(self):
+        universe = self._universe(100)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 100
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = self._df([f"{c}.SZ" for c in sorted(universe)])
+        r, rebuild = self._run(db, loader)
+        rebuild.assert_not_called()
+        assert "status" not in r
 
 
 # ===========================================================================

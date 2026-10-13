@@ -2666,24 +2666,6 @@ class SmartMoneyDBProvider:
 # DataLoader Provider
 # ===========================================================================
 
-def _parse_cn_amount(value: Any) -> float | None:
-    """解析同花顺"亿/万"金额字符串（如 "4.85亿" → 485000000.0）。"""
-    if value is None:
-        return None
-    text = str(value).strip().replace(",", "")
-    if not text or text in ("-", "--"):
-        return None
-    multiplier = 1.0
-    if text.endswith("亿"):
-        multiplier, text = 1e8, text[:-1]
-    elif text.endswith("万"):
-        multiplier, text = 1e4, text[:-1]
-    try:
-        return float(text) * multiplier
-    except ValueError:
-        return None
-
-
 class SmartMoneyLoaderProvider:
     """基于 DataLoader 的数据加载 provider。
 
@@ -2775,48 +2757,28 @@ class SmartMoneyLoaderProvider:
         return self._loader.get_market_valuation()
 
     def get_market_fund_flow(self) -> pd.DataFrame:
-        df = self._loader.get_market_fund_flow()
-        if df is not None and not df.empty:
-            return df
-        ths_df = self._ths_fund_flow_fallback()
-        if not ths_df.empty:
-            return ths_df
-        return df if df is not None else pd.DataFrame()
+        """全市场资金流。**刻意没有同花顺兜底**。
 
-    def _ths_fund_flow_fallback(self) -> pd.DataFrame:
-        """东财 push2 资金流全部失败时的同花顺降级兜底。
+        同花顺「即时」实测不可用于本表（2026-10-13 生产库复核）：
 
-        同花顺个股资金流仅提供"净额"，无超大单/大单分解，故只填
-        main_net_inflow，其余字段留空；与 tasks/market_flow._fetch_sector_fund_flow 同源。
+        - 与东财**任何一天**都对不上（30 只样本 0 命中，不是错位而是不同口径）
+        - 精度只到「万」（`5805.91万`、`-1.22亿`）
+        - 是盘中实时快照，自身不带日期（日期由调用方贴）
+        - 只给「净额」，无超大单/大单分解
+
+        最后一条决定了它无法在本仓库内安全落库：缺列 → NaN →
+        ``database._coerce_float(NaN, default=0.0)`` 写成 ``0.0``，于是
+        5 个派生字段变成**假真值**（NULL 与 0.0 在聚合/排序/回测里含义相反），
+        且 ``_coerce_float(None)`` 同样是 0.0 —— 换句话说本仓库无法把它写成
+        NULL，只能不用它。曾有 36,470 行因此被污染，5216 只股票的回测最新行
+        读到「超大单净流入 0 元」。
+
+        降级路径改由 ``core.fund_flow_source.fetch_market_day_records`` 承担
+        （东财逐票日 K，与榜单端点同源，40/40 完全一致），由
+        ``tasks.market_flow.update_fund_flow`` 在覆盖度不足时触发。
         """
-        try:
-            import akshare as ak
-        except ImportError:
-            return pd.DataFrame()
-        try:
-            raw = ak.stock_fund_flow_individual(symbol="即时")
-        except Exception as e:
-            logger.warning(f"⚠️ 同花顺资金流兜底失败: {e}")
-            return pd.DataFrame()
-        if raw is None or raw.empty:
-            return pd.DataFrame()
-        records: list[dict[str, Any]] = []
-        for _, row in raw.iterrows():
-            code = str(row.get("股票代码", "")).strip()
-            if not code:
-                continue
-            records.append(
-                {
-                    "code": code,
-                    "main_net_inflow": _parse_cn_amount(row.get("净额")),
-                }
-            )
-        if not records:
-            return pd.DataFrame()
-        logger.warning(
-            f"⚠️ 资金流向改用同花顺降级源（无超大单/大单分解）: {len(records)} 只"
-        )
-        return pd.DataFrame(records)
+        df = self._loader.get_market_fund_flow()
+        return df if df is not None else pd.DataFrame()
 
     def fetch_global_assets_bars(self, symbol: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
         import yfinance as yf
