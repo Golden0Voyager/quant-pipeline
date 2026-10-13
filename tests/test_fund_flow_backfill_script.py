@@ -14,8 +14,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "backfill_fund_flow_gaps.py"
 
@@ -38,116 +36,6 @@ REAL_KLINE = (
 # 恒等式：主力净额 = 大单 + 超大单；主力占比 = 大单占比 + 超大单占比
 assert 821331.0 == -674722.0 + 1496053.0
 assert 2.05 == -1.68 + 3.73
-
-
-class TestSecid:
-    """secid 市场前缀 —— 920 段错判会让整段北交所永远补不回来。"""
-
-    @pytest.mark.parametrize(
-        ("code", "expected"),
-        [
-            ("600000", "1.600000"),   # 沪主板
-            ("688712", "1.688712"),   # 科创板
-            ("900901", "1.900901"),   # 沪 B
-            ("000001", "0.000001"),   # 深主板
-            ("002241", "0.002241"),   # 中小板
-            ("300750", "0.300750"),   # 创业板
-            ("920002", "0.920002"),   # 北交所新号段：920 必须先于 9 判
-            ("830799", "0.830799"),   # 北交所旧号段
-            ("430047", "0.430047"),   # 北交所旧号段
-        ],
-    )
-    def test_secid_market_prefix(self, code, expected):
-        assert _load_script().secid_for(code) == expected
-
-    def test_920_is_not_treated_as_shanghai(self):
-        """红证：handoff 初稿的 startswith(("6","9")) 写法会让本用例变红。"""
-        assert _load_script().secid_for("920002").startswith("0.")
-
-    def test_secid_matches_agrees_with_infer_market(self):
-        """secid 判定必须与 core.utils.infer_market 同源，不得各写一份规则。"""
-        from core.utils import infer_market
-
-        mod = _load_script()
-        for code in ("600000", "688712", "900901", "000001", "002241", "300750", "920002"):
-            market = infer_market(code)
-            expected_prefix = "1." if market in ("sh", "star") else "0."
-            assert mod.secid_for(code) == expected_prefix + code
-
-
-class TestParseKline:
-    def test_field_mapping_matches_real_response(self):
-        rec = _load_script().parse_kline(REAL_KLINE)
-        assert rec is not None
-        assert rec["date"] == "2026-10-12"
-        assert rec["main_net_inflow"] == 821331.0
-        assert rec["super_large_net_inflow"] == 1496053.0
-        assert rec["large_net_inflow"] == -674722.0
-        assert rec["main_net_inflow_pct"] == 2.05
-        assert rec["super_large_net_inflow_pct"] == 3.73
-        assert rec["large_net_inflow_pct"] == -1.68
-
-    def test_main_equals_large_plus_super_large(self):
-        """恒等式自检：索引整体错位一格就会红。"""
-        rec = _load_script().parse_kline(REAL_KLINE)
-        assert rec is not None
-        assert rec["main_net_inflow"] == pytest.approx(
-            rec["large_net_inflow"] + rec["super_large_net_inflow"]
-        )
-
-    def test_main_pct_equals_large_pct_plus_super_large_pct(self):
-        rec = _load_script().parse_kline(REAL_KLINE)
-        assert rec is not None
-        assert rec["main_net_inflow_pct"] == pytest.approx(
-            rec["large_net_inflow_pct"] + rec["super_large_net_inflow_pct"]
-        )
-
-    def test_short_row_returns_none(self):
-        assert _load_script().parse_kline("2026-10-12,1.0,2.0") is None
-
-    def test_empty_date_returns_none(self):
-        assert _load_script().parse_kline(",1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0") is None
-
-    def test_non_numeric_tail_degrades_to_none_not_crash(self):
-        row = ",".join(["2026-10-12"] + ["-"] * 12)
-        rec = _load_script().parse_kline(row)
-        assert rec is None  # 六个数值字段全 None → 视为无数据
-
-
-class TestFetchCodeHistory:
-    def test_network_error_returns_empty_not_raises(self):
-        """单票失败必须被吞掉：否则一只停牌票会中断整轮回补。"""
-        mod = _load_script()
-        session = MagicMock()
-        session.get.side_effect = RuntimeError("boom")
-        assert mod.fetch_code_history(session, "000001") == []
-
-    def test_http_error_returns_empty(self):
-        mod = _load_script()
-        session = MagicMock()
-        session.get.return_value.raise_for_status.side_effect = RuntimeError("500")
-        assert mod.fetch_code_history(session, "000001") == []
-
-    def test_null_data_returns_empty(self):
-        """实测 secid 错时源站回 rc:100 + data:null —— 不抛异常也不返回行。"""
-        mod = _load_script()
-        session = MagicMock()
-        session.get.return_value.json.return_value = {"rc": 100, "data": None}
-        assert mod.fetch_code_history(session, "000001") == []
-
-    def test_klines_parsed(self):
-        mod = _load_script()
-        session = MagicMock()
-        session.get.return_value.json.return_value = {"data": {"klines": [REAL_KLINE]}}
-        assert mod.fetch_code_history(session, "920002") == [REAL_KLINE]
-
-    def test_request_carries_correct_secid(self):
-        mod = _load_script()
-        session = MagicMock()
-        session.get.return_value.json.return_value = {"data": {"klines": []}}
-        mod.fetch_code_history(session, "920002")
-        params = session.get.call_args.kwargs["params"]
-        assert params["secid"] == "0.920002"
 
 
 class TestFindGaps:
@@ -204,19 +92,6 @@ class TestFindGaps:
         assert mod.find_gaps(db, "2026-09-18")
         # 连接泄漏会在 Windows/临时目录清理时报错；这里直接验证没有累积
         assert not list(Path(tmp_path).glob("t.db-journal"))
-
-
-class TestWeekendGuard:
-    def test_weekend_detected(self):
-        mod = _load_script()
-        assert mod._is_weekend("2026-10-11") is True   # 周日
-        assert mod._is_weekend("2026-10-10") is True   # 周六
-        assert mod._is_weekend("2026-10-09") is False  # 周五
-
-    def test_weekend_row_never_reaches_records(self):
-        """红证：不过滤周末会撞 trg_fund_flow_reject_weekend，整批事务回滚。"""
-        mod = _load_script()
-        assert mod._is_weekend(mod.parse_kline("2026-10-11,1,2,3,4,5,6,7,8,9,10")["date"])
 
 
 class TestModuleLevelImports:

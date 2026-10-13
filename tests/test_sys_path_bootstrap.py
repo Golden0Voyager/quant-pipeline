@@ -301,6 +301,7 @@ def test_scripts_needing_the_preamble_rule_are_actually_found():
         "compare_limit_pools.py",
         "migrate_database.py",
         "reconcile_with_akshare.py",
+        "repair_fund_flow_decomposition.py",
         "repair_turnover.py",
     }
 

@@ -29,10 +29,7 @@ import os
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
 from pathlib import Path
-
-import requests
 
 # 禁用代理环境变量（东财走环境代理会被源站拒连，scripts/repair_turnover.py 同款）。
 # 与下面的 trust_env=False 是两道互补的保险：前者对全进程生效，后者只对本次
@@ -52,90 +49,15 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from core.utils import infer_market  # noqa: E402
+from core.fund_flow_source import (  # noqa: E402
+    fetch_day_klines as fetch_code_history,
+)
+from core.fund_flow_source import (  # noqa: E402
+    is_weekend as _is_weekend,
+)
+from core.fund_flow_source import make_session, parse_kline  # noqa: E402
 
 DEFAULT_DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
-
-_FFLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-_FFLOW_PARAMS = {
-    "klt": "101",
-    "lmt": "30",
-    "fields1": "f1,f2,f3,f7",
-    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63",
-    "ut": "b2884a393a59ad64002292a3e90d46a5",
-}
-# 逐票字段序（实测 920002 校验：主力净额 = 大单 + 超大单，主力占比 = 两者占比之和）
-#   0 f51 日期          1 f52 主力净额   2 f53 小单净额  3 f54 中单净额
-#   4 f55 大单净额      5 f56 超大单净额 6 f57 主力占比  7 f58 小单占比
-#   8 f59 中单占比      9 f60 大单占比  10 f61 超大单占比
-_NUMERIC_COLUMNS = (
-    "main_net_inflow",
-    "main_net_inflow_pct",
-    "super_large_net_inflow",
-    "super_large_net_inflow_pct",
-    "large_net_inflow",
-    "large_net_inflow_pct",
-)
-# parts 索引 → 字段名。索引 2/3/7/8（小单/中单）本地表无对应列，丢弃。
-_PART_INDEX = {
-    "main_net_inflow": 1,
-    "main_net_inflow_pct": 6,
-    "super_large_net_inflow": 5,
-    "super_large_net_inflow_pct": 10,
-    "large_net_inflow": 4,
-    "large_net_inflow_pct": 9,
-}
-
-
-def secid_for(code: str) -> str:
-    """东财 secid 前缀。沪市与科创板是 1.，其余（深/创/中小/北交所）是 0.。
-
-    权威判定是 core.utils.infer_market：**920 必须先于 90 判北交所**——
-    handoff 初稿写的 `code.startswith(("6", "9")) → 1.` 会把 350 只 920 段
-    北交所全判成沪市，实测 secid=1.920002 返回 `rc:100, data:null`，
-    而 0.920002 正常返回数据。
-    """
-    return ("1." if infer_market(code) in ("sh", "star") else "0.") + code
-
-
-def parse_kline(raw: str) -> dict[str, object] | None:
-    """解析 push2his 单根日 K → save_fund_flow_batch 的记录；不可解析返回 None。
-
-    接口只回名称不回代码，所以 ``symbol`` 留空由调用方按请求的票填入。
-    """
-    parts = raw.split(",")
-    if len(parts) < 11 or not parts[0]:
-        return None
-    record: dict[str, object] = {"symbol": "", "date": parts[0]}
-    for field, idx in _PART_INDEX.items():
-        try:
-            record[field] = float(parts[idx])
-        except (ValueError, IndexError):
-            record[field] = None
-    if all(record[f] is None for f in _NUMERIC_COLUMNS):
-        return None
-    return record
-
-
-def fetch_code_history(session: requests.Session, code: str) -> list[str]:
-    """返回该票最近 lmt 根日 K 的原始行；网络/解析失败返回空表（不抛）。"""
-    try:
-        resp = session.get(
-            _FFLOW_URL,
-            params={"secid": secid_for(code), **_FFLOW_PARAMS},
-            timeout=(10, 20),
-        )
-        resp.raise_for_status()
-        klines = (resp.json().get("data") or {}).get("klines") or []
-        return [k for k in klines if isinstance(k, str)]
-    except Exception as e:  # noqa: BLE001 — 单票失败不得中断整轮回补
-        logger.debug(f"  {code} 抓取失败: {e}")
-        return []
-
-
-def _is_weekend(day: str) -> bool:
-    return date.fromisoformat(day).weekday() >= 5
-
 
 def find_gaps(db_path: Path, since: str) -> dict[str, set[str]]:
     """返回 {code: {本地缺失的交易日}}，universe 取 daily_bars。"""
@@ -194,8 +116,7 @@ def main() -> int:
         codes = codes[: args.limit]
         logger.info(f"  --limit {args.limit} → 本轮只处理 {len(codes)} 只")
 
-    session = requests.Session()
-    session.trust_env = False  # 东财在环境代理下会拒连（实测 ProxyError）
+    session = make_session()
 
     records: list[dict[str, object]] = []
     failed: list[str] = []
