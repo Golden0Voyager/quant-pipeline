@@ -628,6 +628,31 @@ def test_update_sector_derivatives_all_and_errors():
     assert str(result_err["sector_daily"]).startswith("error")
 
 
+def _sector_valuation_records() -> list[dict]:
+    """板块估值 fixture。
+
+    这两条用例原先**只** mock 了 ``_fetch_sector_daily``，板块估值与期货基差
+    直接打真网络（cninfo / sina），靠线上有数据才让
+    ``save_sector_valuation_batch.called`` 成立 —— 源端一挂就假失败，
+    源端返回脏数据时断言又是绿的。出网守卫（conftest._block_outbound_network）
+    把这类隐式依赖照了出来。
+    """
+    return [{"sector_name": "银行", "trade_date": "2026-09-29", "pe": 5.5, "pb": 0.6}]
+
+
+def _index_futures_basis_records() -> list[dict]:
+    """股指期货基差 fixture，理由同 _sector_valuation_records。"""
+    return [
+        {
+            "futures_code": "IF0",
+            "index_code": "000300",
+            "index_name": "沪深300",
+            "trade_date": "2026-09-29",
+            "basis": 12.3,
+        }
+    ]
+
+
 def test_sector_daily_stale_fallback_data_is_retained():
     """Sector daily data genuinely stale (>=2 trading days behind) → retained, not saved.
 
@@ -648,6 +673,12 @@ def test_sector_daily_stale_fallback_data_is_retained():
     for m in ("save_sector_daily_batch", "save_sector_valuation_batch", "save_index_futures_basis_batch"):
         setattr(db, m, MagicMock(return_value=1))
     with patch.object(sector_derivatives, "_fetch_sector_daily", return_value=stale_records), patch.object(
+        sector_derivatives, "_fetch_sector_valuation", return_value=_sector_valuation_records()
+    ), patch.object(
+        sector_derivatives,
+        "_fetch_index_futures_basis",
+        return_value=_index_futures_basis_records(),
+    ), patch.object(
         sector_derivatives, "get_expected_latest_trading_day", return_value="2026-09-29"
     ), patch.object(
         sector_derivatives,
@@ -696,6 +727,12 @@ def test_sector_stale_but_others_saved_is_retained():
     db.save_sector_valuation_batch.return_value = 1
     db.save_index_futures_basis_batch.return_value = 1
     with patch.object(sector_derivatives, "_fetch_sector_daily", return_value=stale_records), patch.object(
+        sector_derivatives, "_fetch_sector_valuation", return_value=_sector_valuation_records()
+    ), patch.object(
+        sector_derivatives,
+        "_fetch_index_futures_basis",
+        return_value=_index_futures_basis_records(),
+    ), patch.object(
         sector_derivatives, "get_expected_latest_trading_day", return_value="2026-09-29"
     ), patch.object(
         sector_derivatives,

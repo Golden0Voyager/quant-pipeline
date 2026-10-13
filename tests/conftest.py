@@ -147,6 +147,62 @@ def _block_external_notifications(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _block_outbound_network(monkeypatch):
+    """拦截所有非回环出网连接，使测试套件不依赖实时网络。
+
+    为什么需要它：数据源遍布 akshare / 东财 / 同花顺 / 雪球，任何「忘了 mock」
+    都会变成一次真实请求。2026-10-13 开发本仓库时踩过——``fetch_market_day_records``
+    内部自建会话，测试没接上 mock，断言拿到的是东财线上真实值，**而且测试通过**。
+    这类依赖比直接报错更糟：断言可能在验证线上数据而不是被测逻辑，且每次跑的
+    结果都不同。本机可达 / 不可达还会让同一批用例走出不同分支。
+
+    与 ``_block_external_notifications`` 的分工：那个只堵 ``core.notifications`` 的
+    唯一出网点，这个堵所有 socket 出网，因此覆盖到数据源路径。
+
+    拦在 ``connect`` 而不是 ``getaddrinfo``：DNS 解析本身不是数据外泄，而在
+    connect 层拦能覆盖 ``socket.create_connection`` / ``requests`` / ``curl_cffi``
+    等所有上层封装。
+
+    抛 ``OSError`` 而不是 ``AssertionError``（与通知守卫不同）：数据源代码普遍
+    ``except OSError`` / ``except requests.RequestException``，抛 OSError 会像真实
+    网络故障一样被既有 handler 接住，「网络故障路径」的用例因此照常成立；而真正
+    依赖联网才能通过的用例会因异常上抛而失败——这正是要暴露的。
+
+    回环（127.0.0.0/8、::1、localhost）与 AF_UNIX 放行：前者留给本地临时服务，
+    后者是字符串地址形态而非 IP，走的是完全不同的协议栈。
+    """
+    import socket as socket_mod
+
+    blocked: list[object] = []
+
+    loopback_prefixes = ("127.", "::1", "localhost")
+
+    def _is_local(address: object) -> bool:
+        # AF_UNIX 传字符串地址，与 IP 无关，放行
+        if not isinstance(address, tuple) or not address:
+            return True
+        host = str(address[0])
+        return host.startswith(loopback_prefixes)
+
+    def _guard(real):
+        def wrapper(self, address, *args, **kwargs):
+            if _is_local(address):
+                return real(self, address, *args, **kwargs)
+            blocked.append(address)
+            raise OSError(
+                f"测试中禁止外网连接（见 conftest._block_outbound_network）: {address!r}"
+            )
+
+        return wrapper
+
+    real_connect = socket_mod.socket.connect
+    real_connect_ex = socket_mod.socket.connect_ex
+    monkeypatch.setattr(socket_mod.socket, "connect", _guard(real_connect))
+    monkeypatch.setattr(socket_mod.socket, "connect_ex", _guard(real_connect_ex))
+    return blocked
+
+
+@pytest.fixture(autouse=True)
 def _fast_default_source_client(monkeypatch):
     """Keep mock-only tests isolated from production source throttling."""
     import core.source_client as source_client
