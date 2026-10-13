@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 # 取 90%：低于健康水位 4pp 不误报，高于塌陷水位 23pp 不漏报。
 _FUND_FLOW_COVERAGE_FLOOR = 0.90
 
+_FUND_FLOW_NUMERIC_FIELDS = (
+    "main_net_inflow",
+    "main_net_inflow_pct",
+    "super_large_net_inflow",
+    "super_large_net_inflow_pct",
+    "large_net_inflow",
+    "large_net_inflow_pct",
+)
+
 
 def _bare_code(value: object) -> str:
     """归一为裸 6 位代码。
@@ -69,6 +78,45 @@ def _fund_flow_coverage(universe: set[str], df: pd.DataFrame) -> tuple[int, int]
     have = {_bare_code(c) for c in df["code"]} if "code" in df.columns else set()
     covered = len(have & universe)
     return (covered, len(universe) - covered)
+
+
+def _fund_flow_field_validity(df: pd.DataFrame) -> float:
+    """df 中「至少有一个数值字段非空」的行占比。
+
+    覆盖度只回答「有多少只票」，回答不了「这些票带没带数字」。2026-10-13 的
+    线上事故正是这个缺口：akshare 给指标列加了「今日」前缀，loader 的列名映射
+    全部落空，df 只剩 code/name —— 覆盖度 95%（高于水位，守卫一声不吭），
+    而 5307 行全部被「六字段全空则跳过」丢弃，最终写入 0 行，只留一句
+    ``zero rows without explanation``。
+
+    无 code 列时返回 0.0（无可判定对象）；全空 df 也返回 0.0。
+    """
+    if df is None or df.empty or "code" not in df.columns:
+        return 0.0
+    # 源端一个数值列都没给时不能直接索引（KeyError），那正是要报告的形态
+    present = [f for f in _FUND_FLOW_NUMERIC_FIELDS if f in df.columns]
+    if not present:
+        return 0.0
+    usable = df[present].notna().any(axis=1)
+    return float(usable.sum()) / float(len(df))
+
+
+def _fund_flow_contract_break(df: pd.DataFrame) -> str | None:
+    """df 完全没有可写数值时，返回一条说清原因的 error；否则 None。
+
+    这里刻意**不重试也不降级**：源端契约变了（列名/加前缀）是数据源侧的形态变化，
+    换源未必解决，而把原因说清楚才能让下游（loader 的映射表）被修。
+    """
+    if _fund_flow_field_validity(df) > 0.0:
+        return None
+    actual = [str(c) for c in (df.columns if df is not None else [])][:12]
+    if not actual:
+        return "资金流源端返回空表，且未给出任何列名"
+    return (
+        "资金流源端未返回任何可写数值字段（实际列："
+        f"{actual}）。多半是数据源改了列名或加了指标前缀，"
+        "需要更新 quant_hunter 的 _normalize_fund_flow_df 映射表"
+    )
 
 
 def _rebuild_market_day(universe: set[str], trade_date: str) -> pd.DataFrame | None:
@@ -118,6 +166,26 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
                     "total": 0,
                 }
             return {"skipped": True, "reason": "no market fund flow data", "total": 0}
+
+        # 字段有效率先于覆盖度判定：源端契约变了（列名/加前缀）时，覆盖度仍可能
+        # 高达 95%，守卫一声不吭，而下面每行都会被「六字段全空则跳过」丢弃。
+        # 这一层专门拦「有行、但一行都写不进去」的形态，并把源端实际列名带进
+        # 报错——否则运维只能看到一句 zero rows without explanation。
+        contract_break = _fund_flow_contract_break(df)
+        if contract_break:
+            logger.error(f"❌ {contract_break}")
+            return {
+                "status": "failed",
+                "error_kind": "data_quality",
+                "error": contract_break,
+                "saved": 0,
+                "total": len(df),
+                "metadata": {
+                    "source_columns": [str(c) for c in df.columns][:12],
+                    "rows": len(df),
+                    "field_validity_pct": 0.0,
+                },
+            }
 
         # 覆盖度在写库前判定：它描述的是「源端给全了没有」，与写入无关。
         # --symbols 是子集运行，对全市场覆盖率没有意义，跳过（否则每次
@@ -169,12 +237,7 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
                     "simulated": False,
                 }
                 # Skip rows where ALL six numeric fields are NaN/None
-                numeric_fields = [
-                    "main_net_inflow", "main_net_inflow_pct",
-                    "super_large_net_inflow", "super_large_net_inflow_pct",
-                    "large_net_inflow", "large_net_inflow_pct",
-                ]
-                if all(pd.isna(data.get(f)) for f in numeric_fields):
+                if all(pd.isna(data.get(f)) for f in _FUND_FLOW_NUMERIC_FIELDS):
                     logger.debug(f"  跳过全空资金流: {code}")
                     continue
                 batch_records.append(data)
@@ -228,15 +291,6 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 # ===========================================================================
 # 收盘刷新 helper（Task 6）：只抓取/归一化，不写库
 # ===========================================================================
-
-_FUND_FLOW_NUMERIC_FIELDS = (
-    "main_net_inflow",
-    "main_net_inflow_pct",
-    "super_large_net_inflow",
-    "super_large_net_inflow_pct",
-    "large_net_inflow",
-    "large_net_inflow_pct",
-)
 
 
 def fetch_fund_flow_records(loader: DataLoaderInterface, trade_date: str) -> list[dict]:

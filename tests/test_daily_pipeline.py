@@ -832,6 +832,97 @@ class TestUpdateFundFlow:
 _MUST_NOT_REBUILD = object()
 
 
+class TestUpdateFundFlowFieldValidity:
+    """字段有效率守卫：覆盖度只看「有多少只票」，看不出「这些票带没带数字」。
+
+    2026-10-13 线上事故：akshare 1.18.64 给资金流指标列加了「今日」前缀，
+    loader 的列名映射全部落空 → df 只剩 code/name 两列 → 5307 只票覆盖度
+    95.1%（高于 90% 水位，**覆盖度守卫完全没报警**）→ 但六个数值字段全空，
+    全部被既有的「全空则跳过」规则丢弃 → 写入 0 行，只留一句
+    ``zero rows without explanation``。
+    """
+
+    @staticmethod
+    def _universe(n: int) -> set[str]:
+        return {f"{i:06d}" for i in range(n)}
+
+    def _run(self, db, loader, rebuild):
+        with patch("daily_pipeline.logger"), \
+             patch("tasks.market_flow._rebuild_market_day", return_value=rebuild):
+            return daily_pipeline.update_fund_flow(db, loader)
+
+    def test_code_only_frame_is_reported_as_source_contract_break(self):
+        """红证：没有这条守卫时，本例返回 degraded/failed 且信息不明。"""
+        universe = self._universe(1000)
+        codes = sorted(universe)[:950]        # 覆盖度 95% —— 高于水位
+        code_only = pd.DataFrame({"code": codes, "name": ["x"] * len(codes)})
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 0
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = code_only
+
+        r = self._run(db, loader, rebuild=None)
+
+        assert r["status"] == "failed"
+        assert r["error_kind"] == "data_quality"
+        assert "字段" in r["error"] or "列" in r["error"]
+
+    def test_contract_break_names_the_actual_columns(self):
+        """报错必须带上源端实际列名，否则运维无从判断该改哪张映射表。"""
+        universe = self._universe(100)
+        codes = sorted(universe)[:95]
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = pd.DataFrame(
+            {"代码": codes, "名称": ["x"] * len(codes)}
+        )
+        r = self._run(db, loader, rebuild=None)
+        assert "代码" in r["error"] or "名称" in r["error"]
+
+    def test_healthy_frame_is_not_flagged(self):
+        """带完整数字的 95% 覆盖帧必须正常通过（阈值不得定得过紧）。"""
+        universe = self._universe(1000)
+        codes = sorted(universe)[:950]
+        good = pd.DataFrame({
+            "code": codes,
+            "main_net_inflow": [1e8] * len(codes),
+            "main_net_inflow_pct": [0.05] * len(codes),
+            "super_large_net_inflow": [5e7] * len(codes),
+            "super_large_net_inflow_pct": [0.03] * len(codes),
+            "large_net_inflow": [5e7] * len(codes),
+            "large_net_inflow_pct": [0.02] * len(codes),
+        })
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 950
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = good
+        r = self._run(db, loader, rebuild=good)
+        assert r.get("status") != "failed"
+
+    def test_write_still_happens_when_frame_is_fine(self):
+        """健康帧必须真的写库（守卫不得误伤正常路径）。"""
+        universe = self._universe(50)
+        codes = sorted(universe)
+        good = pd.DataFrame({
+            "code": codes, "main_net_inflow": [1e8] * len(codes),
+            "main_net_inflow_pct": [0.05] * len(codes),
+            "super_large_net_inflow": [5e7] * len(codes),
+            "super_large_net_inflow_pct": [0.03] * len(codes),
+            "large_net_inflow": [5e7] * len(codes),
+            "large_net_inflow_pct": [0.02] * len(codes),
+        })
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.return_value = 50
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = good
+        self._run(db, loader, rebuild=good)
+        db.save_fund_flow_batch.assert_called_once()
+
+
 class TestUpdateFundFlowCoverageGuard:
     @staticmethod
     def _universe(n: int) -> set[str]:
