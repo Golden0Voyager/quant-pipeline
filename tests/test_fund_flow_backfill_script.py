@@ -219,11 +219,37 @@ class TestWeekendGuard:
         assert mod._is_weekend(mod.parse_kline("2026-10-11,1,2,3,4,5,6,7,8,9,10")["date"])
 
 
+class TestModuleLevelImports:
+    """模块级不得 import providers。
+
+    红证：还原成模块级 `from providers import SmartMoneyDBProvider` 时本用例变红。
+    门禁的外部 cwd `--help` 探针在两种写法下都绿（桩兄弟仓库恰好补齐了
+    依赖），所以这条不变量得单独钉住 —— 否则「让 --help 白付 akshare 导入
+    成本、且在没有兄弟仓库的环境里直接 rc=1」的写法可以悄悄回来。
+    """
+
+    def test_providers_not_imported_at_module_level(self):
+        mod = _load_script()
+        assert not hasattr(mod, "SmartMoneyDBProvider")
+
+    def test_core_utils_import_is_allowed_at_module_level(self):
+        """core.utils 是 scripts/ 的既有惯例（它只依赖兄弟仓库的一个纯函数）。"""
+        import ast
+
+        tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+        module_level = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("core")
+        ]
+        assert module_level, "core.utils 应留在模块级：secid_for 需要 infer_market"
+
+
 class TestMainDryRun:
     def _run(self, mod, db, extra_args, records_written, want=None):
         provider = MagicMock()
         provider.save_fund_flow_batch.return_value = records_written
-        with patch.object(mod, "SmartMoneyDBProvider", return_value=provider), \
+        with patch("providers.SmartMoneyDBProvider", return_value=provider), \
              patch.object(
                  mod, "find_gaps",
                  return_value={"000001": {want} if want else {"000001": {"2026-09-23"}}},
@@ -273,7 +299,7 @@ class TestMainDryRun:
         mod = _load_script()
         saturday_kline = REAL_KLINE.replace("2026-10-12", "2026-10-10")
         provider = MagicMock()
-        with patch.object(mod, "SmartMoneyDBProvider", return_value=provider), \
+        with patch("providers.SmartMoneyDBProvider", return_value=provider), \
              patch.object(mod, "find_gaps", return_value={"000001": {"2026-10-10"}}), \
              patch.object(mod, "fetch_code_history", return_value=[saturday_kline]), \
              patch.object(

@@ -53,7 +53,6 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from core.utils import infer_market  # noqa: E402
-from providers import SmartMoneyDBProvider  # noqa: E402
 
 DEFAULT_DB_PATH = Path("~/Code/quant_data/quant_core.db").expanduser()
 
@@ -242,6 +241,11 @@ def main() -> int:
         if len(records) > 10:
             logger.info(f"    … 其余 {len(records) - 10} 行省略")
         return 0
+
+    # providers 在**函数内**导入：模块级导入会让 `--help` 白付 akshare +
+    # 兄弟仓库的导入成本，且在没有兄弟仓库的环境里连 `--help` 都跑不起来
+    # （scripts/daemon.py 对 core.* 也是这么处理的）。
+    from providers import SmartMoneyDBProvider
 
     db = SmartMoneyDBProvider(db_path=str(args.db))
     saved = 0
