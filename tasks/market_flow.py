@@ -30,6 +30,43 @@ logger = logging.getLogger(__name__)
 # 任务 4: 批量获取资金流向
 # ===========================================================================
 
+# 覆盖度水位。生产库实测校准（2026-10-13 只读复核）：
+#   健康运行 2026-07-07 ~ 09-18 稳定在 93.8% ~ 94.1%（缺口来自新股/停牌，
+#   是数据源的结构性水位，不会更高）；2026-09-24 起塌到 66.9% ~ 67.0%
+#   （东财榜单端点间歇失败 → 同花顺兜底只覆盖约 5200 只）。
+# 取 90%：低于健康水位 4pp 不误报，高于塌陷水位 23pp 不漏报。
+_FUND_FLOW_COVERAGE_FLOOR = 0.90
+
+
+def _bare_code(value: object) -> str:
+    """归一为裸 6 位代码。
+
+    数据源的 code 列在不同源上形态不一致：东财/同花顺给裸 6 位，
+    而任务测试与部分适配器给 '000001.SZ'。不归一会让交集恒为空，
+    覆盖度守卫就会天天误报塌陷。
+    """
+    text = str(value).strip().split(".")[0]
+    return text.zfill(6) if text.isdigit() else text
+
+
+def _fund_flow_coverage(db: DatabaseInterface, df: pd.DataFrame) -> tuple[int, int, int]:
+    """返回 (universe, covered, missing)。
+
+    universe 是「按定义当天应该有资金流」的集合 —— 用 daily_bars 的代码集，
+    因为它是本地唯一逐票齐全的表。取不到时返回 (0, 0, 0) 表示「无法判定」，
+    调用方据此跳过守卫：守卫自己不能成为新的单点故障。
+    """
+    try:
+        universe = {_bare_code(c) for c in db.get_distinct_codes("daily_bars", "ts_code")}
+    except Exception as e:  # noqa: BLE001 — 守卫失败不得拖垮主任务
+        logger.debug(f"  覆盖度守卫跳过：universe 查询失败 ({e})")
+        return (0, 0, 0)
+    if not universe:
+        return (0, 0, 0)
+    have = {_bare_code(c) for c in df["code"]} if "code" in df.columns else set()
+    covered = len(have & universe)
+    return (len(universe), covered, len(universe) - covered)
+
 
 def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
     """批量获取全市场（或指定股票）资金流向并保存。"""
@@ -54,6 +91,13 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
                     "total": 0,
                 }
             return {"skipped": True, "reason": "no market fund flow data", "total": 0}
+
+        # 覆盖度在写库前判定：它描述的是「源端给全了没有」，与写入无关。
+        # --symbols 是子集运行，对全市场覆盖率没有意义，跳过（否则每次
+        # 子集运行都会误报塌陷）。
+        universe = covered = missing = 0
+        if not symbols:
+            universe, covered, missing = _fund_flow_coverage(db, df)
 
         batch_records = []
         for _, row in df.iterrows():
@@ -95,7 +139,35 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 
         saved = db.save_fund_flow_batch(batch_records) if batch_records else 0
         logger.info(f"✅ 资金流向保存完成: {saved}/{len(df)} 只")
-        return {"saved": saved, "total": len(df)}
+
+        result: dict = {"saved": saved, "total": len(df)}
+        # 覆盖度不足是 data_quality，不是网络故障：已抓到的行照写（丢掉只会把
+        # 洞变得更大），但整轮必须降级上报 —— 否则「数据没更新」会以 success
+        # 的面目进审计，连续多日也无人发现（与 P2-12 的 market_snapshot 同型）。
+        # degraded 而非 failed：failed 在 to_dict 里丢 saved，审计会误读成
+        # 「一行都没写」。
+        if universe and covered / universe < _FUND_FLOW_COVERAGE_FLOOR:
+            pct = covered / universe
+            result.update({
+                "status": "degraded",
+                "error_kind": "data_quality",
+                "error": (
+                    f"资金流覆盖度 {pct:.1%} 低于水位 {_FUND_FLOW_COVERAGE_FLOOR:.0%}："
+                    f"{universe} 只应有，仅 {covered} 只拿到，缺 {missing} 只"
+                    "（源端降级兜底通常只给主力净额，无超大单/大单分解）"
+                ),
+                "metadata": {
+                    "universe_size": universe,
+                    "covered": covered,
+                    "missing": missing,
+                    "coverage_pct": round(pct, 4),
+                },
+            })
+            logger.error(
+                f"❌ 资金流覆盖度塌陷: {covered}/{universe} ({pct:.1%}) "
+                f"< {_FUND_FLOW_COVERAGE_FLOOR:.0%}，缺 {missing} 只"
+            )
+        return result
 
     except Exception as e:
         logger.error(f"❌ 资金流向获取失败: {e}")
