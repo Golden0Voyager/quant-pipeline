@@ -9,6 +9,7 @@ import pandas as pd
 
 from core.calendar import get_expected_latest_trading_day
 from core.data_contract import OPTION_SENTIMENT_CONTRACT, validate_records
+from core.freshness import check_task_freshness
 from core.source_client import get_default_client
 from core.utils import to_float as _to_float
 from interface import DatabaseInterface
@@ -134,6 +135,8 @@ def update_option_sentiment(db: DatabaseInterface) -> dict:
         logger.error("❌ akshare 未安装")
         return {"saved": 0, "error": "akshare not installed"}
 
+    target = get_expected_latest_trading_day()
+
     results: dict[str, Any] = {}
 
     # QVIX
@@ -172,8 +175,29 @@ def update_option_sentiment(db: DatabaseInterface) -> dict:
             logger.info(f"✅ 期权情绪数据保存完成: {saved} 条 / {len(records)} 个交易日")
             results["saved"] = saved
     else:
-        logger.warning("⚠️ 期权情绪数据无数据")
+        # 源端空：说清是哪个子源空的，并按「交易日 / 非交易日」区分裁定。
+        #
+        # 旧实现只返回 {"saved": 0}，既无 status 也无 reason，于是
+        # normalize_task_result 只能判成 ``failed: zero rows without
+        # explanation`` —— 运维看到的是"没有解释"，而不是"期权源今天没数据"。
+        # 该源是**间歇性**空的（2026-10-13 成功 2827 行；10-08 / 10-07 /
+        # 10-14 失败），所以这个区分尤其重要：失败率高不代表代码坏了。
+        detail = f"QVIX {len(qvix_records)} 条 / 50ETF 期权日频 {len(daily_records)} 条"
+        logger.warning(f"⚠️ 期权情绪数据无数据（{detail}）")
         results["saved"] = 0
+        verdict = check_task_freshness(pd.DataFrame(), date_field=None, expected=target)
+        if verdict.is_stale:
+            results.update({
+                "status": "retained",
+                "reason": f"期权情绪源端空数据（{detail}）：{verdict.reason}",
+                "error_kind": "network",
+                "retained_old_data": True,
+            })
+        else:
+            results.update({
+                "status": "skipped",
+                "reason": f"期权情绪源端空数据（{detail}）：{verdict.reason}",
+            })
 
     return dict(results)
 
