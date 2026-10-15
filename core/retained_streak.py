@@ -170,11 +170,24 @@ def _latest_verdict_per_day(
         day = _run_day(finished_at)
         if day is None:
             continue
+        status = str(status)
         # 按 finished_at 升序遍历，后写覆盖先写 ⇒ 留下的即当天最后一次裁定。
-        per_task.setdefault(str(task_name), {})[day] = (
-            str(status),
-            str(error_kind) if error_kind else None,
-        )
+        #
+        # 例外：**当天有过一次 success，就不让后续的 retained 覆盖掉它。**
+        # retained 的语义是「数据没更新」，而当天成功刷过就意味着数据更新了；
+        # 把这样的日子算进连续段会高估退化程度。2026-10-11 实录：
+        # 02:16 success（写 73,277 行）→ 03:53 retained → 04:03 retained，
+        # 「只留最后一次」把一个确实刷过数据的日子判成 retained，于是
+        # 09-25/10-08/10-11/10-12 被连成「连续 4 个运行日 retained」。
+        #
+        # 只认 success，不认 degraded —— degraded 恰恰表示数据不完整。
+        day_verdicts = per_task.setdefault(str(task_name), {})
+        if day_verdicts.get(day, ("", None))[0] == "success":
+            continue
+        if status == "success":
+            day_verdicts[day] = (status, None)
+            continue
+        day_verdicts[day] = (status, str(error_kind) if error_kind else None)
     return per_task
 
 
