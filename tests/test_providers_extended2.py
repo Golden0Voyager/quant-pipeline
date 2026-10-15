@@ -334,6 +334,116 @@ def test_concept_history_same_day_rerun_is_idempotent(provider):
     assert rows == [(None, "concept-run-2")]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PIT 区间关闭：粒度必须是「板块」，不是「整表」（2026-10-11 数据损坏修复）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _member(code: str, ts: str) -> dict:
+    return {
+        "concept_code": code,
+        "concept_name": f"概念{code}",
+        "ts_code": ts,
+        "source": "akshare",
+    }
+
+
+def _open_rows(provider, code: str) -> list[str]:
+    with sqlite3.connect(provider.db_path) as conn:
+        return sorted(
+            r[0]
+            for r in conn.execute(
+                "SELECT ts_code FROM concept_member_history "
+                "WHERE concept_code = ? AND valid_to IS NULL",
+                (code,),
+            ).fetchall()
+        )
+
+
+def test_partial_fetch_does_not_close_untouched_concept_intervals(provider):
+    """红证：只抓到部分板块时，**没抓到的板块**的旧区间必须原样保留。
+
+    旧实现是一条全局 UPDATE（``WHERE valid_to IS NULL AND valid_from < ?``），
+    任何一次运行都会把当时所有 open 区间标成失效。2026-10-11 东财熔断，
+    只完成 18/504 个板块，却照样执行了那条 UPDATE，于是 09-19 的完整快照
+    （71,915 行）被整体作废，"当前有效成员"只剩同批写入的 681 个。
+    """
+    provider.record_ingestion_run(_audit_payload("full-run", "success", 1))
+    assert provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ"), _member("BK0001", "000002.SZ"),
+         _member("BK0002", "600000.SH")],
+        run_id="full-run",
+        valid_from="2026-09-19",
+    ) == 3
+    assert _open_rows(provider, "BK0001") == ["000001.SZ", "000002.SZ"]
+    assert _open_rows(provider, "BK0002") == ["600000.SH"]
+
+    # 下一轮只抓到了 BK0001（BK0002 请求失败）
+    provider.record_ingestion_run(_audit_payload("partial-run", "success", 1))
+    provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ")],
+        run_id="partial-run",
+        valid_from="2026-10-11",
+        complete_concept_codes={"BK0001"},
+    )
+
+    # BK0002 没抓到 → 区间不动
+    assert _open_rows(provider, "BK0002") == ["600000.SH"]
+
+
+def test_complete_concept_closes_members_that_left(provider):
+    """完整抓到的板块，其本轮成分即权威结果：已退出的成员区间要关闭。"""
+    provider.record_ingestion_run(_audit_payload("full-run", "success", 1))
+    provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ"), _member("BK0001", "000002.SZ")],
+        run_id="full-run",
+        valid_from="2026-09-19",
+    )
+
+    provider.record_ingestion_run(_audit_payload("next-run", "success", 1))
+    provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ")],  # 000002 已退出
+        run_id="next-run",
+        valid_from="2026-10-11",
+        complete_concept_codes={"BK0001"},
+    )
+
+    assert _open_rows(provider, "BK0001") == ["000001.SZ"]
+    with sqlite3.connect(provider.db_path) as conn:
+        closed = conn.execute(
+            "SELECT valid_to FROM concept_member_history "
+            "WHERE concept_code = 'BK0001' AND ts_code = '000002.SZ' AND valid_from = '2026-09-19'"
+        ).fetchall()
+    assert closed == [("2026-10-10",)]
+
+
+def test_returned_count_excludes_closed_intervals(provider):
+    """红证：返回值只计新增行数，**不含**被关闭的区间行数。
+
+    旧实现用 ``_commit_delta``（``conn.total_changes`` 差值），把那条关闭
+    UPDATE 影响的行数也算成产出：10-11 那次因此报 saved_rows=73,277 =
+    71,915(关闭) + 681(新增) + 681(快照)，审计数字恰好掩盖了「只抓到 18 个
+    板块」这件事。
+    """
+    provider.record_ingestion_run(_audit_payload("full-run", "success", 1))
+    provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ"), _member("BK0001", "000002.SZ"),
+         _member("BK0002", "600000.SH")],
+        run_id="full-run",
+        valid_from="2026-09-19",
+    )
+
+    provider.record_ingestion_run(_audit_payload("next-run", "success", 1))
+    # 只回 BK0001 且 000002 退出 → 关掉 1 行、新增 1 行，返回值应为 1 而非 2
+    saved = provider.save_concept_member_history_batch(
+        [_member("BK0001", "000001.SZ")],
+        run_id="next-run",
+        valid_from="2026-10-11",
+        complete_concept_codes={"BK0001"},
+    )
+    assert saved == 1
+
+
 def test_concept_history_failed_write_rolls_back_active_interval(provider):
     provider.record_ingestion_run(_audit_payload("concept-old", "success", 1))
     assert provider.save_concept_member_history_batch(
@@ -380,7 +490,7 @@ def test_concept_history_failed_write_rolls_back_active_interval(provider):
         ],
         run_id="concept-new",
         valid_from="2026-07-25",
-    ) == 2
+    ) == 1  # 只计新增行数；旧实现把「关闭 1 行」也算进去返回 2
 
     with sqlite3.connect(provider.db_path) as conn:
         assert conn.execute(

@@ -2131,9 +2131,117 @@ def test_fetch_concept_members_member_fetch_fails():
                 metadata=FetchMetadata(source_name="eastmoney", error="network error"),
             ),
         ]
-        members = concept_board._fetch_concept_members_em()
+        fetched = concept_board._fetch_concept_members_em()
 
-    assert len(members) == 0
+    assert len(fetched.members) == 0
+    assert fetched.complete_codes == frozenset()
+
+
+# ── 概念成分抓取覆盖率守卫（2026-10-11 数据损坏修复）──────────────────
+#
+# 那天东财熔断，只完成 18/504 个板块（3.6%），旧实现照样写库并返回
+# success；保存层当时又是「先把所有 open 区间关闭、再插入本轮抓到的」，
+# 于是 09-19 的完整快照（71,915 行）被整体作废。这两条把「基本没抓到」
+# 变成了一次彻底静默的数据损坏。
+
+
+def _concept_source(boards: list[str], ok: set[str]):
+    """构造一个按板块名返回成分的假源；不在 ok 里的板块一律请求失败。"""
+    def _one(code: str) -> list[str]:
+        return [f"{code}-S{i}" for i in range(10)]
+
+    def _side_effect(source_name, operation, *args, **kwargs):
+        code = args[0] if operation is concept_board._fetch_concept_members_one else None
+        if operation is concept_board._fetch_concept_list_em:
+            return SourceResponse(
+                success=True,
+                data=[{"concept_code": c, "concept_name": c} for c in boards],
+                metadata=FetchMetadata(source_name=source_name),
+            )
+        if code in ok:
+            return SourceResponse(success=True, data=_one(code),
+                                 metadata=FetchMetadata(source_name=source_name))
+        return SourceResponse(success=False, data=None,
+                              metadata=FetchMetadata(source_name=source_name, error="circuit breaker"))
+    return _side_effect
+
+
+def test_partial_concept_fetch_is_degraded_not_success():
+    """红证：只抓到 3.6% 的板块不能报 success。"""
+    db = MagicMock()
+    db.save_concept_member_batch.return_value = 181
+    db.save_concept_member_history_batch.return_value = 181
+    boards = [f"BK{i:04d}" for i in range(1, 505)]
+    ok = set(boards[:18])
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = _concept_source(boards, ok)
+        result = concept_board.update_concept_member(db)
+
+    assert result["status"] == "degraded"
+    assert result["error_kind"] == "data_quality"
+    assert result["member_concepts_covered"] == 18
+    assert result["member_concepts_expected"] == 504
+    assert result["member_concept_coverage"] == round(18 / 504, 4)
+    assert "3.6%" in result["reason"]
+
+
+def test_only_fully_fetched_boards_reach_the_closing_layer():
+    """红证：保存层必须只拿到「完整抓到」的板块集合。
+
+    漏传这一步 = 把全部 504 个板块都交给关闭逻辑，等于退回旧的一刀切。
+    """
+    db = MagicMock()
+    db.save_concept_member_batch.return_value = 60
+    db.save_concept_member_history_batch.return_value = 60
+    # 95/100 = 95% 覆盖，高于 90% 水位，本例只验证「传下去的集合」，
+    # 覆盖不足时的降级由 test_partial_concept_fetch_is_degraded_not_success 负责
+    boards = [f"BK{i:04d}" for i in range(1, 101)]
+    ok = set(boards[:95])
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = _concept_source(boards, ok)
+        result = concept_board.update_concept_member(db)
+
+    assert result["status"] == "success"
+    args = db.save_concept_member_history_batch.call_args
+    assert args.args[3] == frozenset(ok)
+
+
+def test_empty_member_list_does_not_count_as_complete():
+    """源成功但成分为空 ≠ 该板块没有成分，不能算完整（否则会关掉它全部成员）。"""
+    def _side_effect(source_name, operation, *args, **kwargs):
+        if operation is concept_board._fetch_concept_list_em:
+            return SourceResponse(
+                success=True,
+                data=[{"concept_code": "BK0001", "concept_name": "空板块"}],
+                metadata=FetchMetadata(source_name=source_name),
+            )
+        return SourceResponse(success=True, data=[],
+                              metadata=FetchMetadata(source_name=source_name))
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = _side_effect
+        fetched = concept_board._fetch_concept_members_em()
+
+    assert fetched.members == []
+    assert fetched.complete_codes == frozenset()
+    assert fetched.expected == 1
+
+
+def test_full_coverage_stays_success():
+    """全部抓到的正常情况不受守卫影响。"""
+    db = MagicMock()
+    db.save_concept_member_batch.return_value = 500
+    db.save_concept_member_history_batch.return_value = 500
+    boards = [f"BK{i:04d}" for i in range(1, 101)]
+
+    with patch.object(concept_board, "get_default_client") as mock_client:
+        mock_client.return_value.call.side_effect = _concept_source(boards, set(boards))
+        result = concept_board.update_concept_member(db)
+
+    assert result["status"] == "success"
+    assert result["member_concept_coverage"] == 1.0
 
 
 def test_fetch_concept_members_empty_member_list():
@@ -2183,8 +2291,10 @@ def test_fetch_concept_members_empty_code_skip():
                 metadata=FetchMetadata(source_name="eastmoney"),
             ),
         ]
-        members = concept_board._fetch_concept_members_em()
-    assert len(members) == 1
+        fetched = concept_board._fetch_concept_members_em()
+    assert len(fetched.members) == 1
+    assert fetched.complete_codes == frozenset({"BK3001"})
+    assert fetched.expected == 1
 
 
 def test_fetch_em_spot_none_fields():

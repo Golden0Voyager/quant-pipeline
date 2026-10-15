@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Collection
 from typing import Any, Protocol
 
 import pandas as pd
@@ -468,18 +469,25 @@ class DatabaseInterface(Protocol):
         records: list[dict[str, Any]],
         run_id: str,
         valid_from: str,
+        complete_concept_codes: Collection[str] | None = None,
     ) -> int:
         """批量保存概念板块成分股 PIT 历史快照。
 
-        自动关闭之前活跃记录（设 valid_to = valid_from - 1 天），
-        然后插入新记录。
+        只关闭 ``complete_concept_codes`` 里板块的旧区间（设 valid_to =
+        valid_from - 1 天）—— 完整抓到的板块，其本轮成分即权威结果，不在
+        表里的 open 行视为已退出；未抓到的板块原样保留，这样一次部分抓取
+        不会作废上一轮完整快照。
+
+        返回值只计新增/更新行数，关闭区间是维护动作不计入。
 
         Args:
             records: [concept_code, concept_name, ts_code, source] 字典列表
             run_id: 当前运行 ID (snapshot_run_id)
             valid_from: 快照日期 (YYYY-MM-DD)
+            complete_concept_codes: 本轮**完整**抓到的 concept_code 集合；
+                None 表示按 records 里出现过的板块全部视为完整
         Returns:
-            实际写入条数
+            实际写入条数（不含关闭的区间行数）
         """
         ...
 
