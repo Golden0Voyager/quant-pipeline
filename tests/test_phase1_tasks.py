@@ -443,6 +443,70 @@ class TestOptionSentiment:
         assert result["qvix"] == 0
         assert result["daily"] == 0
 
+    # ── 源端空数据必须说清原因，而不是 "zero rows without explanation" ──
+    #
+    # 红证：还原成只返回 {"saved": 0} 后本组用例变红。2026-10-14 实测：
+    # 该源是**间歇性**空（10-13 成功 2827 行、10-08/10-07/10-14 失败），
+    # 但失败时只留一句 zero rows without explanation，运维无从判断是
+    # 源挂了还是自己坏了。与 update_fund_flow 同一模式：源空 → retained
+    # 并保留旧数据（非交易日 → skipped），绝不静默写 0 行。
+
+    def _empty_sources(self, db=None):
+        ak = MagicMock()
+        ak.index_option_50etf_qvix.return_value = pd.DataFrame()
+        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame()
+        db = db or MagicMock()
+        return ak, db
+
+    def test_empty_source_on_trading_day_is_retained(self):
+        """交易日源空 → retained：保留旧数据，不写入，不算数据质量失败。"""
+        ak, db = self._empty_sources()
+        with patch.object(option_sentiment, "ak", ak), \
+             patch.object(option_sentiment, "get_expected_latest_trading_day",
+                          return_value="2026-10-14"), \
+             patch("core.freshness.is_trading_day", return_value=True):
+            result = option_sentiment.update_option_sentiment(db)
+        assert result["status"] == "retained"
+        assert result["error_kind"] == "network"
+        assert result["retained_old_data"] is True
+        assert result["saved"] == 0
+        db.save_option_sentiment_batch.assert_not_called()
+
+    def test_empty_source_reason_names_each_source(self):
+        """原因要能定位到是哪个子源空，否则等于没说。"""
+        ak, db = self._empty_sources()
+        with patch.object(option_sentiment, "ak", ak), \
+             patch.object(option_sentiment, "get_expected_latest_trading_day",
+                          return_value="2026-10-14"), \
+             patch("core.freshness.is_trading_day", return_value=True):
+            result = option_sentiment.update_option_sentiment(db)
+        assert "QVIX" in result["reason"]
+        assert "50ETF" in result["reason"]
+
+    def test_empty_source_off_trading_day_is_skipped(self):
+        """非交易日源空是正常的 → skipped，不该报失败。"""
+        ak, db = self._empty_sources()
+        with patch.object(option_sentiment, "ak", ak), \
+             patch.object(option_sentiment, "get_expected_latest_trading_day",
+                          return_value="2026-10-14"), \
+             patch("core.freshness.is_trading_day", return_value=False):
+            result = option_sentiment.update_option_sentiment(db)
+        assert result["status"] == "skipped"
+        db.save_option_sentiment_batch.assert_not_called()
+
+    def test_partial_source_failure_is_reported(self):
+        """只有一个子源拿到数据也要如实反映，别把 qvix/daily 计数抹掉。"""
+        ak = MagicMock()
+        ak.index_option_50etf_qvix.return_value = _qvix_df()
+        ak.stock_option_sse_50etf_daily.return_value = pd.DataFrame()
+        db = MagicMock()
+        db.save_option_sentiment_batch.return_value = 1
+        with patch.object(option_sentiment, "ak", ak):
+            result = option_sentiment.update_option_sentiment(db)
+        assert result["saved"] == 1
+        assert result["qvix"] == 1
+        assert result["daily"] == 0
+
     def test_fetch_qvix_empty(self):
         ak = MagicMock()
         ak.index_option_50etf_qvix.return_value = pd.DataFrame()
