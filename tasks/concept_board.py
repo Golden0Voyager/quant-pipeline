@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 from core.data_contract import CONCEPT_BOARD_CONTRACT, validate_records
 from core.market_time import shanghai_today
@@ -217,7 +217,36 @@ def _fetch_concept_members_one(code: str) -> list[str]:
     return []
 
 
-def _fetch_concept_members_em() -> list[dict]:
+# 概念成分「完整抓到」的板块数 / 板块总数 的下限。
+#
+# 水位取 90%，与 tasks/market_flow.py 的 fund_flow 覆盖度水位同源（都是
+# 「源端部分可用时必须降级上报、不得静默 success」）。板块级请求是逐个概念
+# 发的，东财熔断会在任意位置截断整轮 —— 2026-10-11 实测只完成 18/504
+# (3.6%)，远低于任何合理下限，故 90% 不会误报；同时高到足以在任何一次
+# 熔断/限流发生时立刻把「基本没抓到」暴露成 degraded。
+_MEMBER_CONCEPT_COVERAGE_FLOOR = 0.90
+
+
+class ConceptMemberFetch(NamedTuple):
+    """概念成分抓取结果，**完整性必须跟着数据一起返回**。
+
+    只有 ``complete_codes`` 里的板块才算「完整抓到」，只有它们才允许关闭
+    自己在 ``concept_member_history`` 里的旧成员区间。
+
+    为什么必须区分：2026-10-11 东财熔断，只抓到 18/504 个板块、681 个
+    成员，但那次运行仍返回 success，而保存层当时是「先把所有 open 行关闭、
+    再插入本轮抓到的」—— 于是 09-19 的完整快照（71,915 行）被整体标成
+    失效，当前有效成员只剩 681 个，与真实值（约 7.2 万）差两个数量级。
+
+    ``expected`` 是概念列表里有效板块的总数，用作覆盖率分母。
+    """
+
+    members: list[dict]
+    complete_codes: frozenset[str]
+    expected: int
+
+
+def _fetch_concept_members_em() -> ConceptMemberFetch:
     """从东方财富获取所有概念板块的成分股映射。
 
     通过 ``SourceClient`` + curl_cffi 浏览器掩护直调 push2 / push2delay
@@ -229,6 +258,9 @@ def _fetch_concept_members_em() -> list[dict]:
     数据，见 PR #103 规范），避免把网络故障误报为 ``no_data`` 而静默
     丢失整月数据。
     只有列表成功返回但确实无板块时才返回空列表。
+
+    单个板块抓取失败 / 返回空成分都不算完整（不进 ``complete_codes``），
+    以免保存层把「没抓到」当成「该板块没有成分」而关闭旧区间。
     """
     client = get_default_client()
     resp = client.call("eastmoney", _fetch_concept_list_em)
@@ -238,27 +270,35 @@ def _fetch_concept_members_em() -> list[dict]:
         raise RuntimeError(error)
     items = resp.data
 
+    boards = [
+        (str(item.get("concept_code", "")), str(item.get("concept_name", "")))
+        for item in items
+        if item.get("concept_code") and item.get("concept_name")
+    ]
+
     members: list[dict] = []
-    for item in items:
-        code = item.get("concept_code", "")
-        name = item.get("concept_name", "")
-        if not code or not name:
-            continue
+    complete_codes: set[str] = set()
+    for code, name in boards:
         try:
             resp = client.call("eastmoney", _fetch_concept_members_one, code)
             if not resp.success:
                 logger.warning(f"⚠️ 概念 {name}({code}) 成分股获取失败: {resp.metadata.error}")
                 continue
-            for ts_code in resp.data:
-                if ts_code:
-                    members.append({
-                        "concept_code": code,
-                        "concept_name": name,
-                        "ts_code": ts_code,
-                    })
+            codes = [ts for ts in (resp.data or []) if ts]
+            if not codes:
+                # 源成功但没给出成分 ≠ 该板块确实没有成分，按未完整处理。
+                logger.warning(f"⚠️ 概念 {name}({code}) 成分股返回空，不视作完整抓取")
+                continue
+            for ts_code in codes:
+                members.append({
+                    "concept_code": code,
+                    "concept_name": name,
+                    "ts_code": ts_code,
+                })
+            complete_codes.add(code)
         except Exception as e:
             logger.warning(f"⚠️ 概念 {name}({code}) 成分股获取失败: {e}")
-    return members
+    return ConceptMemberFetch(members, frozenset(complete_codes), len(boards))
 
 
 # ===========================================================================
@@ -352,7 +392,7 @@ def update_concept_member(
     valid_from = shanghai_today()
 
     try:
-        members = _fetch_concept_members_em()
+        fetched = _fetch_concept_members_em()
     except Exception as e:
         logger.warning(f"⚠️ 概念板块成分股获取失败: {e}")
         return {
@@ -366,6 +406,7 @@ def update_concept_member(
             "saved": 0,
         }
 
+    members = fetched.members
     if not members:
         # 仅当源成功响应但确无数据时才视为 no_data（不告警）
         logger.warning("⚠️ 概念板块成分股无数据")
@@ -379,12 +420,16 @@ def update_concept_member(
     try:
         # legacy snapshot table
         saved_member = db.save_concept_member_batch(members)
-        # PIT history table
-        pit_saved = db.save_concept_member_history_batch(members, run_id, valid_from)
-        unique_codes = {m["concept_code"] for m in members}
+        # PIT history table —— 只把「完整抓到」的板块交给保存层去关闭旧区间
+        pit_saved = db.save_concept_member_history_batch(
+            members, run_id, valid_from, fetched.complete_codes
+        )
+        expected = fetched.expected
+        covered = len(fetched.complete_codes)
+        coverage = (covered / expected) if expected else 1.0
         logger.info(
             f"✅ 概念板块成分股: 快照 {saved_member} 条 / "
-            f"PIT {pit_saved} 条 / {len(unique_codes)} 个板块"
+            f"PIT {pit_saved} 条 / 完整 {covered}/{expected} 个板块 ({coverage:.1%})"
         )
     except Exception as e:
         logger.warning(f"⚠️ 概念板块成分股保存失败: {e}")
@@ -399,7 +444,27 @@ def update_concept_member(
     results["member_saved"] = saved_member
     results["pit_saved"] = pit_saved
     results["saved"] = saved_member + pit_saved
-    results["status"] = "success" if (saved_member + pit_saved) > 0 else "no_data"
+    results["member_concepts_covered"] = covered
+    results["member_concepts_expected"] = expected
+    results["member_concept_coverage"] = round(coverage, 4)
+
+    if saved_member + pit_saved == 0:
+        results["status"] = "no_data"
+    elif expected and coverage < _MEMBER_CONCEPT_COVERAGE_FLOOR:
+        # 覆盖率不足不能报 success：2026-10-11 东财熔断，只抓到 18/504 个板块，
+        # 旧实现照样写库并返回 success，``ingestion_runs`` 记下 saved_rows=73277，
+        # 于是「基本没抓到」这件事在审计里完全看不见，还顺手作废了上一轮 PIT 快照。
+        # 数据仍写入（保存层已按板块隔离，部分写入不再有破坏性），但状态降级。
+        results["status"] = "degraded"
+        results["error_kind"] = "data_quality"
+        results["reason"] = (
+            f"only {covered}/{expected} concept boards fetched completely "
+            f"({coverage:.1%} < {_MEMBER_CONCEPT_COVERAGE_FLOOR:.0%}); "
+            f"PIT intervals closed for the fetched boards only"
+        )
+        logger.warning(f"⚠️ {results['reason']}")
+    else:
+        results["status"] = "success"
 
     return dict(results)
 

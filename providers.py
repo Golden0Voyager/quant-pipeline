@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -2009,26 +2010,46 @@ class SmartMoneyDBProvider:
         records: list[dict[str, Any]],
         run_id: str,
         valid_from: str,
+        complete_concept_codes: Collection[str] | None = None,
     ) -> int:
-        """批量保存概念板块成分股 PIT 历史快照。"""
+        """批量保存概念板块成分股 PIT 历史快照。
+
+        ``complete_concept_codes`` 列出**完整抓到**的板块，只有这些板块的
+        旧区间会被关闭；没抓到的板块原样保留。
+
+        旧的全局一刀切（``WHERE valid_to IS NULL AND valid_from < ?``）
+        会让一次部分抓取作废上一轮完整快照：2026-10-11 东财熔断，只抓到
+        18/504 个板块，仍执行了关闭，于是 09-19 的 71,915 行被整体标成
+        失效（valid_to=2026-10-10），当前有效成员只剩 681 个。按板块关闭
+        后，部分运行只影响它确实完整抓到的那���板块。
+
+        关闭是**维护动作而非产出**，故返回值只计新增/更新行数。旧实现用
+        ``_commit_delta`` 把关闭行数也算进去：10-11 那次因此报出
+        ``saved_rows=73,277``（71,915 关闭 + 681 新增 + 681 快照），审计
+        数字恰好掩盖了「其实只抓到 18 个板块」这件事。
+        """
         if not records:
             return 0
         try:
             valid_to = _prev_date(valid_from)
+            if complete_concept_codes is None:
+                # 缺省按「本轮有数据的板块都算完整」，保持旧调用方可用；
+                # 已知不完整的调用方必须显式传入真实集合。
+                complete_codes = {
+                    str(r.get("concept_code")) for r in records if r.get("concept_code")
+                }
+            else:
+                complete_codes = {str(c) for c in complete_concept_codes if c}
             with self._write_lock:
                 conn = self._get_write_conn()
-                before_changes = conn.total_changes
                 try:
-                    # close previous active records, but NOT same-day snapshots
-                    # (they get upserted below; closing them would corrupt the interval)
-                    conn.execute(
-                        "UPDATE concept_member_history SET valid_to = ? "
-                        "WHERE valid_to IS NULL AND valid_from < ?",
-                        (valid_to, valid_from),
+                    self._close_concept_member_intervals(
+                        conn, complete_codes, valid_to, valid_from
                     )
-                    # insert new snapshot (upsert on PK, idempotent for same-day reruns)
+                    # 关闭不计入产出，从这里开始才统计新增行数。
+                    after_close = conn.total_changes
                     self._executemany_dedup(
-                    conn,
+                        conn,
                         """INSERT INTO concept_member_history
                            (concept_code, concept_name, ts_code, valid_from, valid_to, source, snapshot_run_id)
                            VALUES (?, ?, ?, ?, NULL, ?, ?)
@@ -2042,7 +2063,8 @@ class SmartMoneyDBProvider:
                             for r in records
                         ],
                     )
-                    return self._commit_delta(conn, before_changes)
+                    conn.commit()
+                    return conn.total_changes - after_close
                 except Exception:
                     conn.rollback()
                     raise
@@ -2050,6 +2072,29 @@ class SmartMoneyDBProvider:
             logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 概念板块成分股 PIT 历史保存失败: {e}")
             return 0
+
+    @staticmethod
+    def _close_concept_member_intervals(
+        conn: sqlite3.Connection,
+        complete_codes: set[str],
+        valid_to: str,
+        valid_from: str,
+    ) -> None:
+        """关闭「本轮完整抓到」的板块当前所有 open 区间。
+
+        完整抓到的板块，其本轮成分表即当前成员关系的权威结果：先关掉它现在
+        全部 open 区间，再由调用方插入本轮成分，于是每个当前成员恰好只有一
+        条 open 区间——留在板块里的续开新区间，退出的那条被标失效。
+
+        未抓到的板块完全不碰，这是本次修复的核心：旧实现是一条不带板块条件
+        的全局 UPDATE，任何一次部分运行都会把所有板块的当前区间一并作废。
+        """
+        for code in sorted(complete_codes):
+            conn.execute(
+                "UPDATE concept_member_history SET valid_to = ? "
+                "WHERE concept_code = ? AND valid_to IS NULL AND valid_from < ?",
+                (valid_to, code, valid_from),
+            )
 
     def save_index_member_history_batch(
         self,
