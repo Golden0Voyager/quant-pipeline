@@ -257,6 +257,20 @@ if _REPO_ROOT not in sys.path:
   「真实 0」与「缺失被填成 0」——`fund_flow` 那个能识别靠的是语义恒等式，不是统计特征。改默认值会
   把融券 0、平价折价变成 NULL，反而引入新错误。该函数在 quant_hunter 且被全表通用，要改须单独评估。
 
+### 11. PIT 区间的关闭必须按板块，且 `saved` 只计新增
+
+`providers.py::save_concept_member_history_batch` 的两个不变量，违反任一条都会**静默销毁** `concept_member_history`：
+
+1. **只有「本轮完整抓到」的板块才允许关闭自己的 open 区间。** 完整抓到的板块，其成分表即当前成员关系的权威结果（先关掉它全部 open 区间、再插入本轮成分，于是每个当前成员恰好一条 open 区间）；**未抓到的板块必须原样不动**。旧实现是一条不带板块条件的全局 UPDATE，任何一次部分运行都会把所有板块的当前区间一并作废。空成分列表同样算不完整——源没给出成分，不能当作「该板块没有成分」。
+2. **返回值只计新增行数**，关闭区间是维护动作不是产出。旧实现用 `_commit_delta`（`conn.total_changes` 差值）把关闭行数也算进去，于是**审计数字与损坏量同向**。
+
+事故实录（2026-10-11 `update_concept_member`）：东财熔断只完成 **18/504** 个板块（3.6%），仍返回 `success`。全局关闭把 09-19 的完整快照 **71,915 行**整体标成 `valid_to=2026-10-10`，"当前有效成员"只剩同批写入的 **681 行**，与真实值差两个数量级。而 `saved_rows=73,277` 里 **71,915 正是这次关闭**——`73,277 = 71,915(关闭) + 681(PIT新增) + 681(快照)`，数字几乎等于损坏量，正是它让这次运行看起来成功。
+
+- 关闭按板块后**部分写入已无害**，故覆盖率不足**不抑制写入**；但低于 `_MEMBER_CONCEPT_COVERAGE_FLOOR`（0.90，与 fund_flow 同源）必须返回 `degraded/data_quality` 并在 result 里记 `covered/expected/coverage`。`tasks/concept_board.py` 的水位注释记着 3.6% 这个实测值。
+- 配套：调用方必须把**真实**的完整板块集合传下去（`ConceptMemberFetch.complete_codes`），漏传就等于退回全局一刀切。
+- 门禁：`tests/test_providers_extended2.py::test_partial_fetch_does_not_close_untouched_concept_intervals`（还原全局关闭即红）、`::test_returned_count_excludes_closed_intervals`、`tests/test_new_tasks.py::test_partial_concept_fetch_is_degraded_not_success`。
+- 注意 `concept_member`（legacy 快照表）**只增不减**：修复后仍有 **3,655** 个已退出板块的成员从未删除，且从不缺行。清理它是独立决定，不要顺手做。
+
 ### 10. 东财 secid 必须校验源站回显的 `code`
 - `core/fund_flow_source.py::fetch_day_klines` 只接受 `data.code` 与请求代码一致的响应；**回显缺失
   同样拒绝**（宁可响亮地取不到，也不要静默写入错证券的数据）。
