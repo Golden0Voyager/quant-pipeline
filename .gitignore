@@ -25,6 +25,9 @@ MagicMock*
 .mimocode/
 .superpowers/
 .worktrees/
+# 本地 agent 记忆（每日工作日志 + MEMORY.md）：按机器/会话生成，含本机绝对路径，
+# 不是项目知识 —— 项目级约定沉淀到 AGENTS.md，不要提交这里的内容
+.workbuddy-ai/
 
 # Environment config (may contain secrets)
 # .env.* 覆盖 .env.local/.env.production 等变体，防凭证被提交；
