@@ -271,6 +271,22 @@ if _REPO_ROOT not in sys.path:
 - 门禁：`tests/test_providers_extended2.py::test_partial_fetch_does_not_close_untouched_concept_intervals`（还原全局关闭即红）、`::test_returned_count_excludes_closed_intervals`、`tests/test_new_tasks.py::test_partial_concept_fetch_is_degraded_not_success`。
 - 注意 `concept_member`（legacy 快照表）**只增不减**：修复后仍有 **3,655** 个已退出板块的成员从未删除，且从不缺行。清理它是独立决定，不要顺手做。
 
+### 12. `daily_bars.volume` 全链路统一为「股」——且**不能按 `data_source` 判定**
+
+单位是**接口的固有属性**，在抓取边界归一（那里才知道），落库后一律是「股」。登记名单是 `quant_hunter.data_loader.VOLUME_IN_LOTS_SOURCES`（当前：`tencent`、`eastmoney_spot`）。
+
+**两处会让「按 data_source 判定」翻车的事故：**
+
+1. **上游会改单位。** `ak.stock_zh_a_hist` 在 **2026-06-04** 从「手」改成「股」，同一天内换掉：000002 在 06-03 是 `volume=901,298`（比值 100.4），06-04 变 `181,654,444`（比值 1.0），**跳 201 倍**，而两行的 `data_source` 都是 `akshare`。2026-05 及以前的 akshare 行仍是手。**照旧文档把 akshare 写成「手」会把 340 万行正常数据乘 100。**
+2. **比值 ≈100 有两种相反含义。** (a) volume 是手 + amount 是真实成交额 → 要乘 100；(b) volume 是股 + amount 是合成的 `close×volume×100` → **乘了就毁**。腾讯 6 行全是 (b)（比值**恰好** 100.00），akshare/sina 各约 200 万行是 (a)（比值在 100 上下**散布**）。判别靠「是否精确等于 100.00」。
+
+**唯一无假设的判据**：`amount / volume` 必须等于均价 ≈ `close`。手单位 ≈100×，股单位 ≈1×。回填脚本 `scripts/backfill_bars_volume_unit.py` 逐行用它判定。
+
+- 判定带（比值 10~50）**不要动**：那些是 1993–2014 的老数据，比值完全由深度前复权因子解释（000001 的 1993 年 qfq 收盘价 0.66，真实价约 27.4，比值 41.5），它们本来就是股。
+- 生产库实测：换算 **2,722,684** 行；换算后全库「仍是手」归 0。断层序列 000002 在 2026-06-02~06-05 从 `901,298 / 181,654,444` 的 201 倍跳变变成连续的 2.57 亿 / 0.90 亿 / 1.82 亿 / 1.64 亿。
+- `amount` 各源本来一致（元），**只有 volume 混**。
+- 门禁：两个仓库各有 `tests/test_volume_unit.py`，钉住换算名单与「未知来源不猜单位」。
+
 ### 10. 东财 secid 必须校验源站回显的 `code`
 - `core/fund_flow_source.py::fetch_day_klines` 只接受 `data.code` 与请求代码一致的响应；**回显缺失
   同样拒绝**（宁可响亮地取不到，也不要静默写入错证券的数据）。
