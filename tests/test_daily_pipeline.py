@@ -945,6 +945,11 @@ class TestUpdateFundFlowCoverageGuard:
 
         ``rebuild`` 默认禁止重建（真联网会被 AssertionError 立刻抓住）；
         传 None 表示重建返回 None（取不到数据）；传 DataFrame 表示重建成功。
+
+        这里的 DataFrame 必须是 ``_rebuild_market_day`` 的**契约形状**（``code``
+        列，下游写库循环与覆盖度守卫都按它读）。真实实现是否真的产出这个形状
+        由 ``TestRebuildRecordShapeMatchesWriter`` 钉住 —— 它只 mock 更上游的
+        ``fetch_market_day_records``，因此不会被这里的 mock 掩盖。
         """
         target = (
             patch("tasks.market_flow._rebuild_market_day", side_effect=AssertionError("不该重建"))
@@ -1132,6 +1137,82 @@ class TestUpdateFundFlowCoverageGuard:
         r, rebuild = self._run(db, loader)
         rebuild.assert_not_called()
         assert "status" not in r
+
+
+class TestRebuildRecordShapeMatchesWriter:
+    """重建层的返回形状必须能被写库循环消费（2026-10-17 复核发现的既有缺陷）。
+
+    ``_rebuild_market_day`` 直接用 ``fetch_market_day_records`` 的 records 建
+    DataFrame，键是 ``symbol``；而写库循环读 ``row.get("code")``、覆盖度守卫读
+    ``df["code"]``。两者不一致时：重建「成功」→ 覆盖度被重算成 0.0% →
+    ``save_fund_flow_batch`` **一次都没被调用** → 任务报一个误导性的 degraded
+    「东财逐票重建后仍不足」。生产上这意味着兜底从来没真正落过库。
+
+    这里刻意**不 mock ``_rebuild_market_day`` 本身**，只 mock 它的上游
+    ``fetch_market_day_records`` —— 否则又会绕开「形状不一致」这一层。
+    还原旧实现（不把 ``symbol`` 归一成 ``code``）会让本类两个用例变红。
+    """
+
+    _CODES = [f"{i:06d}" for i in range(100)]
+
+    @staticmethod
+    def _records(codes: list[str]) -> list[dict]:
+        return [
+            {
+                "symbol": code,
+                "date": "2026-10-16",
+                "main_net_inflow": 1e8,
+                "main_net_inflow_pct": 0.05,
+                "super_large_net_inflow": 5e7,
+                "super_large_net_inflow_pct": 0.03,
+                "large_net_inflow": 5e7,
+                "large_net_inflow_pct": 0.02,
+            }
+            for code in codes
+        ]
+
+    def _run(self, rebuilt_codes: list[str]):
+        universe = set(self._CODES)
+        db = MagicMock()
+        db.get_distinct_codes.return_value = universe
+        db.save_fund_flow_batch.side_effect = lambda rows: len(rows)
+        loader = MagicMock()
+        # 聚合源只给 50% —— 低于 90% 水位，必然触发重建
+        half = sorted(universe)[:50]
+        loader.get_market_fund_flow.return_value = pd.DataFrame({
+            "code": half,
+            **{
+                field: [1.0] * len(half)
+                for field in (
+                    "main_net_inflow",
+                    "main_net_inflow_pct",
+                    "super_large_net_inflow",
+                    "super_large_net_inflow_pct",
+                    "large_net_inflow",
+                    "large_net_inflow_pct",
+                )
+            },
+        })
+        with patch("daily_pipeline.logger"), patch(
+            "core.fund_flow_source.fetch_market_day_records",
+            return_value=(self._records(rebuilt_codes), []),
+        ):
+            result = daily_pipeline.update_fund_flow(db, loader)
+        return result, db
+
+    def test_rebuilt_rows_reach_the_writer(self):
+        result, db = self._run(self._CODES)
+        db.save_fund_flow_batch.assert_called_once()
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert len(written) == len(self._CODES)
+        assert {row["symbol"] for row in written} == set(self._CODES)
+        assert result["saved"] == len(self._CODES)
+
+    def test_rebuilt_rows_clear_the_coverage_alert(self):
+        """重建拿到全量时不得再报 degraded —— 覆盖度是按 ``code`` 列算的。"""
+        result, _ = self._run(self._CODES)
+        assert result.get("status") != "degraded"
+        assert result["total"] == len(self._CODES)
 
 
 # ===========================================================================
