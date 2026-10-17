@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_SOURCE = "eastmoney_spot"
 
+# 东财 spot 接口的「成交量」以**手**返回（1 手 = 100 股），而新浪
+# stock_zh_a_daily / 雪球 kline 返回的是**股**。两者曾直接写进
+# daily_bars.volume 同一列，导致来源切换处出现 100 倍断层（实测
+# 2026-10-13：同��只票 sina=105,863,456 → eastmoney_spot=994,937，
+# 而真实成交量三天稳定在 ~10 万手）。此处统一换算为「股」，与
+# quant_hunter.data_loader.normalize_volume_to_shares 口径一致。
+_LOT_SIZE = 100
+
 # spot_em 中文列 → daily_bars 列
 _COLUMN_MAP = {
     "今开": "open",
@@ -96,6 +104,8 @@ def snapshot_to_bar_records(
         }
         for src_col, dst_col in _COLUMN_MAP.items():
             record[dst_col] = _to_float(row.get(src_col))
+        if record["volume"] is not None:
+            record["volume"] *= _LOT_SIZE      # 手 → 股
         records[code] = record
     return records, suspended
 
