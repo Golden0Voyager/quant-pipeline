@@ -127,6 +127,13 @@ def _rebuild_market_day(universe: set[str], trade_date: str) -> pd.DataFrame | N
 
     返回 None 表示重建不出可用数据 —— 调用方据此不写任何东西，而不是退回
     写口径不一致的兜底数据。
+
+    **列名必须归一成 ``code``**：源层 records 的键是 ``symbol``（东财的语义），
+    而下游写库循环读 ``row.get("code")``、覆盖度守卫读 ``df["code"]``。不归一
+    就是「重建成功但一行都写不进去」—— 2026-10-17 复核发现该缺陷：重建 100
+    只 → ``save_fund_flow_batch`` 一次都没被调用 → 报 degraded「逐票重建后仍
+    不足」。归一放在消费侧，源层契约（``symbol``）由
+    ``tests/test_fund_flow_source.py`` 钉住，不改。
     """
     from core.fund_flow_source import fetch_market_day_records
 
@@ -138,9 +145,10 @@ def _rebuild_market_day(universe: set[str], trade_date: str) -> pd.DataFrame | N
     if not records:
         logger.warning(f"⚠️ 东财逐票重建未取到任何 {trade_date} 数据（{len(missing)} 只全部失败）")
         return None
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(records).rename(columns={"symbol": "code"})
     logger.info(f"✅ 东财逐票重建 {trade_date}: {len(df)} 只（未取到 {len(missing)} 只）")
     return df
+
 
 
 def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols: list[str] | None = None) -> dict:
