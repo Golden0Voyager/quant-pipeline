@@ -236,6 +236,17 @@ if _REPO_ROOT not in sys.path:
 - 覆盖不足时会先触发 `core/fund_flow_source.fetch_market_day_records` 逐票重建（见规则 9），
   重建后覆盖度通常回到 ~100%，告警随之停止；重建只拿到部分 → 仍 degraded；重建完全失败 →
   `retained` 且**一行不写**。
+- **聚合源返回空表时同样走重建**（2026-10-17）：`clist` 全封时 `get_market_fund_flow()` 返回空
+  DataFrame，旧实现在这里 `return retained` 早退，于是兜底代码**一次都执行不到** —— 生产上
+  10-14~10-16 三天 `fund_flow` 全空正是这个形态，而不是「重建失败」。现在空表与「覆盖不足」
+  走同一条决策，兜底也拿不到数才用 retained/skipped；`--symbols` 子集运行用请求的代码当
+  universe（覆盖度守卫仍只对全市场生效），因此聚合源被封时手动补单只也能用。
+  红证：`tests/test_daily_pipeline.py::TestEmptySourceFallsBackToRebuild`。
+- **`_rebuild_market_day` 的返回列必须是 `code`**：源层 records 的键是 `symbol`（东财语义，
+  由 `tests/test_fund_flow_source.py` 钉住），而写库循环读 `row.get("code")`、覆盖度守卫读
+  `df["code"]`。不归一就是「重建成功但一行都写不进去」并报一个误导性的 degraded
+  「逐票重建后仍不足」（2026-10-17 复核：该路径从未真正落过库）。归一放在消费侧。
+  红证：`tests/test_daily_pipeline.py::TestRebuildRecordShapeMatchesWriter`。
 
 ### 9. 同花顺「即时」不得进 `fund_flow`（它无法被安全使用）
 - `SmartMoneyLoaderProvider.get_market_fund_flow()` **刻意没有同花顺兜底**，`_ths_fund_flow_fallback`
