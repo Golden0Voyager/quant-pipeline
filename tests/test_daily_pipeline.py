@@ -1139,6 +1139,23 @@ class TestUpdateFundFlowCoverageGuard:
         assert "status" not in r
 
 
+def _rebuild_records(codes: list[str]) -> list[dict]:
+    """``fetch_market_day_records`` 的真实返回形状（键是 ``symbol``，不是 ``code``）。"""
+    return [
+        {
+            "symbol": code,
+            "date": "2026-10-16",
+            "main_net_inflow": 1e8,
+            "main_net_inflow_pct": 0.05,
+            "super_large_net_inflow": 5e7,
+            "super_large_net_inflow_pct": 0.03,
+            "large_net_inflow": 5e7,
+            "large_net_inflow_pct": 0.02,
+        }
+        for code in codes
+    ]
+
+
 class TestRebuildRecordShapeMatchesWriter:
     """重建层的返回形状必须能被写库循环消费（2026-10-17 复核发现的既有缺陷）。
 
@@ -1154,22 +1171,6 @@ class TestRebuildRecordShapeMatchesWriter:
     """
 
     _CODES = [f"{i:06d}" for i in range(100)]
-
-    @staticmethod
-    def _records(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "symbol": code,
-                "date": "2026-10-16",
-                "main_net_inflow": 1e8,
-                "main_net_inflow_pct": 0.05,
-                "super_large_net_inflow": 5e7,
-                "super_large_net_inflow_pct": 0.03,
-                "large_net_inflow": 5e7,
-                "large_net_inflow_pct": 0.02,
-            }
-            for code in codes
-        ]
 
     def _run(self, rebuilt_codes: list[str]):
         universe = set(self._CODES)
@@ -1195,7 +1196,7 @@ class TestRebuildRecordShapeMatchesWriter:
         })
         with patch("daily_pipeline.logger"), patch(
             "core.fund_flow_source.fetch_market_day_records",
-            return_value=(self._records(rebuilt_codes), []),
+            return_value=(_rebuild_records(rebuilt_codes), []),
         ):
             result = daily_pipeline.update_fund_flow(db, loader)
         return result, db
@@ -1213,6 +1214,78 @@ class TestRebuildRecordShapeMatchesWriter:
         result, _ = self._run(self._CODES)
         assert result.get("status") != "degraded"
         assert result["total"] == len(self._CODES)
+
+
+class TestEmptySourceFallsBackToRebuild:
+    """聚合源返回**空表**时也必须走兜底（2026-10-17 复核）。
+
+    ``clist`` 全封时 ``loader.get_market_fund_flow()`` 返回空 DataFrame，
+    原实现在这里直接 ``return retained``，兜底代码一次都执行不到 —— 生产上
+    10-14~10-16 三天 ``fund_flow`` 全空就是这条早退造成的。
+
+    还原旧实现（空表早退）会让前两个用例变红：``save_fund_flow_batch`` 不被
+    调用，返回的是 retained 而不是写入结果。后两个是**回归守卫**（兜底失败仍
+    retained、universe 为空不盲发请求），旧实现下本来就绿，用来防止这次改动
+    把既有语义改坏。
+    """
+
+    _CODES = [f"{i:06d}" for i in range(100)]
+
+    def _run(self, *, records: list[dict] | None = None, universe: set[str] | None = None,
+             symbols: list[str] | None = None, rebuild_raises: bool = False):
+        db = MagicMock()
+        db.get_distinct_codes.return_value = (
+            set(self._CODES) if universe is None else universe
+        )
+        db.save_fund_flow_batch.side_effect = lambda rows: len(rows)
+        loader = MagicMock()
+        loader.get_market_fund_flow.return_value = pd.DataFrame()  # 源端空表
+        kwargs = {"symbols": symbols} if symbols is not None else {}
+        target = (
+            patch("core.fund_flow_source.fetch_market_day_records",
+                  side_effect=RuntimeError("push2his down"))
+            if rebuild_raises
+            else patch("core.fund_flow_source.fetch_market_day_records",
+                       return_value=(records or [], []))
+        )
+        with patch("daily_pipeline.logger"), target:
+            result = daily_pipeline.update_fund_flow(db, loader, **kwargs)
+        return result, db
+
+    def test_empty_source_triggers_rebuild_and_writes(self):
+        result, db = self._run(records=_rebuild_records(self._CODES))
+        db.save_fund_flow_batch.assert_called_once()
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert len(written) == len(self._CODES)
+        assert result["saved"] == len(self._CODES)
+        assert "status" not in result
+
+    def test_empty_source_and_failed_rebuild_stays_retained(self):
+        """兜底也拿不到数时保持原语义：retained 且一行不写。"""
+        result, db = self._run(rebuild_raises=True)
+        assert result["status"] == "retained"
+        assert result["error_kind"] == "network"
+        assert result["retained_old_data"] is True
+        db.save_fund_flow_batch.assert_not_called()
+
+    def test_empty_source_without_universe_does_not_rebuild(self):
+        """universe 取不到（表空）时不该盲发请求 —— 守卫不是新的单点故障。"""
+        result, db = self._run(universe=set())
+        assert result["status"] == "retained"
+        db.save_fund_flow_batch.assert_not_called()
+
+    def test_symbols_subset_also_falls_back(self):
+        """手动补单只（--symbols）在聚合源被封时同样要能用兜底。
+
+        入参允许带交易所后缀，过滤按裸 6 位比对 —— 否则补单只会静默写 0 行。
+        """
+        result, db = self._run(
+            records=_rebuild_records(["000001"]), symbols=["000001.SZ"]
+        )
+        db.save_fund_flow_batch.assert_called_once()
+        written = db.save_fund_flow_batch.call_args.args[0]
+        assert [row["symbol"] for row in written] == ["000001"]
+        assert result["saved"] == 1
 
 
 # ===========================================================================
