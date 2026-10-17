@@ -257,6 +257,73 @@ def test_streaks_are_sorted_by_days_then_name(conn):
     ]
 
 
+# ── 当天成功过就不该整天算 retained（2026-10-11 实录）─────────────────
+#
+# update_concept_member 在 2026-10-11 当天的时间线是
+#   02:16 success（写 73,277 行）→ 03:53 retained → 04:03 retained
+# 「当天只留最后一次裁定」把一个**确实刷过数据**的日子判成 retained，
+# 于是 09-25 / 10-08 / 10-11 / 10-12 被连成「连续 4 个运行日 retained」。
+# 该规则的本意是防止**崩溃日**（只剩 status='running' 父行）被当成
+# 「非 retained」而打断计数；把有成功记录的日子也算进去属于误伤。
+#
+# 注意 streak 只从最新一天往回数、且阈值�� 3，所以断言要按这个语义写：
+# 被 success 日打断的那一天若正好是最���天，连续段就是空的。
+
+
+def test_success_then_failure_same_day_is_not_a_retained_day(conn):
+    """红证：当天先成功后失败，不该整天计为 retained（否则高估退化程度）。
+
+    旧实现把 09-24 判成 retained，连续段 = 09-24/23/22/21 共 4 天并告警；
+    修好后 09-24 算 success，从最新一天回溯立刻中断 → 无连续段。
+    """
+    for day in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        _insert(conn, "update_sick", "retained", f"{day}T10:00:00+00:00", "network")
+    _insert(conn, "update_sick", "success", "2026-09-24T02:16:23+00:00")
+    _insert(conn, "update_sick", "retained", "2026-09-24T03:53:51+00:00", "network")
+    _insert(conn, "update_sick", "retained", "2026-09-24T04:03:04+00:00", "network")
+
+    assert retained_streaks(conn.cursor()) == []
+
+
+def test_degraded_then_failure_same_day_does_not_cover_retained(conn):
+    """对照：degraded **不是**成功，不该被当成「当天刷过」。
+
+    红证：把 degraded 也算作 success 时，本例会返回 [] 而不是 4 天连续段。
+    """
+    for day in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        _insert(conn, "update_sick", "retained", f"{day}T10:00:00+00:00", "network")
+    _insert(conn, "update_sick", "degraded", "2026-09-24T02:16:23+00:00", "data_quality")
+    _insert(conn, "update_sick", "retained", "2026-09-24T03:53:51+00:00", "network")
+
+    streaks = retained_streaks(conn.cursor())
+
+    assert [(s.task_name, s.days) for s in streaks] == [("update_sick", 4)]
+
+
+def test_streak_after_a_success_day_resumes_from_later_days(conn):
+    """成功日之后的连续 retained 仍应正常起算（成功日不产生永久豁免）。"""
+    for day in ("2026-09-21", "2026-09-22"):
+        _insert(conn, "update_sick", "retained", f"{day}T10:00:00+00:00", "network")
+    _insert(conn, "update_sick", "success", "2026-09-23T10:00:00+00:00")
+    _insert(conn, "update_sick", "retained", "2026-09-23T11:00:00+00:00", "network")
+    for day in ("2026-09-24", "2026-09-25", "2026-09-26"):
+        _insert(conn, "update_sick", "retained", f"{day}T10:00:00+00:00", "network")
+
+    streaks = retained_streaks(conn.cursor())
+
+    assert [(s.task_name, s.days) for s in streaks] == [("update_sick", 3)]
+
+
+def test_pure_retained_day_is_unaffected(conn):
+    """当天只有 retained 时行为不变（不能被新规则误伤）。"""
+    for day in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        _insert(conn, "update_sick", "retained", f"{day}T10:00:00+00:00", "network")
+
+    streaks = retained_streaks(conn.cursor())
+
+    assert [(s.task_name, s.days) for s in streaks] == [("update_sick", 3)]
+
+
 # ── 时间窗口 ──────────────────────────────────────────────────────────
 
 
