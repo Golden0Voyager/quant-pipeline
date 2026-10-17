@@ -39,7 +39,9 @@ class TestSnapshotToBarRecords:
         assert rec["close"] == 10.5
         assert rec["high"] == 10.6
         assert rec["low"] == 9.9
-        assert rec["volume"] == 100000.0
+        # 东财 spot 的「成交量」以手返回，映射时已 ×100 归一为「股」
+        # （与 quant_hunter.data_loader.normalize_volume_to_shares 同口径）
+        assert rec["volume"] == 10000000.0
         assert rec["amount"] == 1.03e8
         assert rec["turnover_rate"] == 0.52
         assert rec["pct_change"] == 2.94
