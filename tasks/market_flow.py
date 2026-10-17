@@ -161,70 +161,102 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
 
     try:
         df = loader.get_market_fund_flow()
+
+        # 空表不在这里收工：clist 全封时 loader 返回的就是空表，而东财逐票重建
+        # 恰恰是这种时刻唯一可能拿到数的路径。原实现把 retained/skipped 写在这
+        # 条早退上，于是兜底代码一次都执行不到（2026-10-17 复核：10-14~10-16
+        # 三天 fund_flow 全空，走的正是这条早退）。先把「空表」的结论备好，
+        # 只有在兜底也拿不到数时才用它。
+        empty_verdict: dict | None = None
         if df.empty:
             logger.warning("⚠️  未获取到资金流向数据")
             verdict = check_task_freshness(df, date_field=None, expected=today)
             if verdict.is_stale:
                 logger.warning(f"⚠️  资金流向源端空数据：{verdict.reason}")
-                return {
+                empty_verdict = {
                     "status": "retained",
                     "reason": verdict.reason,
                     "error_kind": "network",
                     "retained_old_data": True,
                     "total": 0,
                 }
-            return {"skipped": True, "reason": "no market fund flow data", "total": 0}
+            else:
+                empty_verdict = {
+                    "skipped": True,
+                    "reason": "no market fund flow data",
+                    "total": 0,
+                }
+
+        # universe 有两个用途：覆盖度守卫（**只对全市场运行**）与兜底的取数范围。
+        # --symbols 子集运行不判覆盖度（对全市场覆盖率没有意义），但兜底仍要知道
+        # 该抓哪些票 —— 手动补单只时同样需要能绕开被封的聚合源。
+        universe: set[str] = set()
+        guarded = False
+        if symbols:
+            universe = {_bare_code(s) for s in symbols}
+        else:
+            universe = _fund_flow_universe(db)
+            guarded = bool(universe)
+
+        covered, missing = _fund_flow_coverage(universe, df) if guarded else (0, 0)
 
         # 字段有效率先于覆盖度判定：源端契约变了（列名/加前缀）时，覆盖度仍可能
         # 高达 95%，守卫一声不吭，而下面每行都会被「六字段全空则跳过」丢弃。
         # 这一层专门拦「有行、但一行都写不进去」的形态，并把源端实际列名带进
         # 报错——否则运维只能看到一句 zero rows without explanation。
-        contract_break = _fund_flow_contract_break(df)
-        if contract_break:
-            logger.error(f"❌ {contract_break}")
-            return {
-                "status": "failed",
-                "error_kind": "data_quality",
-                "error": contract_break,
-                "saved": 0,
-                "total": len(df),
-                "metadata": {
-                    "source_columns": [str(c) for c in df.columns][:12],
-                    "rows": len(df),
-                    "field_validity_pct": 0.0,
-                },
-            }
+        # 空表不走这一层：那是「源端没给」，由上面的 empty_verdict 表达。
+        if not df.empty:
+            contract_break = _fund_flow_contract_break(df)
+            if contract_break:
+                logger.error(f"❌ {contract_break}")
+                return {
+                    "status": "failed",
+                    "error_kind": "data_quality",
+                    "error": contract_break,
+                    "saved": 0,
+                    "total": len(df),
+                    "metadata": {
+                        "source_columns": [str(c) for c in df.columns][:12],
+                        "rows": len(df),
+                        "field_validity_pct": 0.0,
+                    },
+                }
 
         # 覆盖度在写库前判定：它描述的是「源端给全了没有」，与写入无关。
         # --symbols 是子集运行，对全市场覆盖率没有意义，跳过（否则每次
         # 子集运行都会误报塌陷）。
-        universe: set[str] = set()
-        if not symbols:
-            universe = _fund_flow_universe(db)
-            covered, missing = _fund_flow_coverage(universe, df)
-            if universe and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR:
-                logger.warning(
-                    f"⚠️ 聚合源覆盖不足（{covered}/{len(universe)} = "
-                    f"{covered / len(universe):.1%}），改用东财逐票重建 {today}"
+        short_of_floor = guarded and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR
+        if df.empty or short_of_floor:
+            if df.empty:
+                reason = f"聚合源返回空表（{len(universe)} 只待取）"
+            else:
+                reason = (
+                    f"聚合源覆盖不足（{covered}/{len(universe)} = "
+                    f"{covered / len(universe):.1%}）"
                 )
-                rebuilt = _rebuild_market_day(universe, today)
-                if rebuilt is not None:
-                    df = rebuilt
+            logger.warning(f"⚠️ {reason}，改用东财逐票重建 {today}")
+            rebuilt = _rebuild_market_day(universe, today) if universe else None
+            if rebuilt is not None:
+                df = rebuilt
+                if guarded:
                     covered, missing = _fund_flow_coverage(universe, df)
-                else:
-                    logger.error(
-                        "❌ 东财逐票重建失败：不写入任何资金流数据"
-                        "（保留旧数据，不写入口径不一致的兜底数据）"
-                    )
-                    return {
-                        "status": "retained",
-                        "reason": (
-                            f"聚合源覆盖 {covered}/{len(universe)} 且东财逐票重建失败"
-                        ),
-                        "error_kind": "network",
-                        "retained_old_data": True,
-                        "total": 0,
-                    }
+            elif empty_verdict is not None:
+                # 兜底也拿不到数：保持原语义（retained/skipped），一行不写
+                return empty_verdict
+            else:
+                logger.error(
+                    "❌ 东财逐票重建失败：不写入任何资金流数据"
+                    "（保留旧数据，不写入口径不一致的兜底数据）"
+                )
+                return {
+                    "status": "retained",
+                    "reason": (
+                        f"聚合源覆盖 {covered}/{len(universe)} 且东财逐票重建失败"
+                    ),
+                    "error_kind": "network",
+                    "retained_old_data": True,
+                    "total": 0,
+                }
 
         batch_records = []
         for _, row in df.iterrows():
@@ -254,7 +286,9 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
                 continue
 
         if symbols:
-            symbol_set = set(symbols)
+            # 与 universe 同一套归一：'600000.SH' 这类带后缀的入参若按原样比对，
+            # 过滤后恒为空集（源端与重建结果给的都是裸 6 位）。
+            symbol_set = {_bare_code(s) for s in symbols}
             before = len(batch_records)
             batch_records = [r for r in batch_records if r["symbol"] in symbol_set]
             logger.info(f"  --symbols 过滤：{len(batch_records)}/{before} 只")
@@ -268,7 +302,9 @@ def update_fund_flow(db: DatabaseInterface, loader: DataLoaderInterface, symbols
         # 审计，连续多日也无人发现（与 P2-12 的 market_snapshot 同型）。
         # degraded 而非 failed：failed 在 to_dict 里丢 saved，审计会把一次
         # 几千行的写入误读成「一行都没写」。
-        if universe and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR:
+        # 只有全市场运行（guarded）才判覆盖度：--symbols 子集运行拿 symbols
+        # 当 universe，若在这里判就会把每次补单只都报成 degraded。
+        if guarded and covered / len(universe) < _FUND_FLOW_COVERAGE_FLOOR:
             pct = covered / len(universe)
             result.update({
                 "status": "degraded",
